@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "subscription-agent-scheduler"
+version = "0.1.0"
+description = "A deterministic, subscription-aware coding agent scheduler"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "PyYAML>=6.0.2,<7",
+  "typer>=0.16,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.17,<2",
+  "pytest>=9.0.3,<10",
+  "pytest-cov>=6.2,<8",
+  "ruff>=0.12,<1",
+  "types-PyYAML>=6.0.12",
+]
+
+[project.scripts]
+subsched = "subsched.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/subsched"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["subsched"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["subsched"]

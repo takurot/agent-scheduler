@@ -1,0 +1,18 @@
+github:
+  repo: owner/project
+  include_labels:
+    - ai-ready
+  exclude_labels:
+    - blocked
+    - human-only
+    - security-sensitive
+
+execution:
+  concurrency: 1
+  max_agent_switches: 6
+  max_tasks_per_run: 50
+
+billing:
+  api_fallback: false
+  metered_usage: false
+  unknown_mode: disable
