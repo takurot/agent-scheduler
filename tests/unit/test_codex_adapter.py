@@ -58,6 +58,30 @@ def test_success_fixture_normalizes_to_shared_agent_result() -> None:
     assert result.output == "codex completed"
 
 
+def test_replays_sanitized_live_success_fixture() -> None:
+    result = parse_codex_jsonl(_fixture("live-success.jsonl"), returncode=0)
+
+    assert result.kind is AgentResultKind.PASS
+    assert result.output == "codex completed"
+
+
+def test_saved_cli_metadata_records_required_live_flags() -> None:
+    version = _fixture("cli-version.txt")
+    help_output = _fixture("cli-exec-help.txt")
+
+    assert version == "codex-cli 0.147.0\n"
+    for flag in (
+        "--json",
+        "--output-schema",
+        "--sandbox",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--strict-config",
+    ):
+        assert flag in help_output
+
+
 @pytest.mark.parametrize(
     ("fixture", "kind", "output"),
     [

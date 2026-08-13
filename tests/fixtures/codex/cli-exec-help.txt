@@ -1,0 +1,11 @@
+Run Codex non-interactively
+
+Relevant observed options:
+  --strict-config
+  -s, --sandbox <SANDBOX_MODE>
+  -C, --cd <DIR>
+  --ephemeral
+  --ignore-user-config
+  --ignore-rules
+  --output-schema <FILE>
+  --json
