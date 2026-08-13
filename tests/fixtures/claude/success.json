@@ -1,0 +1,9 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "duration_ms": 842,
+  "num_turns": 1,
+  "result": "fixture response",
+  "session_id": "00000000-0000-4000-8000-000000000005"
+}

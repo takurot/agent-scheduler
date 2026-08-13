@@ -1,0 +1,10 @@
+Usage: claude [options] [command] [prompt]
+
+Options:
+  --dangerously-skip-permissions        Bypass all permission checks.
+  --json-schema <schema>                JSON Schema for structured output validation.
+  --no-session-persistence              Disable session persistence (only works with --print)
+  --output-format <format>              "text", "json", or "stream-json"
+  --permission-mode <mode>              choices: acceptEdits, auto, bypassPermissions, manual, dontAsk, plan
+  -p, --print                           Print response and exit
+  --strict-mcp-config                   Ignore all other MCP configurations
