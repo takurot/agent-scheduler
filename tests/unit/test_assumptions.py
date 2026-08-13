@@ -110,6 +110,15 @@ def test_redaction_removes_claude_positional_prompt_body() -> None:
     )
 
 
+def test_redaction_preserves_model_value_before_claude_positional_prompt() -> None:
+    assert redact_argv(("claude", "--model", "sonnet", "private prompt body")) == (
+        "claude",
+        "--model",
+        "sonnet",
+        "[REDACTED]",
+    )
+
+
 @pytest.mark.parametrize(
     "flag",
     ("--system-prompt", "--append-system-prompt"),
@@ -187,13 +196,25 @@ def test_live_probe_rejects_commands_outside_safe_probe_allowlist() -> None:
         run_live_probe(("gh", "issue", "delete", "1"), allow_live=True)
 
 
-def test_live_probe_wraps_subprocess_failures() -> None:
+def test_live_probe_wraps_subprocess_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("subsched.assumptions.shutil.which", lambda _: None)
+    executable = tmp_path / "gh"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
+
     def failed_run(
         argv: tuple[str, ...], **_: object
     ) -> subprocess.CompletedProcess[str]:
         raise OSError("private process detail")
 
     with pytest.raises(AssumptionManifestError, match="could not be executed") as error:
-        run_live_probe(("gh", "version"), allow_live=True, run=failed_run)
+        run_live_probe(
+            ("gh", "version"),
+            allow_live=True,
+            run=failed_run,
+            executable_paths={"gh": executable},
+        )
 
     assert "private process detail" not in str(error.value)

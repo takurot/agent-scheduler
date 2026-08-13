@@ -42,6 +42,7 @@ SENSITIVE_FLAGS = frozenset(
         "-p",
     }
 )
+NON_PROMPT_VALUE_FLAGS = frozenset({"--model"})
 ALLOWED_LIVE_PROBES = frozenset(
     {
         ("claude", "--version"),
@@ -146,6 +147,7 @@ def redact_argv(
     roots = _personal_roots(personal_roots)
     redacted: list[str] = []
     redact_next = False
+    preserve_next = False
     positional_prompt_start = None
     if argv and argv[0] == "claude":
         positional_prompt_start = 1
@@ -159,6 +161,10 @@ def redact_argv(
             redacted.append(REDACTED)
             redact_next = False
             continue
+        if preserve_next:
+            preserve_next = False
+            redacted.append(_redact_argument(value, roots))
+            continue
         flag, separator, _ = value.partition("=")
         if flag.casefold() in SENSITIVE_FLAGS:
             if separator:
@@ -166,6 +172,10 @@ def redact_argv(
             else:
                 redacted.append(value)
                 redact_next = True
+            continue
+        if flag.casefold() in NON_PROMPT_VALUE_FLAGS and not separator:
+            redacted.append(value)
+            preserve_next = True
             continue
         if value == "--":
             redacted.append(value)
