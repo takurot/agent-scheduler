@@ -6,7 +6,7 @@ Observed on 2026-08-12. These checks do not establish permanent provider contrac
 | --- | --- | --- |
 | Python | Python 3.12 is installed through Homebrew and selected by `uv` | Supported |
 | GitHub CLI | `gh` is installed; structured issue JSON is supported | Adapter implemented, mocked in tests |
-| Claude Code | CLI is installed; headless/structured options require a controlled live spike | Native worker disabled |
+| Claude Code | Non-live CLI metadata and replay parser are recorded in [`claude-code.md`](claude-code.md); live behavior remains gated | Native worker disabled |
 | Codex CLI | CLI is installed; `codex exec` requires a controlled live spike | Native worker disabled |
 | Bernstein | Not installed and compatibility B1-B4 is unverified | Not a runtime dependency |
 | ccusage | Not installed; local usage is not provider capacity ground truth | Not used for admission control |

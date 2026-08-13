@@ -1,0 +1,8 @@
+{
+  "type": "result",
+  "subtype": "error_during_execution",
+  "is_error": true,
+  "num_turns": 1,
+  "result": "Weekly usage limit reached.",
+  "reset_at": "2026-08-17T09:00:00+09:00"
+}
