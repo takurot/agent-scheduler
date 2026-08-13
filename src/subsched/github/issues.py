@@ -59,11 +59,15 @@ def diagnose_token(run: RunCommand | None = None) -> TokenDiagnosis:
     try:
         payload: Any = json.loads(result.stdout)
         hosts = payload.get("hosts", payload)
-        accounts = next(iter(hosts.values()))
-        active = next(account for account in accounts if account.get("active"))
+        active = next(
+            account
+            for accounts in hosts.values()
+            for account in accounts
+            if account.get("active")
+        )
         raw_scopes = str(active.get("scopes") or "")
         scopes = tuple(sorted(item.strip() for item in raw_scopes.split(",") if item.strip()))
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError, StopIteration, AttributeError):
+    except (KeyError, TypeError, ValueError, StopIteration, AttributeError):
         return TokenDiagnosis(
             authenticated=False, scopes=(), can_discover=False, can_write=False, broad_scopes=()
         )

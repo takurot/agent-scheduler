@@ -129,7 +129,9 @@ def test_doctor_reports_no_warning_for_minimal_scope(
     assert "broader than required" not in result.output.lower()
 
 
-def test_doctor_reports_unauthenticated_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_doctor_reports_unauthenticated_gh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import shutil
 
     monkeypatch.setattr(shutil, "which", lambda command: f"/usr/bin/{command}")

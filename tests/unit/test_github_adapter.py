@@ -141,6 +141,21 @@ def test_diagnose_token_read_only_scope_reports_no_write() -> None:
     assert diagnosis.broad_scopes == ()
 
 
+def test_diagnose_token_finds_active_account_on_non_first_host() -> None:
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        payload = (
+            '{"github.enterprise.example":[{"active":false,"scopes":"repo"}],'
+            '"github.com":[{"active":true,"scopes":"read:org"}]}'
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
+
+    diagnosis = diagnose_token(run=fake_run)
+
+    assert diagnosis.authenticated is True
+    assert diagnosis.scopes == ("read:org",)
+    assert diagnosis.can_write is False
+
+
 def test_diagnose_token_fails_closed_when_unauthenticated() -> None:
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not logged in")
