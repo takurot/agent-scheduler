@@ -9,7 +9,7 @@ from typing import Annotated
 import typer
 
 from subsched.config import ConfigError, validate_repo
-from subsched.github.issues import GitHubCliError, GitHubIssueSource
+from subsched.github.issues import GitHubCliError, GitHubIssueSource, diagnose_token
 from subsched.models import Task, TaskState
 from subsched.storage import JsonStateStore, StateCorruptionError
 
@@ -153,11 +153,26 @@ def cancel(ctx: typer.Context, issue: Annotated[int, typer.Argument(min=1)]) -> 
 
 @app.command()
 def doctor() -> None:
-    """Check required local executables without using credentials or capacity."""
+    """Check required local executables and warn on an overly broad `gh` token scope.
+
+    Reads the locally cached `gh` auth state to report token scopes; never prints the token
+    value and never invokes Claude or Codex, so no Agent capacity is consumed.
+    """
     commands = ("git", "gh", "claude", "codex")
     missing = tuple(command for command in commands if shutil.which(command) is None)
     for command in commands:
         typer.echo(f"{command:<8} {'FOUND' if command not in missing else 'MISSING'}")
+    if "gh" not in missing:
+        diagnosis = diagnose_token()
+        if diagnosis.authenticated:
+            typer.echo(f"gh token scopes: {', '.join(diagnosis.scopes) or '(none)'}")
+            if diagnosis.broad_scopes:
+                typer.echo(
+                    "gh token scope is broader than required for read-only issue discovery: "
+                    f"{', '.join(diagnosis.broad_scopes)}"
+                )
+        else:
+            typer.echo("gh token scope could not be determined (not authenticated)")
     if missing:
         raise typer.Exit(1)
     typer.echo("Native workers remain disabled until Phase 2 assumptions are validated")

@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,63 @@ def test_excluded_issue_is_not_persisted(tmp_path: Path, monkeypatch: pytest.Mon
 
     assert result.exit_code == 0
     assert "0 issue(s) discovered" in result.output
+
+
+def test_doctor_warns_on_broad_token_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda command: f"/usr/bin/{command}")
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        payload = (
+            '{"github.com":[{"active":true,"scopes":"repo, workflow","state":"success"}]}'
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = invoke(tmp_path, "doctor")
+
+    assert "repo" in result.output
+    assert "workflow" in result.output
+    assert "broader than required" in result.output.lower()
+    assert "gho_" not in result.output
+    assert "token=" not in result.output.lower()
+
+
+def test_doctor_reports_no_warning_for_minimal_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda command: f"/usr/bin/{command}")
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        payload = '{"github.com":[{"active":true,"scopes":"","state":"success"}]}'
+        return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = invoke(tmp_path, "doctor")
+
+    assert "broader than required" not in result.output.lower()
+
+
+def test_doctor_reports_unauthenticated_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda command: f"/usr/bin/{command}")
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not logged in")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = invoke(tmp_path, "doctor")
+
+    assert "not authenticated" in result.output
 
 
 def test_cli_enforces_task_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
