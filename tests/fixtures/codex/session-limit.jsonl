@@ -1,0 +1,2 @@
+{"type":"thread.started","thread_id":"fixture-thread"}
+{"type":"turn.failed","error":{"message":"You have hit the session rate limit","reset_at":"2026-08-13T02:00:00Z"}}

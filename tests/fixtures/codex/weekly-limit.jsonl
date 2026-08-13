@@ -1,0 +1,2 @@
+{"type":"thread.started","thread_id":"fixture-thread"}
+{"type":"turn.failed","error":{"message":"Weekly usage limit reached","reset_at":"2026-08-20T00:00:00Z"}}
