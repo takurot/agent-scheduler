@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import signal
+import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -13,10 +17,13 @@ MAX_RESULT_BYTES = 1_000_000
 REQUIRED_HEADLESS_FLAGS = frozenset(
     {
         "--print",
+        "--json-schema",
         "--output-format",
         "--permission-mode",
+        "--safe-mode",
         "--no-session-persistence",
         "--strict-mcp-config",
+        "--tools",
     }
 )
 
@@ -43,6 +50,8 @@ class ClaudeCliMetadata:
     supports_max_turns: bool
     requires_scheduler_timeout: bool
     dangerous_permission_bypass_available: bool
+    permission_mode_is_os_sandbox: bool
+    native_execution_allowed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,13 +60,19 @@ class ClaudeProcessOutcome:
     stdout: str
     stderr: str = ""
     timed_out: bool = False
-    cleanup_succeeded: bool = True
+    cleanup_succeeded: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ClaudeExecutionPolicy:
     live_probe_opt_in: bool
     billing_mode: ClaudeBillingMode
+
+    def __post_init__(self) -> None:
+        if type(self.live_probe_opt_in) is not bool:
+            raise TypeError("live probe opt-in must be a boolean")
+        if not isinstance(self.billing_mode, ClaudeBillingMode):
+            raise TypeError("billing mode must be a ClaudeBillingMode")
 
     @property
     def worker_state(self) -> CapacityState:
@@ -93,20 +108,26 @@ def parse_claude_cli_metadata(*, version_output: str, help_output: str) -> Claud
     missing = sorted(flag for flag in REQUIRED_HEADLESS_FLAGS if flag not in help_output)
     if missing:
         raise ClaudeCliMetadataError("required Claude CLI flags are missing")
+    supports_json_output = '"json"' in help_output
+    supports_permission_mode = "dontAsk" in help_output
+    if not supports_json_output or not supports_permission_mode:
+        raise ClaudeCliMetadataError("required Claude CLI capabilities are missing")
     supports_max_turns = "--max-turns" in help_output
     return ClaudeCliMetadata(
         version=version_match.group(1),
-        supports_json_output='"json"' in help_output,
-        supports_permission_mode="dontAsk" in help_output,
+        supports_json_output=supports_json_output,
+        supports_permission_mode=supports_permission_mode,
         supports_max_turns=supports_max_turns,
         requires_scheduler_timeout=not supports_max_turns,
         dangerous_permission_bypass_available="--dangerously-skip-permissions" in help_output,
+        permission_mode_is_os_sandbox=False,
+        native_execution_allowed=False,
     )
 
 
 def parse_claude_result(outcome: ClaudeProcessOutcome) -> AgentResult:
     if outcome.timed_out:
-        if not outcome.cleanup_succeeded:
+        if outcome.cleanup_succeeded is not True:
             return AgentResult(
                 AgentResultKind.PROCESS_CLEANUP_FAILED,
                 output="claude process-group cleanup failed",
@@ -116,6 +137,10 @@ def parse_claude_result(outcome: ClaudeProcessOutcome) -> AgentResult:
     payload = _load_payload(outcome.stdout)
     if payload is not None and _is_success(payload, outcome.exit_code):
         return AgentResult(AgentResultKind.PASS, output="claude completed")
+    if outcome.stdout and (payload is None or not _is_known_result(payload)):
+        return AgentResult(AgentResultKind.UNKNOWN, output="claude result unknown")
+    if payload is not None and (payload.get("subtype") == "success" or outcome.exit_code == 0):
+        return AgentResult(AgentResultKind.UNKNOWN, output="claude result unknown")
 
     message = _failure_message(payload, outcome.stderr)
     lower_message = message.casefold()
@@ -148,33 +173,143 @@ def _load_payload(stdout: str) -> dict[str, Any] | None:
     if not stdout or encoded_size > MAX_RESULT_BYTES:
         return None
     try:
-        value = json.loads(stdout)
+        value: Any = json.loads(stdout)
+    except json.JSONDecodeError:
+        return _load_jsonl_terminal(stdout)
+    except UnicodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _load_jsonl_terminal(stdout: str) -> dict[str, Any] | None:
+    lines = tuple(line for line in stdout.splitlines() if line.strip())
+    if not lines:
+        return None
+    events: list[dict[str, Any]] = []
+    try:
+        for line in lines:
+            value: Any = json.loads(line)
+            if not isinstance(value, dict) or not _is_known_stream_event(value):
+                return None
+            events.append(value)
     except (json.JSONDecodeError, UnicodeError):
         return None
-    if not isinstance(value, dict):
+    if events[-1].get("type") != "result":
         return None
-    return value
+    if any(event.get("type") == "result" for event in events[:-1]):
+        return None
+    return events[-1]
+
+
+def _is_known_stream_event(event: dict[str, Any]) -> bool:
+    event_type = event.get("type")
+    if event_type == "system":
+        return event.get("subtype") == "init"
+    if event_type == "assistant":
+        message = event.get("message")
+        return isinstance(message, dict) and isinstance(message.get("content"), list)
+    if event_type == "result":
+        return _is_known_result(event)
+    return False
+
+
+def _is_known_result(payload: dict[str, Any]) -> bool:
+    subtype = payload.get("subtype")
+    has_known_shape = (
+        payload.get("type") == "result"
+        and subtype
+        in {
+            "success",
+            "error_during_execution",
+            "error_max_turns",
+            "error_max_budget_usd",
+            "error_max_structured_output_retries",
+        }
+        and type(payload.get("is_error")) is bool
+        and type(payload.get("num_turns")) is int
+        and payload["num_turns"] >= 0
+    )
+    if not has_known_shape:
+        return False
+    return (subtype == "success") is (payload["is_error"] is False)
 
 
 def _is_success(payload: dict[str, Any], exit_code: int) -> bool:
-    has_output = isinstance(payload.get("result"), str) or "structured_output" in payload
+    has_output = isinstance(payload.get("result"), str) or isinstance(
+        payload.get("structured_output"), dict
+    )
     return (
-        exit_code == 0
+        _is_known_result(payload)
+        and exit_code == 0
         and payload.get("type") == "result"
         and payload.get("subtype") == "success"
         and payload.get("is_error") is False
         and has_output
-        and isinstance(payload.get("num_turns"), int)
-        and payload["num_turns"] >= 0
     )
 
 
 def _is_structured_failure(payload: dict[str, Any]) -> bool:
     return (
-        payload.get("type") == "result"
+        _is_known_result(payload)
+        and payload.get("subtype") != "success"
         and payload.get("is_error") is True
         and isinstance(payload.get("result"), str)
     )
+
+
+def cleanup_claude_process_group(process: subprocess.Popen[str], grace_seconds: float) -> bool:
+    """Terminate and reap an isolated fake/native CLI process group within bounded waits."""
+    if grace_seconds <= 0 or process.pid <= 0:
+        return False
+    try:
+        if os.getpgid(process.pid) != process.pid:
+            return False
+    except OSError:
+        return _bounded_reap(process, grace_seconds)
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return _bounded_reap(process, grace_seconds)
+    except OSError:
+        return False
+    try:
+        process.communicate(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        pass
+    except OSError:
+        return False
+    else:
+        if _wait_process_group_gone(process.pid, grace_seconds):
+            return True
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        return False
+    return _bounded_reap(process, grace_seconds)
+
+
+def _bounded_reap(process: subprocess.Popen[str], timeout_seconds: float) -> bool:
+    try:
+        process.communicate(timeout=timeout_seconds)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
+def _wait_process_group_gone(process_group: int, timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.01, timeout_seconds))
 
 
 def _failure_message(payload: dict[str, Any] | None, stderr: str) -> str:

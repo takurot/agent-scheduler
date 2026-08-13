@@ -3,10 +3,11 @@
 Observed on 2026-08-13 with Claude Code `2.1.229`. Provider behavior is an external dependency;
 these observations are not a permanent compatibility guarantee.
 
-## Safe local metadata observation
+## Initial safe local metadata observation
 
-Only `claude --version` and `claude --help` were executed. No prompt, authentication probe, remote
-request, or provider-capacity probe was run.
+The spike began by executing only `claude --version` and `claude --help`. No prompt or remote
+request was made during this initial metadata step; the separately authorized observations are
+recorded below.
 
 - `--print` supports non-interactive execution.
 - `--output-format` advertises `json` and `stream-json`.
@@ -30,7 +31,7 @@ machine paths and contain no credentials.
 `subsched.agents.claude.parse_claude_result` accepts a bounded captured process outcome and
 normalizes it to `AgentResult`. Tests replay deterministic, sanitized JSON/text fixtures for:
 
-- ordinary and schema-structured success
+- ordinary JSON, JSONL (`stream-json`), and schema-structured success
 - session, weekly, and temporary capacity failures
 - authentication, billing, permission, generic execution, and unknown failures
 - Scheduler timeout and process-group cleanup failure
@@ -38,9 +39,10 @@ normalizes it to `AgentResult`. Tests replay deterministic, sanitized JSON/text 
 Raw Agent output is not copied into the normalized result. Invalid JSON, unknown schemas, and a
 capacity response without a timezone-aware reset timestamp are classified as `UNKNOWN`.
 
-The success and failure JSON files are contract fixtures, not evidence from a live subscription
-call. Their schema and classification must be revalidated in a controlled live acceptance run
-before enabling a native worker.
+The committed fixtures are sanitized replay contracts. JSON structured success was revalidated in
+a controlled subscription call. JSONL, capacity, authentication, billing, permission denial, and
+generic failure fixtures remain synthetic so error conditions are not deliberately induced against
+the provider.
 
 ## Billing and live acceptance gate
 
@@ -67,10 +69,26 @@ response was deleted with the temporary directory. Session/UUID, usage, cost, mo
 terminal reason, provider text, prompt, and personal paths were not retained. The one-call
 authorization was respected and no automatic retry occurred.
 
-Still unverified because the authorized call did not succeed:
+After separate authorization, one retry-free rerun used the same first-party Pro, isolation,
+no-tools, MCP, persistence, schema, and timeout controls. It completed in 4,839 ms with exit code
+`0`, `type=result`, `subtype=success`, `is_error=false`, `terminal_reason=completed`, no API error or
+permission denial, and structured output `{"status":"ok"}`. The sanitized diagnostic files used
+for analysis were later deleted at the user's request; raw stdout/stderr were never persisted.
 
-- actual successful JSON emitted by the authenticated subscription
+## Permission, sandbox, and timeout boundary
+
+The installed CLI advertises permission mode, safe mode, and the ability to disable tools, but no
+verified OS sandbox interface. Permission mode is therefore explicitly not treated as an OS
+sandbox, and `native_execution_allowed` remains false. Permission-denial parsing is replayed with a
+synthetic structured fixture rather than provoking a live tool call.
+
+A local fake CLI spawns a descendant, ignores SIGTERM in both processes, and verifies the bounded
+process-group cleanup helper escalates to SIGKILL and reaps the group. Cleanup confirmation defaults
+to unknown; only an explicit successful cleanup result normalizes to an ordinary Scheduler timeout.
+
+Still unverified against the live provider by design:
+
 - provider capacity and reset-time messages
 - authentication and billing failure text/schema
-- tool permission behavior within the intended OS sandbox
-- real timeout signal handling and descendant-process cleanup
+- tool permission behavior inside a future verified OS sandbox
+- provider-specific behavior during a real timeout (local signal/descendant cleanup is verified)

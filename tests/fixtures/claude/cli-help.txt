@@ -7,4 +7,6 @@ Options:
   --output-format <format>              "text", "json", or "stream-json"
   --permission-mode <mode>              choices: acceptEdits, auto, bypassPermissions, manual, dontAsk, plan
   -p, --print                           Print response and exit
+  --safe-mode                           Enable safe mode
   --strict-mcp-config                   Ignore all other MCP configurations
+  --tools <tools...>                    Specify available tools; pass an empty value to disable all

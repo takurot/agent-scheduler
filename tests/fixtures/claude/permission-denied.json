@@ -3,5 +3,6 @@
   "subtype": "error_during_execution",
   "is_error": true,
   "num_turns": 1,
-  "result": "Tool execution failed."
+  "result": "Permission denied for tool Bash.",
+  "permission_denials": [{"tool_name": "Bash"}]
 }
