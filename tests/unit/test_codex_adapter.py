@@ -496,7 +496,12 @@ def test_timeout_cleanup_wait_error_fails_closed(
     executable.chmod(0o700)
     schema = tmp_path / "schema.json"
     schema.write_text("{}", encoding="utf-8")
-    config = CodexProbeConfig(executable=executable, cwd=tmp_path, output_schema=schema)
+    config = CodexProbeConfig(
+        executable=executable,
+        cwd=tmp_path,
+        output_schema=schema,
+        terminate_grace_seconds=0.1,
+    )
     process = _ReapErrorProcess()
 
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
