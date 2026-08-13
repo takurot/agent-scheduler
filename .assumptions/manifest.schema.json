@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/takurot/agent-scheduler/.assumptions/manifest.schema.json",
+  "title": "Subscription Scheduler assumption manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "date", "records"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "date": {"type": "string", "format": "date"},
+    "records": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "cli_name",
+          "cli_version",
+          "argv",
+          "timestamp",
+          "exit_code",
+          "schema_hash",
+          "decision",
+          "verified"
+        ],
+        "properties": {
+          "cli_name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+          "cli_version": {"type": "string", "minLength": 1, "maxLength": 256},
+          "argv": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "timestamp": {"type": "string", "format": "date-time"},
+          "exit_code": {"type": "integer"},
+          "schema_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "decision": {"enum": ["PASS", "FAIL", "UNKNOWN"]},
+          "verified": {"type": "boolean"}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"decision": {"const": "PASS"}}},
+            "then": {"properties": {"verified": {"const": true}}}
+          }
+        ]
+      }
+    }
+  }
+}
