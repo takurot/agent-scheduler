@@ -296,17 +296,6 @@ def run_codex_probe(
         if not cleaned_up:
             return AgentResult(AgentResultKind.FAILURE, output="codex timeout cleanup failed")
         return AgentResult(AgentResultKind.FAILURE, output="codex execution timed out")
-    writer.join(timeout=config.terminate_grace_seconds)
-    if writer.is_alive():
-        _stop_process_group(process, config.terminate_grace_seconds)
-        return AgentResult(AgentResultKind.FAILURE, output="codex input cleanup failed")
-    try:
-        input_failed = input_queue.get_nowait()
-    except queue.Empty:
-        input_failed = True
-    if input_failed:
-        _stop_process_group(process, config.terminate_grace_seconds)
-        return AgentResult(AgentResultKind.FAILURE, output="codex process unavailable")
     reader.join(timeout=config.terminate_grace_seconds)
     if reader.is_alive():
         _stop_process_group(process, config.terminate_grace_seconds)
@@ -320,6 +309,17 @@ def run_codex_probe(
         return AgentResult(AgentResultKind.FAILURE, output="codex output limit exceeded")
     if read_failed:
         return AgentResult(AgentResultKind.FAILURE, output="codex output unavailable")
+    writer.join(timeout=config.terminate_grace_seconds)
+    if writer.is_alive():
+        _stop_process_group(process, config.terminate_grace_seconds)
+        return AgentResult(AgentResultKind.FAILURE, output="codex input cleanup failed")
+    try:
+        input_failed = input_queue.get_nowait()
+    except queue.Empty:
+        input_failed = True
+    if input_failed:
+        _stop_process_group(process, config.terminate_grace_seconds)
+        return AgentResult(AgentResultKind.FAILURE, output="codex process unavailable")
     try:
         payload = stdout.decode("utf-8")
     except UnicodeDecodeError:
