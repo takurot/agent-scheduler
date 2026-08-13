@@ -26,7 +26,8 @@ checked; a `PASS` with `verified: false` is invalid. Missing or unrecognized evi
 
 Before persistence, values following token, credential, password, API-key, prompt, and prompt-file
 flags are replaced with `[REDACTED]`. Personal absolute paths are replaced with
-`[REDACTED_PATH]`. Prompt bodies and raw provider output are not fields in the manifest.
+`[REDACTED_PATH]`. Claude and Codex exec positional prompt bodies are also replaced with
+`[REDACTED]`. Prompt bodies and raw provider output are not fields in the manifest.
 
 Live probes require the caller to pass an explicit opt-in to `run_live_probe`. The helper accepts
 only the allowlisted Phase 0 CLIs, uses an empty environment, a fixed timeout, captured output, and

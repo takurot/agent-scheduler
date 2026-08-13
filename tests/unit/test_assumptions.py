@@ -103,6 +103,19 @@ def test_redaction_removes_codex_positional_prompt_body() -> None:
     )
 
 
+def test_redaction_removes_claude_positional_prompt_body() -> None:
+    assert redact_argv(("claude", "private prompt body")) == (
+        "claude",
+        "[REDACTED]",
+    )
+
+
+def test_redaction_removes_foreign_personal_path() -> None:
+    assert redact_argv(
+        ("gh", "--config=/Users/example/private/config.yml"), personal_roots=()
+    ) == ("gh", "[REDACTED_PATH]")
+
+
 def test_live_probe_requires_explicit_opt_in() -> None:
     called = False
 

@@ -67,6 +67,10 @@ SECRET_PATTERN = re.compile(
     r"(?i)(?:github_pat_[a-z0-9_]+|gh[pousr]_[a-z0-9_]{10,}|sk-[a-z0-9_-]{20,}|"
     r"xox[baprs]-[a-z0-9-]{10,}|bearer\s+[a-z0-9._~-]+)"
 )
+PERSONAL_PATH_PATTERN = re.compile(
+    r"(?i)(?:/users/[^/\s]+(?:/|$)|/home/[^/\s]+(?:/|$)|"
+    r"[a-z]:[\\/](?:users|documents and settings)[\\/][^\\/\s]+)"
+)
 
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
@@ -125,7 +129,7 @@ def _personal_roots(roots: Sequence[Path] | None) -> tuple[Path, ...]:
 def _redact_argument(value: str, roots: tuple[Path, ...]) -> str:
     if SECRET_PATTERN.search(value):
         return REDACTED
-    if any(str(root) in value for root in roots):
+    if PERSONAL_PATH_PATTERN.search(value) or any(str(root) in value for root in roots):
         return REDACTED_PATH
     return value
 
@@ -136,7 +140,12 @@ def redact_argv(
     roots = _personal_roots(personal_roots)
     redacted: list[str] = []
     redact_next = False
-    redact_codex_positionals = len(argv) >= 2 and tuple(argv[0:2]) == ("codex", "exec")
+    positional_prompt_start = None
+    if argv and argv[0] == "claude":
+        positional_prompt_start = 1
+    elif len(argv) >= 2 and tuple(argv[0:2]) == ("codex", "exec"):
+        positional_prompt_start = 2
+    positional_only = False
     for index, value in enumerate(argv):
         if not isinstance(value, str):
             raise AssumptionManifestError("argv entries must be strings")
@@ -152,10 +161,22 @@ def redact_argv(
                 redacted.append(value)
                 redact_next = True
             continue
-        if redact_codex_positionals and index >= 2 and not value.startswith("-"):
+        if value == "--":
+            redacted.append(value)
+            positional_only = True
+            continue
+        redacted_value = _redact_argument(value, roots)
+        if redacted_value != value:
+            redacted.append(redacted_value)
+            continue
+        if (
+            positional_prompt_start is not None
+            and index >= positional_prompt_start
+            and (positional_only or not value.startswith("-"))
+        ):
             redacted.append(REDACTED)
             continue
-        redacted.append(_redact_argument(value, roots))
+        redacted.append(value)
     if redact_next:
         raise AssumptionManifestError("sensitive argv flag is missing its value")
     return tuple(redacted)
