@@ -45,6 +45,10 @@ response schema is `tests/fixtures/codex/final-output.schema.json`.
 The replay parser is intentionally fail-closed. Unknown event types, malformed JSON/schema,
 nonzero exit without a classified structured error, and capacity without a timezone-aware reset
 become `FAILURE`; they never become `PASS` or an assumed cooldown.
+Success additionally requires one ordered lifecycle (`thread.started`, `turn.started`, exactly one
+agent message, then exactly one `turn.completed`); missing, reversed, duplicated, or post-terminal
+events fail closed. Probe stdout is capped at 1 MiB by default, stderr is discarded rather than
+buffered or persisted, and the process group is terminated if stdout exceeds the configured cap.
 
 ## Live acceptance gate
 

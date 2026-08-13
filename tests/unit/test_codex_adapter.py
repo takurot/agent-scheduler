@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -121,11 +123,56 @@ def test_capacity_without_valid_reset_fails_closed() -> None:
         "not-json\n",
         '{"type":"future.event"}\n',
         '{"type":"turn.completed","usage":{}}\n',
+        '{"type":"error","message":7}\n',
+        '{"type":"error","message":"failure"}\n{"type":"turn.started"}\n',
+        '{"type":"error","message":"failure"}\n'
+        '{"type":"turn.failed","error":{"message":"failure"}}\n',
+        '{"type":"future.event"}\n'
+        '{"type":"turn.failed","error":{"message":"Weekly usage limit reached",'
+        '"reset_at":"2026-08-20T00:00:00Z"}}\n',
+        '{"type":"thread.started","thread_id":7}\n'
+        '{"type":"turn.started"}\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"result\\":\\"pass\\",\\"summary\\":\\"unsafe\\"}"}}\n'
+        '{"type":"turn.completed","usage":{}}\n',
+        '{"type":"thread.started","thread_id":"fixture-thread"}\n'
+        '{"type":"turn.started"}\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"result\\":\\"pass\\",\\"summary\\":\\"unsafe\\"}"}}\n'
+        '{"type":"turn.completed","usage":7}\n',
         '{"type":"item.completed","item":{"type":"agent_message","text":"not-json"}}\n'
         '{"type":"turn.completed","usage":{}}\n',
     ],
 )
 def test_malformed_or_unknown_events_fail_closed(payload: str) -> None:
+    result = parse_codex_jsonl(payload, returncode=0)
+
+    assert result.kind is AgentResultKind.FAILURE
+    assert result.output == "codex event stream malformed"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"result\\":\\"pass\\",\\"summary\\":\\"unsafe\\"}"}}\n'
+        '{"type":"turn.completed","usage":{}}\n',
+        '{"type":"thread.started","thread_id":"fixture-thread"}\n'
+        '{"type":"turn.started"}\n'
+        '{"type":"turn.completed","usage":{}}\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"result\\":\\"pass\\",\\"summary\\":\\"unsafe\\"}"}}\n',
+        '{"type":"thread.started","thread_id":"fixture-thread"}\n'
+        '{"type":"turn.started"}\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"result\\":\\"pass\\",\\"summary\\":\\"unsafe\\"}"}}\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"result\\":\\"pass\\",\\"summary\\":\\"unsafe\\"}"}}\n'
+        '{"type":"turn.completed","usage":{}}\n',
+        '{"type":"thread.started","thread_id":"fixture-thread"}\n'
+        '{"type":"turn.started"}\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"result\\":\\"pass\\",\\"summary\\":\\"unsafe\\"}"}}\n'
+        '{"type":"turn.completed","usage":{}}\n'
+        '{"type":"turn.completed","usage":{}}\n',
+    ],
+)
+def test_incomplete_out_of_order_or_duplicate_event_lifecycle_fails_closed(
+    payload: str,
+) -> None:
     result = parse_codex_jsonl(payload, returncode=0)
 
     assert result.kind is AgentResultKind.FAILURE
@@ -165,6 +212,15 @@ def test_config_rejects_non_executable_binary_and_invalid_schema(tmp_path: Path)
     with pytest.raises(ValueError, match="schema"):
         CodexProbeConfig(executable=executable, cwd=tmp_path, output_schema=schema)
 
+    schema.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="output limit"):
+        CodexProbeConfig(
+            executable=executable,
+            cwd=tmp_path,
+            output_schema=schema,
+            output_limit_bytes=0,
+        )
+
 
 def test_spawn_failure_is_normalized_without_exposing_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -192,6 +248,104 @@ def test_spawn_failure_is_normalized_without_exposing_error(
     assert result.output == "codex process unavailable"
 
 
+def test_probe_terminates_process_group_when_stdout_exceeds_limit(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_text(
+        "#!/bin/sh\nprintf '%04096d' 0\nsleep 5\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    config = CodexProbeConfig(
+        executable=executable,
+        cwd=tmp_path,
+        output_schema=schema,
+        timeout_seconds=2,
+        terminate_grace_seconds=1,
+        output_limit_bytes=128,
+    )
+
+    result = run_codex_probe(
+        config,
+        "safe fixture prompt",
+        allow_live=True,
+        subscription_billing_verified=True,
+    )
+
+    assert result.kind is AgentResultKind.FAILURE
+    assert result.output == "codex output limit exceeded"
+
+
+def test_probe_timeout_includes_blocked_prompt_write(tmp_path: Path) -> None:
+    executable = tmp_path / "codex"
+    executable.write_text("#!/bin/sh\nsleep 5\n", encoding="utf-8")
+    executable.chmod(0o700)
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    config = CodexProbeConfig(
+        executable=executable,
+        cwd=tmp_path,
+        output_schema=schema,
+        timeout_seconds=0.05,
+        terminate_grace_seconds=0.2,
+    )
+
+    started = time.monotonic()
+    result = run_codex_probe(
+        config,
+        "x" * 8_000_000,
+        allow_live=True,
+        subscription_billing_verified=True,
+    )
+
+    assert time.monotonic() - started < 1
+    assert result.kind is AgentResultKind.FAILURE
+    assert result.output in {"codex execution timed out", "codex timeout cleanup failed"}
+
+
+def test_probe_kills_descendant_that_holds_stdout_after_leader_exits(tmp_path: Path) -> None:
+    child_pid_file = tmp_path / "child.pid"
+    executable = tmp_path / "codex"
+    executable.write_text(
+        "#!/bin/sh\n"
+        "trap '' TERM\n"
+        "sleep 30 &\n"
+        f"printf '%s' \"$!\" > {child_pid_file}\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    config = CodexProbeConfig(
+        executable=executable,
+        cwd=tmp_path,
+        output_schema=schema,
+        timeout_seconds=1,
+        terminate_grace_seconds=0.1,
+    )
+
+    result = run_codex_probe(
+        config,
+        "safe fixture prompt",
+        allow_live=True,
+        subscription_billing_verified=True,
+    )
+
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    child_state = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(child_pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert not child_state or child_state.startswith("Z")
+    assert result.kind is AgentResultKind.FAILURE
+    assert result.output == "codex output cleanup failed"
+
+
 def test_timeout_terminates_then_kills_process_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -211,7 +365,19 @@ def test_timeout_terminates_then_kills_process_group(
     signals: list[tuple[int, int]] = []
 
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
-    monkeypatch.setattr(os, "killpg", lambda pid, signal: signals.append((pid, signal)))
+    group_alive = True
+
+    def record_signal(pid: int, sent_signal: int) -> None:
+        nonlocal group_alive
+        if sent_signal == 0:
+            if not group_alive:
+                raise ProcessLookupError
+            return
+        signals.append((pid, sent_signal))
+        if sent_signal == 9:
+            group_alive = False
+
+    monkeypatch.setattr(os, "killpg", record_signal)
 
     result = run_codex_probe(
         config,
@@ -223,7 +389,7 @@ def test_timeout_terminates_then_kills_process_group(
     assert result.kind is AgentResultKind.FAILURE
     assert result.output == "codex execution timed out"
     assert signals == [(process.pid, 15), (process.pid, 9)]
-    assert process.inputs == ["safe fixture prompt", None, None]
+    assert process.stdin_value == b"safe fixture prompt"
 
 
 def test_process_exit_race_during_timeout_cleanup_is_safe(
@@ -283,7 +449,7 @@ def test_timeout_cleanup_that_cannot_reap_process_fails_closed(
 
     assert result.kind is AgentResultKind.FAILURE
     assert result.output == "codex timeout cleanup failed"
-    assert process.timeouts == [1, 1, 1]
+    assert process.timeouts == [1, 1]
 
 
 def test_process_lookup_cleanup_wait_remains_bounded(
@@ -347,50 +513,53 @@ def test_timeout_cleanup_wait_error_fails_closed(
     assert result.output == "codex timeout cleanup failed"
 
 
+class _RecordingInput(io.BytesIO):
+    def __init__(self) -> None:
+        super().__init__()
+        self.saved_value = b""
+
+    def close(self) -> None:
+        self.saved_value = self.getvalue()
+        super().close()
+
+
 class _TimedOutProcess:
     pid = 4312
     returncode = -9
 
     def __init__(self) -> None:
-        self.inputs: list[str | None] = []
+        self.stdin = _RecordingInput()
+        self.stdout = io.BytesIO()
+        self.timeouts: list[float | None] = []
 
-    def communicate(
-        self, input: str | None = None, timeout: float | None = None
-    ) -> tuple[str, str]:
-        self.inputs.append(input)
-        if len(self.inputs) < 3:
+    @property
+    def stdin_value(self) -> bytes:
+        return self.stdin.saved_value
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.timeouts.append(timeout)
+        if len(self.timeouts) < 2:
             raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout or 0)
-        return "", "secret stderr must not be returned"
+        return self.returncode
 
 
 class _ExitedDuringCleanupProcess(_TimedOutProcess):
-    def communicate(
-        self, input: str | None = None, timeout: float | None = None
-    ) -> tuple[str, str]:
-        self.inputs.append(input)
-        if len(self.inputs) == 1:
+    def wait(self, timeout: float | None = None) -> int:
+        self.timeouts.append(timeout)
+        if len(self.timeouts) == 1:
             raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout or 0)
-        return "", ""
+        return self.returncode
 
 
 class _NeverReapedProcess(_TimedOutProcess):
-    def __init__(self) -> None:
-        super().__init__()
-        self.timeouts: list[float | None] = []
-
-    def communicate(
-        self, input: str | None = None, timeout: float | None = None
-    ) -> tuple[str, str]:
-        self.inputs.append(input)
+    def wait(self, timeout: float | None = None) -> int:
         self.timeouts.append(timeout)
         raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout or 0)
 
 
 class _ReapErrorProcess(_TimedOutProcess):
-    def communicate(
-        self, input: str | None = None, timeout: float | None = None
-    ) -> tuple[str, str]:
-        self.inputs.append(input)
-        if len(self.inputs) == 1:
+    def wait(self, timeout: float | None = None) -> int:
+        self.timeouts.append(timeout)
+        if len(self.timeouts) == 1:
             raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout or 0)
         raise OSError("unsafe cleanup detail")
