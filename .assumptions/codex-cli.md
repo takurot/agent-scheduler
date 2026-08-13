@@ -8,7 +8,9 @@ Only non-provider metadata was inspected. `codex --version` reported `codex-cli 
 `codex exec --help` advertised JSONL output (`--json`), final-response schema validation
 (`--output-schema`), an explicit working root (`-C`), `workspace-write` sandboxing, and ephemeral
 sessions (`--ephemeral`). It also advertised dangerous approval/sandbox bypass options; the probe
-builder deliberately never emits them. The prompt is sent on stdin, not placed in argv.
+builder deliberately never emits them. The hardened probe fixes approval to `never`, ignores user
+configuration and exec-policy rules, and rejects unknown configuration fields. The prompt is sent
+on stdin, not placed in argv.
 
 ## Controlled live observation
 
@@ -16,6 +18,10 @@ After explicit user opt-in and independently supplied `Logged in using ChatGPT` 
 revalidated that authentication method and Codex CLI `0.147.0`. One minimum provider call ran in a
 temporary Git repository using the adapter's fixed stdin prompt, output schema, `workspace-write`
 sandbox, ephemeral session, allowlisted environment, and 120-second timeout.
+
+This observation predates the later argv hardening that explicitly added `--ask-for-approval
+never`, `--ignore-user-config`, `--ignore-rules`, and `--strict-config`. It establishes the success
+event shape only; approval and configuration-isolation paths remain synthetic.
 
 The call succeeded with exit code `0`, no stderr, and four JSONL events: `thread.started`,
 `turn.started`, an `item.completed` agent message matching the strict final schema, and

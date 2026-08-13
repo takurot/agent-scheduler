@@ -54,7 +54,12 @@ def build_codex_exec_argv(config: CodexProbeConfig) -> tuple[str, ...]:
     """Build the fixed, non-interactive probe command without putting the prompt in argv."""
     return (
         str(config.executable),
+        "--ask-for-approval",
+        "never",
         "exec",
+        "--strict-config",
+        "--ignore-user-config",
+        "--ignore-rules",
         "--json",
         "--output-schema",
         str(config.output_schema),

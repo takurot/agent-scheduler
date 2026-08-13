@@ -1,6 +1,7 @@
 Run Codex non-interactively
 
 Relevant observed options:
+  -a, --ask-for-approval <APPROVAL_POLICY> (global option; `never` supported)
   --strict-config
   -s, --sandbox <SANDBOX_MODE>
   -C, --cd <DIR>

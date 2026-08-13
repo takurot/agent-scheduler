@@ -36,7 +36,12 @@ def test_codex_argv_is_non_interactive_ephemeral_and_workspace_scoped(tmp_path: 
 
     assert argv == (
         str(executable),
+        "--ask-for-approval",
+        "never",
         "exec",
+        "--strict-config",
+        "--ignore-user-config",
+        "--ignore-rules",
         "--json",
         "--output-schema",
         str(schema),
@@ -72,6 +77,7 @@ def test_saved_cli_metadata_records_required_live_flags() -> None:
     assert version == "codex-cli 0.147.0\n"
     for flag in (
         "--json",
+        "--ask-for-approval",
         "--output-schema",
         "--sandbox",
         "--ephemeral",
