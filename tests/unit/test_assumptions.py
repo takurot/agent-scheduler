@@ -110,6 +110,17 @@ def test_redaction_removes_claude_positional_prompt_body() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "flag",
+    ("--system-prompt", "--append-system-prompt"),
+)
+def test_redaction_removes_claude_system_prompt_body(flag: str) -> None:
+    assert redact_argv(("claude", f"{flag}=private system instructions")) == (
+        "claude",
+        f"{flag}=[REDACTED]",
+    )
+
+
 def test_redaction_removes_foreign_personal_path() -> None:
     assert redact_argv(
         ("gh", "--config=/Users/example/private/config.yml"), personal_roots=()
@@ -130,19 +141,27 @@ def test_live_probe_requires_explicit_opt_in() -> None:
     assert called is False
 
 
-def test_live_probe_uses_bounded_subprocess_when_opted_in() -> None:
+def test_live_probe_uses_bounded_subprocess_when_opted_in(tmp_path: Path) -> None:
     calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    executable = tmp_path / "gh"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o700)
 
     def fake_run(argv: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append((argv, kwargs))
         return subprocess.CompletedProcess(argv, 0, stdout="gh version 2.80.0", stderr="")
 
-    result = run_live_probe(("gh", "version"), allow_live=True, run=fake_run)
+    result = run_live_probe(
+        ("gh", "version"),
+        allow_live=True,
+        run=fake_run,
+        executable_paths={"gh": executable},
+    )
 
     assert result.returncode == 0
     assert calls == [
         (
-            ("gh", "version"),
+            (str(executable), "version"),
             {
                 "capture_output": True,
                 "text": True,
@@ -152,6 +171,15 @@ def test_live_probe_uses_bounded_subprocess_when_opted_in() -> None:
             },
         )
     ]
+
+
+def test_live_probe_requires_validated_absolute_executable_path() -> None:
+    with pytest.raises(AssumptionManifestError, match="trusted executable"):
+        run_live_probe(
+            ("gh", "version"),
+            allow_live=True,
+            executable_paths={"gh": Path("relative/gh")},
+        )
 
 
 def test_live_probe_rejects_commands_outside_safe_probe_allowlist() -> None:

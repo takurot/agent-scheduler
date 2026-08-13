@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -28,10 +30,14 @@ SENSITIVE_FLAGS = frozenset(
         "--auth-token",
         "--client-secret",
         "--credential",
+        "--append-system-prompt",
+        "--append-system-prompt-file",
         "--password",
         "--print",
         "--prompt",
         "--prompt-file",
+        "--system-prompt",
+        "--system-prompt-file",
         "--token",
         "-p",
     }
@@ -288,15 +294,32 @@ def run_live_probe(
     *,
     allow_live: bool,
     run: RunCommand = subprocess.run,
+    executable_paths: Mapping[str, Path] | None = None,
 ) -> LiveProbeResult:
     if not allow_live:
         raise AssumptionManifestError("live probes require explicit opt-in")
     command = tuple(argv)
     if command not in ALLOWED_LIVE_PROBES:
         raise AssumptionManifestError("live probe command is not allowed")
+    executable = (
+        executable_paths.get(command[0])
+        if executable_paths is not None
+        else Path(found)
+        if (found := shutil.which(command[0])) is not None
+        else None
+    )
+    if executable is None or not executable.is_absolute():
+        raise AssumptionManifestError("live probe requires a trusted executable")
+    try:
+        resolved_executable = executable.resolve(strict=True)
+    except OSError as error:
+        raise AssumptionManifestError("live probe requires a trusted executable") from error
+    if not resolved_executable.is_file() or not os.access(resolved_executable, os.X_OK):
+        raise AssumptionManifestError("live probe requires a trusted executable")
+    resolved_command = (str(resolved_executable), *command[1:])
     try:
         result = run(
-            command,
+            resolved_command,
             capture_output=True,
             text=True,
             timeout=30,
