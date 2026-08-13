@@ -52,9 +52,24 @@ Live prompts are denied unless both conditions are explicitly supplied:
 `UNKNOWN_BILLING` normalizes to an `AgentResult` and maps the worker to `DISABLED_BILLING`.
 Metered billing is also disabled. Neither state may fall back to API usage.
 
-Still unverified because no authorized live prompt was run:
+## Controlled live observation — 2026-08-13
 
-- actual success/error JSON emitted by the authenticated subscription
+After explicit user opt-in and independently supplied evidence of `claude.ai` Pro login, preflight
+revalidated first-party Pro authentication and rejected API-key, custom gateway, Bedrock, and
+Vertex environment overrides. One minimal provider call ran in a temporary Git repository with
+safe mode, no tools, plan permission mode, no MCP servers, no session persistence, a strict
+one-field output schema, and a 120-second outer timeout.
+
+The call reached the provider but did not produce a successful result: exit code `1`, JSON
+`type=result`, `subtype=success`, `is_error=true`, and `num_turns=1`. This contradictory combination
+is replayed by `live-inconsistent-result.json` and classified fail-closed as `UNKNOWN`. The raw
+response was deleted with the temporary directory. Session/UUID, usage, cost, model, duration,
+terminal reason, provider text, prompt, and personal paths were not retained. The one-call
+authorization was respected and no automatic retry occurred.
+
+Still unverified because the authorized call did not succeed:
+
+- actual successful JSON emitted by the authenticated subscription
 - provider capacity and reset-time messages
 - authentication and billing failure text/schema
 - tool permission behavior within the intended OS sandbox

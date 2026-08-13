@@ -107,6 +107,15 @@ def test_invalid_unicode_from_process_output_fails_closed() -> None:
     assert parse_claude_result(outcome).kind is AgentResultKind.UNKNOWN
 
 
+def test_replays_sanitized_live_inconsistent_result_fail_closed() -> None:
+    result = parse_claude_result(
+        ClaudeProcessOutcome(exit_code=1, stdout=fixture("live-inconsistent-result.json"))
+    )
+
+    assert result.kind is AgentResultKind.UNKNOWN
+    assert result.output == "claude result unknown"
+
+
 def test_cli_metadata_requires_scheduler_timeout_when_max_turns_is_absent() -> None:
     metadata = parse_claude_cli_metadata(
         version_output=fixture("cli-version.txt"), help_output=fixture("cli-help.txt")
