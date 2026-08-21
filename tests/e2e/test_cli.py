@@ -70,7 +70,7 @@ def test_native_execution_is_fail_closed(tmp_path: Path) -> None:
     result = invoke(tmp_path, "run", "--repo", "owner/project", "--issues", "1")
 
     assert result.exit_code != 0
-    assert "native workers are not enabled" in result.output
+    assert "native workers require explicit opt-in" in result.output.lower()
 
 
 def test_excluded_issue_is_not_persisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
