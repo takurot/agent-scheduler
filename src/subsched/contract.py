@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -49,6 +50,10 @@ environment variables without explicit validation. Do not read, print, copy, or 
 unrelated environment credentials. GitHub write operations require a separately authorized
 permission tier; workers must not receive write tokens.
 <!-- END SUBSCHED AGENT CONTRACT v1 -->"""
+
+
+class AgentContractError(RuntimeError):
+    """Raised when agent contract requirements or preconditions are violated."""
 
 
 def ensure_contract_block(path: Path) -> None:
@@ -142,3 +147,49 @@ Initial implementation
 
     for agent_file_name in ("AGENTS.md", "CLAUDE.md"):
         ensure_contract_block(worktree_dir / agent_file_name)
+
+
+def validate_dispatch_preconditions(worktree_dir: Path, task: Task) -> None:
+    """Validate AGENTS.md, CLAUDE.md, task file, and handoff exist before dispatch."""
+    for agent_file in ("AGENTS.md", "CLAUDE.md"):
+        if not validate_contract_in_file(worktree_dir / agent_file):
+            raise AgentContractError(f"missing or invalid contract in {agent_file}")
+
+    task_file = worktree_dir / ".ai" / "tasks" / f"{task.issue_number}.md"
+    if not task_file.is_file():
+        raise AgentContractError(f"missing task file: {task_file}")
+
+    handoff_file = worktree_dir / ".ai" / "handoffs" / f"{task.issue_number}.md"
+    if not handoff_file.is_file():
+        raise AgentContractError(f"missing handoff file: {handoff_file}")
+
+
+def build_worker_prompt(task: Task, verification_commands: Sequence[str] = ()) -> str:
+    """Construct the strict single-issue worker prompt with explicit boundaries."""
+    lines = [
+        f"You are implementing GitHub issue #{task.issue_number}.",
+        "",
+        "Read:",
+        "- AGENTS.md",
+        "- CLAUDE.md",
+        f"- .ai/tasks/{task.issue_number}.md",
+        f"- .ai/handoffs/{task.issue_number}.md",
+        "",
+        f"Work only on issue #{task.issue_number}.",
+        "Use the existing task worktree.",
+        "Do not start another GitHub issue.",
+        "Do not attempt to merge, create releases, or deploy.",
+        "",
+        "After each meaningful milestone:",
+        f"update .ai/handoffs/{task.issue_number}.md.",
+        "",
+        "Before finishing:",
+        "run the verification commands defined for this repository:",
+    ]
+    if verification_commands:
+        for cmd in verification_commands:
+            lines.append(f"- {cmd}")
+    else:
+        lines.append("- (defined in docs/WORKFLOW.md or pyproject.toml)")
+    lines.extend(["", "Leave the worktree in a recoverable state."])
+    return "\n".join(lines) + "\n"
