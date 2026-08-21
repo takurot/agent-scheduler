@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
+from subsched.events import Clock, EventSource, EventType, SystemClock
 from subsched.models import (
     AgentResult,
     AgentResultKind,
@@ -53,6 +54,8 @@ class Scheduler:
         worker: Worker,
         worktree_root: Path,
         worktree_adapter: WorktreeAdapter | None = None,
+        clock: Clock | None = None,
+        event_sources: tuple[EventSource, ...] = (),
         label_scores: dict[str, int] | None = None,
         max_agent_failures: int = 2,
         max_agent_switches: int = 6,
@@ -63,6 +66,8 @@ class Scheduler:
         self.worker = worker
         self.worktree_root = worktree_root.resolve()
         self.worktree_adapter = worktree_adapter
+        self.clock = clock or SystemClock()
+        self.event_sources = event_sources
         self.queue = TaskQueue(store.load_tasks(), label_scores=label_scores)
         persisted_capacities = store.load_capacities()
         allowed_cooldowns = {
@@ -114,15 +119,24 @@ class Scheduler:
         self.queue = new_queue
         self._persist()
 
-    def run_until_waiting(
+    def tick(
         self,
-        capacities: Iterable[Capacity],
+        capacities: Iterable[Capacity] = (),
         *,
         now: datetime | None = None,
-    ) -> None:
-        current = now or datetime.now(UTC)
+    ) -> bool:
+        current = now or self.clock.now()
+
+        for source in self.event_sources:
+            for event in source.poll(current):
+                if event.event_type == EventType.PAUSE:
+                    self.store.set_paused(True)
+                elif event.event_type == EventType.RESUME:
+                    self.store.set_paused(False)
+
         if self.store.is_paused():
-            return
+            return False
+
         supplied = {capacity.agent: capacity for capacity in capacities}
         effective = self._effective_capacities(supplied, current)
         if self.router.select(effective.values(), now=current) is not None:
@@ -132,41 +146,53 @@ class Scheduler:
             task.status is TaskState.WAITING_CAPACITY for task in self.tasks
         )
 
-        while self.queue.ready():
-            if self.store.is_paused():
-                return
-            agent = self.router.select(effective.values(), now=current)
-            if agent is None:
-                task = self.queue.ready()[0]
-                self.queue = self.queue.replace(task.transition(TaskState.WAITING_CAPACITY))
-                self.is_waiting_for_capacity = True
-                self._persist()
-                return
+        ready_tasks = self.queue.ready()
+        if not ready_tasks:
+            return False
 
-            task = self.queue.ready()[0]
-            if self.worktree_adapter is not None:
-                ctx = self.worktree_adapter.prepare_worktree(task.issue_number)
-                task = task.with_worktree(str(ctx.path))
-                self.queue = self.queue.replace(task)
-            else:
-                if task.worktree is None:
-                    worktree_path = self.worktree_root / f"issue-{task.issue_number}"
-                    task = task.with_worktree(str(worktree_path))
-                    self.queue = self.queue.replace(task)
-                self._validate_worktree_path(task)
-                self._ensure_worktree_directory(task)
-                self._validate_worktree(task)
-            dispatched = task.transition(TaskState.DISPATCHED, current_agent=agent, now=current)
-            running = dispatched.transition(TaskState.IN_PROGRESS, current_agent=agent, now=current)
-            self.queue = self.queue.replace(running)
+        agent = self.router.select(effective.values(), now=current)
+        if agent is None:
+            task = ready_tasks[0]
+            self.queue = self.queue.replace(task.transition(TaskState.WAITING_CAPACITY))
+            self.is_waiting_for_capacity = True
             self._persist()
-            try:
-                result = self.worker.run(running, agent)
-            except Exception as error:
-                result = AgentResult(AgentResultKind.FAILURE, output=type(error).__name__)
-            self._handle_result(running, agent, result, current)
-            effective = self._effective_capacities(supplied, current)
-            self._release_dependencies(current)
+            return False
+
+        task = ready_tasks[0]
+        if self.worktree_adapter is not None:
+            ctx = self.worktree_adapter.prepare_worktree(task.issue_number)
+            task = task.with_worktree(str(ctx.path))
+            self.queue = self.queue.replace(task)
+        else:
+            if task.worktree is None:
+                worktree_path = self.worktree_root / f"issue-{task.issue_number}"
+                task = task.with_worktree(str(worktree_path))
+                self.queue = self.queue.replace(task)
+            self._validate_worktree_path(task)
+            self._ensure_worktree_directory(task)
+            self._validate_worktree(task)
+
+        dispatched = task.transition(TaskState.DISPATCHED, current_agent=agent, now=current)
+        running = dispatched.transition(TaskState.IN_PROGRESS, current_agent=agent, now=current)
+        self.queue = self.queue.replace(running)
+        self._persist()
+        try:
+            result = self.worker.run(running, agent)
+        except Exception as error:
+            result = AgentResult(AgentResultKind.FAILURE, output=type(error).__name__)
+        self._handle_result(running, agent, result, current)
+        self._effective_capacities(supplied, current)
+        self._release_dependencies(current)
+        return True
+
+    def run_until_waiting(
+        self,
+        capacities: Iterable[Capacity] = (),
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        while self.tick(capacities, now=now):
+            pass
 
     def _handle_result(self, task: Task, agent: str, result: AgentResult, now: datetime) -> None:
         if result.kind is AgentResultKind.PASS:
