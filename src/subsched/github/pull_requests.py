@@ -7,6 +7,13 @@ from dataclasses import dataclass
 
 from subsched.models import Task
 
+_CLOSE_KEYWORD_RE = re.compile(r"\b(fix(e[sd])?|close[sd]?|resolve[sd]?)\s*#", re.IGNORECASE)
+
+
+def _strip_close_keywords(text: str) -> str:
+    """Replace GitHub auto-closing keywords with safe issue reference."""
+    return _CLOSE_KEYWORD_RE.sub("issue #", text)
+
 
 @dataclass(frozen=True, slots=True)
 class PullRequestInfo:
@@ -17,15 +24,15 @@ class PullRequestInfo:
 
 
 def build_pr_body(issue_number: int, summary: str = "", verification_results: str = "") -> str:
-    """Build safe PR body according to SPEC (avoids 'Fixes' or 'Closes')."""
-    v_section = (
-        verification_results if verification_results.strip() else "- All checks passed: PASS"
-    )
-    s_section = (
+    """Build safe PR body according to SPEC (avoids auto-closing keywords)."""
+    v_raw = verification_results if verification_results.strip() else "- All checks passed: PASS"
+    s_raw = (
         summary.strip()
         if summary.strip()
         else f"Implementation completed for issue #{issue_number}."
     )
+    v_section = _strip_close_keywords(v_raw)
+    s_section = _strip_close_keywords(s_raw)
     return (
         f"Implements work for #{issue_number}.\n\n"
         f"## Summary\n\n{s_section}\n\n"
@@ -78,7 +85,7 @@ def lookup_existing_pr(
             title=str(item["title"]),
             body=str(item.get("body", "")),
         )
-    except Exception:
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, ValueError):
         return None
 
 
@@ -134,7 +141,9 @@ def create_or_get_pull_request(
             return None
         url = res.stdout.strip()
         match = re.search(r"/pull/(\d+)", url)
-        pr_number = int(match.group(1)) if match else 0
+        if match is None:
+            return None
+        pr_number = int(match.group(1))
         return PullRequestInfo(number=pr_number, url=url, title=title, body=body)
-    except Exception:
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return None

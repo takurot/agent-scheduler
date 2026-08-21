@@ -14,10 +14,13 @@ from subsched.models import Issue, Task
 
 
 def test_build_pr_body_avoids_fixes_or_closes() -> None:
-    body = build_pr_body(103, summary="Add timeout logic", verification_results="pytest: PASS")
+    body = build_pr_body(
+        103, summary="Fixes #5 and Closes #6 bug", verification_results="Resolves #7 passed"
+    )
     assert "Implements work for #103" in body
-    assert "Fixes #" not in body
-    assert "Closes #" not in body
+    assert "fixes #" not in body.lower()
+    assert "closes #" not in body.lower()
+    assert "resolves #" not in body.lower()
     assert "Issue is intentionally left open until review." in body
 
 
@@ -58,3 +61,14 @@ def test_create_or_get_pull_request_creates_when_not_found(monkeypatch: pytest.M
     assert pr is not None
     assert pr.number == 68
     assert len(calls) == 2
+
+
+def test_create_or_get_pull_request_returns_none_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_fail(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="gh: command not found")
+
+    monkeypatch.setattr(subprocess, "run", fake_fail)
+    task = Task.from_issue(Issue(number=103, title="Support timeout"))
+    assert create_or_get_pull_request(task, "issue/103-timeout") is None
