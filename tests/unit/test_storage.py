@@ -18,7 +18,7 @@ def test_state_round_trip_preserves_recovery_fields(tmp_path: Path) -> None:
     assert store.load_tasks() == (task,)
 
 
-def test_corrupt_state_fails_closed_without_overwriting(tmp_path: Path) -> None:
+def test_corrupt_state_quarantined_and_fails_closed(tmp_path: Path) -> None:
     state_file = tmp_path / ".ai" / "scheduler.json"
     state_file.parent.mkdir(parents=True)
     state_file.write_text("{broken", encoding="utf-8")
@@ -26,16 +26,36 @@ def test_corrupt_state_fails_closed_without_overwriting(tmp_path: Path) -> None:
     with pytest.raises(StateCorruptionError):
         JsonStateStore(tmp_path).load_tasks()
 
-    assert state_file.read_text(encoding="utf-8") == "{broken"
+    assert not state_file.exists()
+    quarantine_files = list((tmp_path / ".ai" / "quarantine").glob("*.corrupt.json"))
+    assert len(quarantine_files) == 1
+    assert quarantine_files[0].read_text(encoding="utf-8") == "{broken"
 
 
-def test_unknown_schema_version_fails_closed(tmp_path: Path) -> None:
+def test_unknown_schema_version_quarantined_and_fails_closed(tmp_path: Path) -> None:
     state_file = tmp_path / ".ai" / "scheduler.json"
     state_file.parent.mkdir(parents=True)
     state_file.write_text(json.dumps({"schema_version": 999, "tasks": []}), encoding="utf-8")
 
     with pytest.raises(StateCorruptionError, match="schema"):
         JsonStateStore(tmp_path).load_tasks()
+
+    assert not state_file.exists()
+    quarantine_files = list((tmp_path / ".ai" / "quarantine").glob("*.corrupt.json"))
+    assert len(quarantine_files) == 1
+
+
+def test_standard_directory_initialization_and_backup(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.save_tasks(())
+
+    for subdir in ("tasks", "handoffs", "runtime", "quarantine", "backup"):
+        assert (tmp_path / ".ai" / subdir).is_dir()
+
+    # Second save creates backup
+    task = Task.from_issue(Issue(number=1, title="one"))
+    store.save_tasks((task,))
+    assert (tmp_path / ".ai" / "backup" / "scheduler.bak.json").exists()
 
 
 def test_capacity_cooldown_round_trip(tmp_path: Path) -> None:
