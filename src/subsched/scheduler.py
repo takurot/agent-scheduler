@@ -158,9 +158,15 @@ class Scheduler:
 
     def _handle_result(self, task: Task, agent: str, result: AgentResult, now: datetime) -> None:
         if result.kind is AgentResultKind.PASS:
-            self.queue = self.queue.replace(
-                task.transition(TaskState.COMPLETE, current_agent=agent, now=now)
+            verifying = task.transition(TaskState.VERIFYING, current_agent=agent, now=now)
+            pr_ready = verifying.transition(TaskState.PR_READY, current_agent=agent, now=now)
+            ready_for_review = pr_ready.transition(
+                TaskState.READY_FOR_REVIEW, current_agent=agent, now=now
             )
+            complete = ready_for_review.transition(
+                TaskState.COMPLETE, current_agent=agent, now=now
+            )
+            self.queue = self.queue.replace(complete)
         elif result.kind in {AgentResultKind.CAPACITY_SESSION, AgentResultKind.CAPACITY_WEEKLY}:
             state = (
                 CapacityState.COOLDOWN_SESSION

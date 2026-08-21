@@ -9,10 +9,14 @@ from typing import Any
 
 class TaskState(StrEnum):
     DISCOVERED = "DISCOVERED"
+    ELIGIBILITY_CHECK = "ELIGIBILITY_CHECK"
     READY = "READY"
     DISPATCHED = "DISPATCHED"
     IN_PROGRESS = "IN_PROGRESS"
     VERIFYING = "VERIFYING"
+    PR_READY = "PR_READY"
+    READY_FOR_REVIEW = "READY_FOR_REVIEW"
+    NEEDS_REBASE = "NEEDS_REBASE"
     RETRY = "RETRY"
     WAITING_CAPACITY = "WAITING_CAPACITY"
     WAITING_DEPENDENCY = "WAITING_DEPENDENCY"
@@ -59,29 +63,85 @@ class StateTransitionError(ValueError):
 
 
 ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
-    TaskState.DISCOVERED: frozenset({TaskState.READY, TaskState.WAITING_DEPENDENCY}),
+    TaskState.DISCOVERED: frozenset(
+        {
+            TaskState.ELIGIBILITY_CHECK,
+            TaskState.READY,
+            TaskState.WAITING_DEPENDENCY,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.ELIGIBILITY_CHECK: frozenset(
+        {
+            TaskState.READY,
+            TaskState.WAITING_DEPENDENCY,
+            TaskState.BLOCKED,
+            TaskState.NEEDS_HUMAN,
+            TaskState.CANCELLED,
+        }
+    ),
     TaskState.READY: frozenset(
         {TaskState.DISPATCHED, TaskState.WAITING_CAPACITY, TaskState.CANCELLED}
     ),
     TaskState.DISPATCHED: frozenset({TaskState.IN_PROGRESS, TaskState.RETRY, TaskState.CANCELLED}),
     TaskState.IN_PROGRESS: frozenset(
         {
-            TaskState.COMPLETE,
+            TaskState.VERIFYING,
             TaskState.RETRY,
             TaskState.WAITING_CAPACITY,
             TaskState.FAILED,
             TaskState.CANCELLED,
         }
     ),
-    TaskState.RETRY: frozenset({TaskState.READY, TaskState.NEEDS_HUMAN, TaskState.FAILED}),
+    TaskState.VERIFYING: frozenset(
+        {
+            TaskState.PR_READY,
+            TaskState.RETRY,
+            TaskState.NEEDS_REBASE,
+            TaskState.NEEDS_HUMAN,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.PR_READY: frozenset(
+        {
+            TaskState.READY_FOR_REVIEW,
+            TaskState.NEEDS_REBASE,
+            TaskState.NEEDS_HUMAN,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.READY_FOR_REVIEW: frozenset(
+        {
+            TaskState.COMPLETE,
+            TaskState.NEEDS_REBASE,
+            TaskState.NEEDS_HUMAN,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.NEEDS_REBASE: frozenset(
+        {
+            TaskState.READY,
+            TaskState.NEEDS_HUMAN,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.RETRY: frozenset(
+        {
+            TaskState.READY,
+            TaskState.NEEDS_HUMAN,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+        }
+    ),
     TaskState.WAITING_CAPACITY: frozenset(
         {TaskState.READY, TaskState.NEEDS_HUMAN, TaskState.CANCELLED}
     ),
     TaskState.WAITING_DEPENDENCY: frozenset(
-        {TaskState.READY, TaskState.BLOCKED, TaskState.CANCELLED}
+        {TaskState.READY, TaskState.BLOCKED, TaskState.NEEDS_HUMAN, TaskState.CANCELLED}
     ),
-    TaskState.VERIFYING: frozenset({TaskState.COMPLETE, TaskState.RETRY}),
-    TaskState.BLOCKED: frozenset({TaskState.READY, TaskState.CANCELLED}),
+    TaskState.BLOCKED: frozenset(
+        {TaskState.READY, TaskState.NEEDS_HUMAN, TaskState.CANCELLED}
+    ),
     TaskState.NEEDS_HUMAN: frozenset({TaskState.READY, TaskState.CANCELLED}),
     TaskState.FAILED: frozenset(),
     TaskState.CANCELLED: frozenset(),

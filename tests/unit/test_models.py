@@ -29,11 +29,43 @@ def test_issue_maps_to_immutable_ready_task() -> None:
 
 def test_task_transition_rejects_terminal_state_restart() -> None:
     task = Task.from_issue(Issue(number=1, title="one"))
-    completed = task.transition(TaskState.DISPATCHED).transition(TaskState.IN_PROGRESS)
-    completed = completed.transition(TaskState.COMPLETE)
+    running = task.transition(TaskState.DISPATCHED).transition(TaskState.IN_PROGRESS)
+    verifying = running.transition(TaskState.VERIFYING)
+    pr_ready = verifying.transition(TaskState.PR_READY)
+    ready_review = pr_ready.transition(TaskState.READY_FOR_REVIEW)
+    completed = ready_review.transition(TaskState.COMPLETE)
 
     with pytest.raises(StateTransitionError):
         completed.transition(TaskState.IN_PROGRESS)
+
+
+def test_in_progress_cannot_transition_directly_to_complete() -> None:
+    task = Task.from_issue(Issue(number=1, title="one"))
+    running = task.transition(TaskState.DISPATCHED).transition(TaskState.IN_PROGRESS)
+    with pytest.raises(StateTransitionError, match="invalid transition"):
+        running.transition(TaskState.COMPLETE)
+
+
+@pytest.mark.parametrize("from_state", list(TaskState))
+def test_all_state_transitions_match_allowed_matrix(from_state: TaskState) -> None:
+    from subsched.models import ALLOWED_TRANSITIONS
+
+    dummy_task = Task(
+        task_id="github-1",
+        issue_number=1,
+        title="test",
+        labels=(),
+        status=from_state,
+    )
+    allowed = ALLOWED_TRANSITIONS[from_state]
+
+    for to_state in TaskState:
+        if to_state in allowed:
+            next_task = dummy_task.transition(to_state)
+            assert next_task.status is to_state
+        else:
+            with pytest.raises(StateTransitionError):
+                dummy_task.transition(to_state)
 
 
 def test_capacity_reports_availability_and_remaining_percentage() -> None:
