@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from subsched.agents.base import ProcessExecutionRequest
+from subsched.agents.process import COMMON_ENV_ALLOWLIST, filter_environment, run_process_group
 from subsched.models import AgentResult, AgentResultKind
 
 
@@ -289,7 +291,8 @@ def run_codex_probe(
         process.wait(timeout=config.timeout_seconds)
     except OSError:
         if not _stop_process_group(process, config.terminate_grace_seconds):
-            return AgentResult(AgentResultKind.FAILURE, output="codex cleanup failed")
+            return AgentResult(AgentResultKind.FAILURE, output="codex cleanup failed",
+            )
         return AgentResult(AgentResultKind.FAILURE, output="codex process unavailable")
     except subprocess.TimeoutExpired:
         cleaned_up = _stop_process_group(process, config.terminate_grace_seconds)
@@ -408,3 +411,43 @@ def _bounded_reap(process: subprocess.Popen[bytes], timeout_seconds: float) -> b
 def _codex_environment() -> dict[str, str]:
     allowed = {"CODEX_HOME", "HOME", "LANG", "LC_ALL", "NO_COLOR", "PATH", "TERM"}
     return {name: value for name, value in os.environ.items() if name in allowed}
+
+
+
+class CodexAgent:
+    """Codex Agent adapter adhering to AgentAdapter protocol."""
+
+    def __init__(
+        self,
+        allow_live: bool = False,
+        subscription_billing_verified: bool = False,
+    ) -> None:
+        self.allow_live = allow_live
+        self.subscription_billing_verified = subscription_billing_verified
+
+    def execute(self, request: ProcessExecutionRequest) -> AgentResult:
+        if not self.allow_live:
+            return AgentResult(AgentResultKind.FAILURE, output="codex live probe not opted in")
+        if not self.subscription_billing_verified:
+            return AgentResult(AgentResultKind.UNKNOWN_BILLING, output="codex billing unverified")
+
+        env = filter_environment(request.env, allowlist=COMMON_ENV_ALLOWLIST)
+        proc_req = ProcessExecutionRequest(
+            argv=request.argv,
+            cwd=request.cwd,
+            env=env,
+            stdin_payload=request.stdin_payload,
+            timeout_seconds=request.timeout_seconds,
+            grace_seconds=request.grace_seconds,
+            output_limit_bytes=request.output_limit_bytes,
+        )
+        res = run_process_group(proc_req)
+        if res.timed_out:
+            if not res.cleanup_succeeded:
+                return AgentResult(
+                AgentResultKind.PROCESS_CLEANUP_FAILED, output="codex cleanup failed"
+            )
+            return AgentResult(AgentResultKind.TIMEOUT, output="codex execution timed out")
+        if res.output_limit_exceeded:
+            return AgentResult(AgentResultKind.FAILURE, output="codex output limit exceeded")
+        return parse_codex_jsonl(res.stdout, returncode=res.exit_code)
