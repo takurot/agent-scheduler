@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.claude import (
+    ClaudeAgent,
     ClaudeBillingMode,
     ClaudeCliMetadataError,
     ClaudeExecutionPolicy,
@@ -276,3 +279,35 @@ def test_verified_subscription_and_explicit_opt_in_allow_probe() -> None:
 
     policy.require_live_probe()
     assert policy.worker_state is CapacityState.AVAILABLE
+
+
+
+def test_claude_agent_blocked_when_unverified(tmp_path: Path) -> None:
+    agent = ClaudeAgent()
+    req = ProcessExecutionRequest(
+        argv=(sys.executable, "-c", "print('hello')"),
+        cwd=tmp_path,
+        env={},
+    )
+    result = agent.execute(req)
+    assert result.kind is AgentResultKind.UNKNOWN_BILLING
+
+
+def test_claude_agent_executes_when_verified(tmp_path: Path) -> None:
+    policy = ClaudeExecutionPolicy(
+        live_probe_opt_in=True,
+        billing_mode=ClaudeBillingMode.SUBSCRIPTION_VERIFIED,
+    )
+    agent = ClaudeAgent(execution_policy=policy)
+    cmd = (
+        "import json; d={'type': 'result', 'subtype': 'success', "
+        "'is_error': False, 'num_turns': 1, 'result': 'done'}; "
+        "print(json.dumps(d))"
+    )
+    req = ProcessExecutionRequest(
+        argv=(sys.executable, "-c", cmd),
+        cwd=tmp_path,
+        env={"PATH": ""},
+    )
+    result = agent.execute(req)
+    assert result.kind is AgentResultKind.PASS

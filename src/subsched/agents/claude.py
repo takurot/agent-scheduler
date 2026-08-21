@@ -11,6 +11,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
+from subsched.agents.base import ProcessExecutionRequest
+from subsched.agents.process import COMMON_ENV_ALLOWLIST, filter_environment, run_process_group
 from subsched.models import AgentResult, AgentResultKind, CapacityState
 
 MAX_RESULT_BYTES = 1_000_000
@@ -337,3 +339,37 @@ def _reset_at(payload: dict[str, Any] | None) -> datetime | None:
 
 def _contains_any(value: str, candidates: tuple[str, ...]) -> bool:
     return any(candidate in value for candidate in candidates)
+
+
+
+class ClaudeAgent:
+    """Claude Agent adapter adhering to AgentAdapter protocol."""
+
+    def __init__(self, execution_policy: ClaudeExecutionPolicy | None = None) -> None:
+        self.execution_policy = execution_policy or ClaudeExecutionPolicy(
+            live_probe_opt_in=False,
+            billing_mode=ClaudeBillingMode.UNKNOWN,
+        )
+
+    def execute(self, request: ProcessExecutionRequest) -> AgentResult:
+        if self.execution_policy.billing_mode != ClaudeBillingMode.SUBSCRIPTION_VERIFIED:
+            return self.execution_policy.blocked_result
+        env = filter_environment(request.env, allowlist=COMMON_ENV_ALLOWLIST)
+        proc_req = ProcessExecutionRequest(
+            argv=request.argv,
+            cwd=request.cwd,
+            env=env,
+            stdin_payload=request.stdin_payload,
+            timeout_seconds=request.timeout_seconds,
+            grace_seconds=request.grace_seconds,
+            output_limit_bytes=request.output_limit_bytes,
+        )
+        res = run_process_group(proc_req)
+        outcome = ClaudeProcessOutcome(
+            exit_code=res.exit_code,
+            stdout=res.stdout,
+            stderr=res.stderr,
+            timed_out=res.timed_out,
+            cleanup_succeeded=res.cleanup_succeeded,
+        )
+        return parse_claude_result(outcome)
