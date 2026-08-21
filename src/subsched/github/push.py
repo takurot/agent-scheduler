@@ -31,11 +31,17 @@ def validate_branch_name(branch: str) -> bool:
     return bool(re.fullmatch(r"[a-zA-Z0-9_/-]+", branch))
 
 
+def validate_remote_name(remote: str) -> bool:
+    """Validate remote name does not start with dash and contains only allowed characters."""
+    return not remote.startswith("-") and bool(re.fullmatch(r"[a-zA-Z0-9._/-]+", remote))
+
+
 def push_task_branch(
     worktree_dir: Path,
     branch_name: str,
     remote: str = "origin",
     env: dict[str, str] | None = None,
+    timeout_seconds: float = 60.0,
 ) -> PushResult:
     """Push task branch to remote safely with explicit validations."""
     if not validate_branch_name(branch_name):
@@ -44,18 +50,27 @@ def push_task_branch(
             output=f"refusing to push to disallowed or invalid branch: {branch_name}",
             branch=branch_name,
         )
+    if not validate_remote_name(remote):
+        return PushResult(
+            kind=PushResultKind.FAILURE,
+            output=f"refusing to push to invalid remote: {remote}",
+            branch=branch_name,
+        )
 
-    argv = ("git", "push", "-u", remote, f"HEAD:refs/heads/{branch_name}")
+    argv = ("git", "push", "-u", "--", remote, f"HEAD:refs/heads/{branch_name}")
     try:
         res = subprocess.run(
             argv,
             cwd=str(worktree_dir),
             env=env,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            errors="replace",
+            timeout=timeout_seconds,
             check=False,
         )
-    except Exception as err:
+    except (OSError, subprocess.TimeoutExpired) as err:
         return PushResult(
             kind=PushResultKind.FAILURE,
             output=f"push execution failed: {err}",
