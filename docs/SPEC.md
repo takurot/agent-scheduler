@@ -2037,6 +2037,17 @@ Claude / Codex
 
 Bernstein forkをMVP前提にはしない。
 
+### Spike評価結果と決定 (Issue #8 / Task A5)
+
+- **BS1 (Same Worktree):** Custom Git worktree adapterで同一worktreeを維持可能。Bernstein単体では異種Agent間でのworktreeとsemantic handoffの継続が未対応。
+- **BS2 (Dirty Worktree):** BernsteinはAgent終了時にクリーンアップを行う前提があり、uncommitted diffを保持したまま別Agentへ安全に引き継ぐ要件を満たさない (FAIL)。
+- **BS3 (Capacity Failure Semantics):** Bernsteinはcapacity/rate limitによるprocess exitをtask failureと判定するため、provider unavailableとしてqueue先頭へ戻す要件を満たさない (FAIL)。
+- **BS4 (Verification Reuse):** failover後も同一のverification runnerを適用可能だが、Scheduler本体のライフサイクル管理下で動かす方が安全。
+
+**決定: DEFER**
+- Phase 1 / MVPではBernsteinをruntime dependencyに追加せず、Custom Git Worktree adapter (`subsched.tasks.worktree`) を採用する。
+- 再評価期限: Phase 2 Native execution安定後、またはBernstein側でcapacity-aware routingおよびdirty worktree保持がサポートされた時点。
+
 ---
 
 # 60. Implementation Structure
