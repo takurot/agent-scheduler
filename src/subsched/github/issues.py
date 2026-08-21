@@ -103,8 +103,12 @@ class GitHubIssueSource:
     def __init__(self, run: RunCommand | None = None) -> None:
         self._run = run
 
-    def list_open(self, repo: str, *, label: str | None = None) -> tuple[Issue, ...]:
+    def list_open(
+        self, repo: str, *, label: str | None = None, limit: int = 1000
+    ) -> tuple[Issue, ...]:
         validate_repo(repo)
+        if limit <= 0:
+            raise ValueError("limit must be positive")
         argv = [
             "gh",
             "issue",
@@ -114,7 +118,7 @@ class GitHubIssueSource:
             "--state",
             "open",
             "--limit",
-            "100",
+            str(limit),
         ]
         if label:
             argv.extend(("--label", label))

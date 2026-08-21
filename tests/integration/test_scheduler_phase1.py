@@ -283,3 +283,53 @@ def test_invalid_persisted_worktree_is_rejected_before_directory_creation(tmp_pa
 
     assert outside.exists() is False
     assert worker.dispatches == []
+
+
+def test_security_sensitive_issues_never_generate_tasks_or_dispatches(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 12, 22, tzinfo=UTC)
+    worker = ScriptedWorker({(1, "claude"): (AgentResult(AgentResultKind.PASS),)})
+    scheduler = Scheduler(
+        store=JsonStateStore(tmp_path),
+        router=Router((AgentConfig("claude", 100),)),
+        worker=worker,
+        worktree_root=tmp_path / "worktrees",
+    )
+    issues = (
+        Issue(number=1, title="Safe issue"),
+        Issue(number=2, title="Leak secret", labels=("security-sensitive",)),
+    )
+    scheduler.discover(issues)
+
+    assert [t.issue_number for t in scheduler.tasks] == [1]
+    scheduler.run_until_waiting((available("claude", now),), now=now)
+    assert worker.dispatches == [(1, "claude")]
+
+
+def test_dependency_cycle_and_failed_dependency_handling(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 12, 22, tzinfo=UTC)
+    worker = ScriptedWorker({(1, "claude"): (AgentResult(AgentResultKind.FAILURE),)})
+    scheduler = Scheduler(
+        store=JsonStateStore(tmp_path),
+        router=Router((AgentConfig("claude", 100),)),
+        worker=worker,
+        worktree_root=tmp_path / "worktrees",
+        max_agent_failures=1,
+    )
+    issues = (
+        Issue(number=1, title="Root"),
+        Issue(number=2, title="Depends on 1", body="Blocked-By: #1"),
+        Issue(number=3, title="Cycle A", body="Blocked-By: #4"),
+        Issue(number=4, title="Cycle B", body="Blocked-By: #3"),
+    )
+    scheduler.discover(issues)
+
+    # 3 and 4 are detected in cycle and immediately blocked
+    assert scheduler.queue.get(3).status is TaskState.BLOCKED
+    assert scheduler.queue.get(4).status is TaskState.BLOCKED
+
+    # Run root task 1, which fails
+    scheduler.run_until_waiting((available("claude", now),), now=now)
+    assert scheduler.queue.get(1).status is TaskState.NEEDS_HUMAN
+
+    # Task 2 transitions to BLOCKED because its dependency 1 is blocked/terminal
+    assert scheduler.queue.get(2).status is TaskState.BLOCKED

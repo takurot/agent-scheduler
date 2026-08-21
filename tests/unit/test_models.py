@@ -111,3 +111,50 @@ def test_non_available_capacity_requires_a_fresh_probe(state: CapacityState) -> 
 def test_capacity_result_requires_reset_for_capacity_event() -> None:
     with pytest.raises(ValueError, match="reset_at"):
         AgentResult(kind=AgentResultKind.CAPACITY_SESSION)
+
+
+def test_self_dependency_creates_blocked_task() -> None:
+    issue = Issue(number=101, title="Self blocked", body="Blocked-By: #101")
+    task = Task.from_issue(issue)
+    assert task.status is TaskState.BLOCKED
+    assert task.dependencies == (101,)
+
+
+def test_detect_dependency_cycles() -> None:
+    from subsched.models import detect_dependency_cycles
+
+    t1 = Task(
+        task_id="github-1",
+        issue_number=1,
+        title="1",
+        labels=(),
+        status=TaskState.WAITING_DEPENDENCY,
+        dependencies=(2,),
+    )
+    t2 = Task(
+        task_id="github-2",
+        issue_number=2,
+        title="2",
+        labels=(),
+        status=TaskState.WAITING_DEPENDENCY,
+        dependencies=(3,),
+    )
+    t3 = Task(
+        task_id="github-3",
+        issue_number=3,
+        title="3",
+        labels=(),
+        status=TaskState.WAITING_DEPENDENCY,
+        dependencies=(1,),
+    )
+    t4 = Task(
+        task_id="github-4",
+        issue_number=4,
+        title="4",
+        labels=(),
+        status=TaskState.READY,
+        dependencies=(),
+    )
+
+    cycles = detect_dependency_cycles((t1, t2, t3, t4))
+    assert cycles == {1, 2, 3}

@@ -15,6 +15,7 @@ from subsched.models import (
     Issue,
     Task,
     TaskState,
+    detect_dependency_cycles,
 )
 from subsched.queue import TaskQueue
 from subsched.router import FRESHNESS, Router
@@ -91,15 +92,26 @@ class Scheduler:
     def discover(
         self, issues: Iterable[Issue], *, exclude_labels: frozenset[str] = frozenset()
     ) -> None:
+        effective_exclude = frozenset({"security-sensitive"}).union(exclude_labels)
         existing = {task.issue_number for task in self.tasks}
         additions = tuple(
             Task.from_issue(issue)
             for issue in issues
-            if issue.number not in existing and not exclude_labels.intersection(issue.labels)
+            if issue.number not in existing and not effective_exclude.intersection(issue.labels)
         )
         if len(self.tasks) + len(additions) > self.max_tasks:
             raise ValueError(f"task limit exceeded ({self.max_tasks})")
-        self.queue = self.queue.append(additions)
+        new_queue = self.queue.append(additions)
+        cycles = detect_dependency_cycles(new_queue.tasks)
+        if cycles:
+            updated_tasks = tuple(
+                task.transition(TaskState.BLOCKED)
+                if task.issue_number in cycles and task.status is TaskState.WAITING_DEPENDENCY
+                else task
+                for task in new_queue.tasks
+            )
+            new_queue = replace(new_queue, tasks=updated_tasks)
+        self.queue = new_queue
         self._persist()
 
     def run_until_waiting(
@@ -237,9 +249,26 @@ class Scheduler:
 
     def _release_dependencies(self, now: datetime) -> None:
         completed = {task.issue_number for task in self.tasks if task.status is TaskState.COMPLETE}
+        terminal_failed = {
+            task.issue_number
+            for task in self.tasks
+            if task.status
+            in {
+                TaskState.FAILED,
+                TaskState.CANCELLED,
+                TaskState.BLOCKED,
+                TaskState.NEEDS_HUMAN,
+            }
+        }
+        all_known = {task.issue_number for task in self.tasks}
         for task in self.tasks:
-            if task.status is TaskState.WAITING_DEPENDENCY and set(task.dependencies) <= completed:
-                self.queue = self.queue.replace(task.transition(TaskState.READY, now=now))
+            if task.status is TaskState.WAITING_DEPENDENCY:
+                if set(task.dependencies) <= completed:
+                    self.queue = self.queue.replace(task.transition(TaskState.READY, now=now))
+                elif any(
+                    dep in terminal_failed or dep not in all_known for dep in task.dependencies
+                ):
+                    self.queue = self.queue.replace(task.transition(TaskState.BLOCKED, now=now))
 
     def _validate_worktree(self, task: Task) -> None:
         self._validate_worktree_path(task)
