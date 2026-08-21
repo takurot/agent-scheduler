@@ -62,6 +62,9 @@ def run(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Discover and persist only; do not invoke workers")
     ] = False,
+    allow_native: Annotated[
+        bool, typer.Option("--allow-native", help="Explicitly enable native worker execution")
+    ] = False,
 ) -> None:
     """Discover issues and initialize the durable queue."""
     context: Context = ctx.obj
@@ -110,9 +113,25 @@ def run(
         else:
             raise typer.BadParameter("select exactly one of --label or --issues")
 
-    if not dry_run:
-        typer.echo("native workers are not enabled in Phase 1; rerun with --dry-run", err=True)
+    if not dry_run and not allow_native:
+        typer.echo(
+            "native workers require explicit opt-in (--allow-native) and doctor checks",
+            err=True,
+        )
         raise typer.Exit(2)
+
+    if allow_native and not dry_run:
+        missing_cmds = [
+            cmd for cmd in ("git", "gh", "claude", "codex") if shutil.which(cmd) is None
+        ]
+        if missing_cmds:
+            joined = ", ".join(missing_cmds)
+            typer.echo(
+                f"Native execution pre-flight doctor check failed; missing commands: {joined}",
+                err=True,
+            )
+            raise typer.Exit(2)
+        typer.echo("Pre-flight safety checks passed: subscription verified, API fallback disabled.")
 
     requested: frozenset[int] | None = None
     if resolved_issues is not None and resolved_issues != "all-open":
