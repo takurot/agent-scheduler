@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,12 +34,27 @@ def run_verification(
     output_limit_bytes: int = 524288,
 ) -> VerificationReport:
     """Execute verification commands in worktree using isolated process runner."""
-    clean_env = filter_environment(env or {}, allowlist=COMMON_ENV_ALLOWLIST)
+    source_env = dict(os.environ) if env is None else env
+    clean_env = filter_environment(source_env, allowlist=COMMON_ENV_ALLOWLIST)
     gate_results: list[GateResult] = []
     all_passed = True
 
     for cmd in commands:
-        argv = tuple(shlex.split(cmd))
+        try:
+            argv = tuple(shlex.split(cmd))
+        except ValueError as err:
+            all_passed = False
+            gate_results.append(
+                GateResult(
+                    command=cmd,
+                    exit_code=1,
+                    stdout="",
+                    stderr=f"malformed command (unbalanced quotes): {err}",
+                    passed=False,
+                )
+            )
+            break
+
         if not argv:
             continue
         req = ProcessExecutionRequest(

@@ -57,6 +57,7 @@ class Scheduler:
         worktree_adapter: WorktreeAdapter | None = None,
         clock: Clock | None = None,
         event_sources: tuple[EventSource, ...] = (),
+        verification_commands: tuple[str, ...] = ('pytest -q', 'ruff check .'),
         label_scores: dict[str, int] | None = None,
         max_agent_failures: int = 2,
         max_agent_switches: int = 6,
@@ -69,6 +70,7 @@ class Scheduler:
         self.worktree_adapter = worktree_adapter
         self.clock = clock or SystemClock()
         self.event_sources = event_sources
+        self.verification_commands = verification_commands
         self.queue = TaskQueue(store.load_tasks(), label_scores=label_scores)
         persisted_capacities = store.load_capacities()
         allowed_cooldowns = {
