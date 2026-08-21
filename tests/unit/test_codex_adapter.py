@@ -4,13 +4,16 @@ import io
 import json
 import os
 import subprocess
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.codex import (
+    CodexAgent,
     CodexProbeConfig,
     CodexProbeSafetyError,
     build_codex_exec_argv,
@@ -568,3 +571,47 @@ class _ReapErrorProcess(_TimedOutProcess):
         if len(self.timeouts) == 1:
             raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout or 0)
         raise OSError("unsafe cleanup detail")
+
+
+
+def test_codex_agent_blocked_without_opt_in(tmp_path: Path) -> None:
+    agent = CodexAgent(allow_live=False)
+    req = ProcessExecutionRequest(
+        argv=(sys.executable, "-c", "print('hello')"),
+        cwd=tmp_path,
+        env={},
+    )
+    result = agent.execute(req)
+    assert result.kind is AgentResultKind.FAILURE
+    assert "opted in" in result.output
+
+
+def test_codex_agent_blocked_without_verified_billing(tmp_path: Path) -> None:
+    agent = CodexAgent(allow_live=True, subscription_billing_verified=False)
+    req = ProcessExecutionRequest(
+        argv=(sys.executable, "-c", "print('hello')"),
+        cwd=tmp_path,
+        env={},
+    )
+    result = agent.execute(req)
+    assert result.kind is AgentResultKind.UNKNOWN_BILLING
+
+
+def test_codex_agent_executes_when_verified(tmp_path: Path) -> None:
+    agent = CodexAgent(allow_live=True, subscription_billing_verified=True)
+    msg = "{\"result\": \"pass\", \"summary\": \"all good\"}"
+    script = (
+        "import json; "
+        "print(json.dumps({'type': 'thread.started', 'thread_id': 'th_123'})); "
+        "print(json.dumps({'type': 'turn.started'})); "
+        f"print(json.dumps({{'type': 'item.completed', "
+        f"'item': {{'type': 'agent_message', 'text': {msg!r}}}}})); "
+        "print(json.dumps({'type': 'turn.completed', 'usage': {}}))"
+    )
+    req = ProcessExecutionRequest(
+        argv=(sys.executable, "-c", script),
+        cwd=tmp_path,
+        env={"PATH": ""},
+    )
+    result = agent.execute(req)
+    assert result.kind is AgentResultKind.PASS
