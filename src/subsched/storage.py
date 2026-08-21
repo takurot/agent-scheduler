@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import secrets
+import socket
+import subprocess
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -17,14 +23,191 @@ class StateCorruptionError(RuntimeError):
     pass
 
 
+class SchedulerLockError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class LockRecord:
+    pid: int
+    process_start_time: str
+    nonce: str
+    created_at: str
+    hostname: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "pid": self.pid,
+            "process_start_time": self.process_start_time,
+            "nonce": self.nonce,
+            "created_at": self.created_at,
+            "hostname": self.hostname,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> LockRecord:
+        return cls(
+            pid=int(data["pid"]),
+            process_start_time=str(data["process_start_time"]),
+            nonce=str(data["nonce"]),
+            created_at=str(data["created_at"]),
+            hostname=str(data["hostname"]),
+        )
+
+
+def get_process_start_time(pid: int) -> str | None:
+    if pid <= 0:
+        return None
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def is_process_alive(pid: int, expected_start_time: str | None = None) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        if expected_start_time is not None:
+            actual_start = get_process_start_time(pid)
+            if actual_start is not None and actual_start != expected_start_time:
+                return False
+        return True
+
+    if expected_start_time is not None:
+        actual_start = get_process_start_time(pid)
+        if actual_start is not None and actual_start != expected_start_time:
+            return False
+
+    return True
+
+
+class SchedulerLock:
+    def __init__(self, lock_path: Path) -> None:
+        self.lock_path = lock_path
+        self.nonce: str | None = None
+        self._held = False
+
+    def acquire(self) -> None:
+        if self._held:
+            return
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.lock_path.parent, 0o700)
+
+        my_pid = os.getpid()
+        my_start_time = get_process_start_time(my_pid) or datetime.now(UTC).isoformat()
+        my_nonce = secrets.token_hex(16)
+        my_record = LockRecord(
+            pid=my_pid,
+            process_start_time=my_start_time,
+            nonce=my_nonce,
+            created_at=datetime.now(UTC).isoformat(),
+            hostname=socket.gethostname(),
+        )
+
+        for _ in range(2):
+            try:
+                fd = os.open(
+                    self.lock_path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    0o600,
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(my_record.to_dict(), f, indent=2)
+                    f.write("\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                self.nonce = my_nonce
+                self._held = True
+                return
+            except FileExistsError as err:
+                existing = self._read_lock()
+                if existing is None:
+                    with contextlib.suppress(OSError):
+                        self.lock_path.unlink(missing_ok=True)
+                    continue
+                if is_process_alive(existing.pid, existing.process_start_time):
+                    raise SchedulerLockError(
+                        f"scheduler is already running with PID {existing.pid} "
+                        f"on {existing.hostname}"
+                    ) from err
+                with contextlib.suppress(OSError):
+                    self.lock_path.unlink(missing_ok=True)
+                continue
+
+        raise SchedulerLockError("failed to acquire scheduler lock")
+
+    def release(self) -> None:
+        if not self._held:
+            return
+        try:
+            existing = self._read_lock()
+            if existing is not None and existing.nonce == self.nonce:
+                self.lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        finally:
+            self._held = False
+            self.nonce = None
+
+    def _read_lock(self) -> LockRecord | None:
+        try:
+            if not self.lock_path.exists():
+                return None
+            data = json.loads(self.lock_path.read_text(encoding="utf-8"))
+            return LockRecord.from_dict(data)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return None
+
+    def __enter__(self) -> SchedulerLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.release()
+
+
 class JsonStateStore:
     def __init__(self, repository: Path) -> None:
         self.state_dir = repository / ".ai"
         self.path = self.state_dir / "scheduler.json"
+        self.lock_file = self.state_dir / "scheduler.lock"
 
-    def save_tasks(self, tasks: Iterable[Task], *, paused: bool = False) -> None:
+    def lock(self) -> SchedulerLock:
+        return SchedulerLock(self.lock_file)
+
+    def get_revision(self) -> int:
+        if not self.path.exists():
+            return 0
+        return int(self._load_payload().get("revision", 1))
+
+    def save_tasks(
+        self,
+        tasks: Iterable[Task],
+        *,
+        paused: bool = False,
+        expected_revision: int | None = None,
+    ) -> None:
         capacities = self.load_capacities() if self.path.exists() else ()
-        self.save_state(tasks, paused=paused, capacities=capacities)
+        self.save_state(
+            tasks,
+            paused=paused,
+            capacities=capacities,
+            expected_revision=expected_revision,
+        )
 
     def save_state(
         self,
@@ -32,9 +215,19 @@ class JsonStateStore:
         *,
         paused: bool = False,
         capacities: Iterable[Capacity] = (),
+        expected_revision: int | None = None,
     ) -> None:
+        current_revision = self.get_revision()
+        if expected_revision is not None and current_revision != expected_revision:
+            raise StateCorruptionError(
+                f"lost update detected: expected revision {expected_revision}, "
+                f"got {current_revision}"
+            )
+        new_revision = current_revision + 1
+
         payload = {
             "schema_version": SCHEMA_VERSION,
+            "revision": new_revision,
             "paused": paused,
             "tasks": [task.to_dict() for task in tasks],
             "capacities": [capacity.to_dict() for capacity in capacities],
@@ -89,7 +282,8 @@ class JsonStateStore:
         return bool(self._load_payload().get("paused", False)) if self.path.exists() else False
 
     def set_paused(self, paused: bool) -> None:
-        self.save_tasks(self.load_tasks(), paused=paused)
+        with self.lock():
+            self.save_tasks(self.load_tasks(), paused=paused)
 
     def _load_payload(self) -> dict[str, Any]:
         self._validate_state_directory()

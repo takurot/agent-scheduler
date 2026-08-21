@@ -17,7 +17,7 @@ from subsched.config import (
 )
 from subsched.github.issues import GitHubCliError, GitHubIssueSource, diagnose_token
 from subsched.models import Task, TaskState
-from subsched.storage import JsonStateStore, StateCorruptionError
+from subsched.storage import JsonStateStore, SchedulerLockError, StateCorruptionError
 
 app = typer.Typer(no_args_is_help=True, help="Subscription-aware coding agent scheduler")
 RepositoryOption = Annotated[
@@ -136,15 +136,20 @@ def run(
             typer.echo("Requested issues are not open or were not found", err=True)
             raise typer.Exit(1)
 
-    persisted = context.store.load_tasks()
-    existing = {task.issue_number for task in persisted}
-    additions = tuple(task for task in discovered if task.number not in existing)
-    max_tasks = cfg.execution.max_tasks_per_run
-    if len(persisted) + len(additions) > max_tasks:
-        typer.echo(f"Task limit exceeded ({max_tasks})", err=True)
-        raise typer.Exit(2)
-    tasks = (*persisted, *(Task.from_issue(item) for item in additions))
-    context.store.save_tasks(tasks, paused=context.store.is_paused())
+    try:
+        with context.store.lock():
+            persisted = context.store.load_tasks()
+            existing = {task.issue_number for task in persisted}
+            additions = tuple(task for task in discovered if task.number not in existing)
+            max_tasks = cfg.execution.max_tasks_per_run
+            if len(persisted) + len(additions) > max_tasks:
+                typer.echo(f"Task limit exceeded ({max_tasks})", err=True)
+                raise typer.Exit(2)
+            tasks = (*persisted, *(Task.from_issue(item) for item in additions))
+            context.store.save_tasks(tasks, paused=context.store.is_paused())
+    except SchedulerLockError as error:
+        typer.echo(f"Lock error: {error}", err=True)
+        raise typer.Exit(1) from error
     typer.echo(f"{len(additions)} issue(s) discovered and persisted (dry-run)")
 
 
@@ -171,7 +176,11 @@ def status(ctx: typer.Context) -> None:
 def pause(ctx: typer.Context) -> None:
     """Stop new dispatches; an already running worker is not interrupted."""
     context: Context = ctx.obj
-    context.store.set_paused(True)
+    try:
+        context.store.set_paused(True)
+    except SchedulerLockError as error:
+        typer.echo(f"Lock error: {error}", err=True)
+        raise typer.Exit(1) from error
     typer.echo("Scheduler paused; running work is unchanged")
 
 
@@ -179,7 +188,11 @@ def pause(ctx: typer.Context) -> None:
 def resume(ctx: typer.Context) -> None:
     """Allow new dispatches."""
     context: Context = ctx.obj
-    context.store.set_paused(False)
+    try:
+        context.store.set_paused(False)
+    except SchedulerLockError as error:
+        typer.echo(f"Lock error: {error}", err=True)
+        raise typer.Exit(1) from error
     typer.echo("Scheduler resumed")
 
 
@@ -187,20 +200,27 @@ def resume(ctx: typer.Context) -> None:
 def cancel(ctx: typer.Context, issue: Annotated[int, typer.Argument(min=1)]) -> None:
     """Cancel one task while preserving its files and handoff."""
     context: Context = ctx.obj
-    tasks = context.store.load_tasks()
-    matches = tuple(task for task in tasks if task.issue_number == issue)
-    if not matches:
-        typer.echo(f"Issue #{issue} is not in scheduler state", err=True)
-        raise typer.Exit(1)
-    task = matches[0]
-    if task.status is not TaskState.CANCELLED:
-        try:
-            replacement = task.transition(TaskState.CANCELLED)
-        except ValueError as error:
-            typer.echo(f"Issue #{issue} cannot be cancelled from {task.status}", err=True)
-            raise typer.Exit(1) from error
-        updated = tuple(replacement if item.issue_number == issue else item for item in tasks)
-        context.store.save_tasks(updated, paused=context.store.is_paused())
+    try:
+        with context.store.lock():
+            tasks = context.store.load_tasks()
+            matches = tuple(task for task in tasks if task.issue_number == issue)
+            if not matches:
+                typer.echo(f"Issue #{issue} is not in scheduler state", err=True)
+                raise typer.Exit(1)
+            task = matches[0]
+            if task.status is not TaskState.CANCELLED:
+                try:
+                    replacement = task.transition(TaskState.CANCELLED)
+                except ValueError as error:
+                    typer.echo(f"Issue #{issue} cannot be cancelled from {task.status}", err=True)
+                    raise typer.Exit(1) from error
+                updated = tuple(
+                    replacement if item.issue_number == issue else item for item in tasks
+                )
+                context.store.save_tasks(updated, paused=context.store.is_paused())
+    except SchedulerLockError as error:
+        typer.echo(f"Lock error: {error}", err=True)
+        raise typer.Exit(1) from error
     typer.echo(f"Issue #{issue} cancelled; worktree was preserved")
 
 
