@@ -86,3 +86,61 @@ def test_scheduler_rejects_persisted_available_capacity(tmp_path: Path) -> None:
             worker=ScriptedWorker({}),
             worktree_root=tmp_path / "worktrees",
         )
+
+
+def test_scheduler_lock_mutual_exclusion(tmp_path: Path) -> None:
+    from subsched.storage import SchedulerLock, SchedulerLockError
+
+    lock_file = tmp_path / ".ai" / "scheduler.lock"
+    lock1 = SchedulerLock(lock_file)
+    lock2 = SchedulerLock(lock_file)
+
+    lock1.acquire()
+    assert lock1._held is True
+
+    with pytest.raises(SchedulerLockError, match="already running"):
+        lock2.acquire()
+
+    lock1.release()
+    assert lock1._held is False
+
+    # lock2 can now acquire
+    lock2.acquire()
+    assert lock2._held is True
+    lock2.release()
+
+
+def test_scheduler_lock_stale_lock_recovery(tmp_path: Path) -> None:
+    from subsched.storage import LockRecord, SchedulerLock
+
+    lock_file = tmp_path / ".ai" / "scheduler.lock"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    # Stale record with non-existent dead PID 999999
+    stale_record = LockRecord(
+        pid=999999,
+        process_start_time="2020-01-01T00:00:00Z",
+        nonce="deadbeef",
+        created_at="2020-01-01T00:00:00Z",
+        hostname="old-host",
+    )
+    lock_file.write_text(json.dumps(stale_record.to_dict()), encoding="utf-8")
+
+    lock = SchedulerLock(lock_file)
+    lock.acquire()
+    assert lock._held is True
+    lock.release()
+
+
+def test_state_store_cas_lost_update_detection(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.save_tasks(())
+    rev = store.get_revision()
+
+    # Save with matching expected_revision succeeds
+    store.save_tasks((), expected_revision=rev)
+    new_rev = store.get_revision()
+    assert new_rev == rev + 1
+
+    # Save with stale expected_revision raises StateCorruptionError
+    with pytest.raises(StateCorruptionError, match="lost update"):
+        store.save_tasks((), expected_revision=rev)
