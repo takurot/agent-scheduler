@@ -37,7 +37,7 @@ def test_github_adapter_uses_argv_and_validates_json(monkeypatch: pytest.MonkeyP
             "--state",
             "open",
             "--limit",
-            "100",
+            "1000",
             "--label",
             "ai-ready",
             "--json",
@@ -57,27 +57,19 @@ def test_github_adapter_redacts_cli_failure() -> None:
     assert "authentication failed" not in str(error.value)
 
 
-def test_github_adapter_current_limit_argv_caps_at_100() -> None:
-    """Records the A4 spike finding: `list_open` always requests `--limit 100`.
-
-    A live `gh issue list --limit 130` against a public repository with >100 open issues
-    (measured 2026-08-13, see `.assumptions/github-cli.md`) returned all 130 requested items
-    with a single command and zero stderr, confirming `gh` paginates internally up to
-    whatever `--limit` is given. This repository's adapter hardcodes `--limit 100`, so a
-    monitored repository with more than 100 currently-open matching issues will silently miss
-    the remainder. Fixing that is out of scope for A4 (see B4 acceptance criteria); this test
-    only pins the current argv so a future change is a deliberate, reviewed decision.
-    """
+def test_github_adapter_default_limit_and_custom_limit() -> None:
     calls: list[list[str]] = []
 
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, stdout="[]", stderr="")
 
-    GitHubIssueSource(run=fake_run).list_open("owner/project")
+    source = GitHubIssueSource(run=fake_run)
+    source.list_open("owner/project")
+    assert calls[0][calls[0].index("--limit") + 1] == "1000"
 
-    assert "--limit" in calls[0]
-    assert calls[0][calls[0].index("--limit") + 1] == "100"
+    source.list_open("owner/project", limit=250)
+    assert calls[1][calls[1].index("--limit") + 1] == "250"
 
 
 def test_github_adapter_parses_over_100_issues_without_truncation() -> None:

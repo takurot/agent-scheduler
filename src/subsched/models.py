@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -170,6 +171,29 @@ def parse_dependencies(body: str) -> tuple[int, ...]:
     return tuple(sorted(numbers))
 
 
+def detect_dependency_cycles(tasks: Iterable[Task]) -> set[int]:
+    task_map = {task.issue_number: task.dependencies for task in tasks}
+    in_cycle: set[int] = set()
+
+    for start_node in task_map:
+        def dfs(node: int, path: set[int]) -> bool:
+            if node in path:
+                in_cycle.add(node)
+                return True
+            path.add(node)
+            has_cycle = False
+            for dep in task_map.get(node, ()):
+                if dfs(dep, path):
+                    in_cycle.add(node)
+                    has_cycle = True
+            path.remove(node)
+            return has_cycle
+
+        dfs(start_node, set())
+
+    return in_cycle
+
+
 @dataclass(frozen=True, slots=True)
 class Task:
     task_id: str
@@ -188,7 +212,12 @@ class Task:
     @classmethod
     def from_issue(cls, issue: Issue, *, worktree: str | None = None) -> Task:
         dependencies = parse_dependencies(issue.body)
-        initial = TaskState.WAITING_DEPENDENCY if dependencies else TaskState.READY
+        if issue.number in dependencies:
+            initial = TaskState.BLOCKED
+        elif dependencies:
+            initial = TaskState.WAITING_DEPENDENCY
+        else:
+            initial = TaskState.READY
         return cls(
             task_id=f"github-{issue.number}",
             issue_number=issue.number,
