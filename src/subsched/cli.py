@@ -8,14 +8,18 @@ from typing import Annotated
 
 import typer
 
-from subsched.config import ConfigError, validate_repo
+from subsched.config import (
+    ConfigError,
+    SchedulerConfig,
+    load_config,
+    parse_natural_language_instruction,
+    validate_repo,
+)
 from subsched.github.issues import GitHubCliError, GitHubIssueSource, diagnose_token
 from subsched.models import Task, TaskState
 from subsched.storage import JsonStateStore, StateCorruptionError
 
 app = typer.Typer(no_args_is_help=True, help="Subscription-aware coding agent scheduler")
-DEFAULT_EXCLUDE_LABELS = frozenset({"blocked", "human-only", "security-sensitive"})
-MAX_TASKS_PER_RUN = 50
 RepositoryOption = Annotated[
     Path,
     typer.Option("--repository", hidden=True, file_okay=False, resolve_path=True),
@@ -45,9 +49,16 @@ def _parse_issue_numbers(value: str) -> tuple[int, ...]:
 @app.command()
 def run(
     ctx: typer.Context,
-    repo: Annotated[str, typer.Option("--repo", help="GitHub owner/repository")],
+    query: Annotated[
+        str | None,
+        typer.Argument(help="Natural language instruction (e.g. 'GitHubのopen issueをすべて実行')"),
+    ] = None,
+    repo: Annotated[str | None, typer.Option("--repo", help="GitHub owner/repository")] = None,
     label: Annotated[str | None, typer.Option("--label")] = None,
     issues: Annotated[str | None, typer.Option("--issues")] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", help="Path to YAML configuration file")
+    ] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Discover and persist only; do not invoke workers")
     ] = False,
@@ -55,28 +66,69 @@ def run(
     """Discover issues and initialize the durable queue."""
     context: Context = ctx.obj
     try:
-        validate_repo(repo)
+        cfg = load_config(config) if config is not None else SchedulerConfig()
+    except ConfigError as error:
+        raise typer.BadParameter(str(error), param_hint="--config") from error
+
+    resolved_repo = repo
+    resolved_label = label
+    resolved_issues = issues
+
+    if query is not None:
+        try:
+            intent = parse_natural_language_instruction(query)
+            if intent.repo and resolved_repo is None:
+                resolved_repo = intent.repo
+            if intent.issues and resolved_issues is None and resolved_label is None:
+                resolved_issues = intent.issues
+            if intent.label and resolved_label is None and resolved_issues is None:
+                resolved_label = intent.label
+        except ConfigError as error:
+            raise typer.BadParameter(str(error)) from error
+
+    if resolved_repo is None:
+        resolved_repo = cfg.github.repo
+
+    if resolved_repo is None:
+        raise typer.BadParameter(
+            "missing required --repo option or config.github.repo", param_hint="--repo"
+        )
+
+    try:
+        validate_repo(resolved_repo)
     except ConfigError as error:
         raise typer.BadParameter(str(error), param_hint="--repo") from error
-    if (label is None) == (issues is None):
+
+    if resolved_label is not None and resolved_issues is not None:
         raise typer.BadParameter("select exactly one of --label or --issues")
+
+    if resolved_label is None and resolved_issues is None:
+        if cfg.github.mode == "all-open":
+            resolved_issues = "all-open"
+        elif cfg.github.mode == "label" and cfg.github.include_labels:
+            resolved_label = cfg.github.include_labels[0]
+        else:
+            raise typer.BadParameter("select exactly one of --label or --issues")
+
     if not dry_run:
         typer.echo("native workers are not enabled in Phase 1; rerun with --dry-run", err=True)
         raise typer.Exit(2)
 
     requested: frozenset[int] | None = None
-    if issues is not None and issues != "all-open":
-        requested = frozenset(_parse_issue_numbers(issues))
+    if resolved_issues is not None and resolved_issues != "all-open":
+        requested = frozenset(_parse_issue_numbers(resolved_issues))
     try:
-        open_issues = GitHubIssueSource().list_open(repo, label=label)
+        open_issues = GitHubIssueSource().list_open(resolved_repo, label=resolved_label)
     except GitHubCliError as error:
         typer.echo("GitHub discovery failed (gh exit/error); verify authentication", err=True)
         raise typer.Exit(1) from error
+
+    exclude_labels = frozenset(cfg.github.exclude_labels)
     discovered = tuple(
         issue
         for issue in open_issues
         if (requested is None or issue.number in requested)
-        and not DEFAULT_EXCLUDE_LABELS.intersection(issue.labels)
+        and not exclude_labels.intersection(issue.labels)
     )
     if requested is not None:
         missing = requested - {issue.number for issue in open_issues}
@@ -87,8 +139,9 @@ def run(
     persisted = context.store.load_tasks()
     existing = {task.issue_number for task in persisted}
     additions = tuple(task for task in discovered if task.number not in existing)
-    if len(persisted) + len(additions) > MAX_TASKS_PER_RUN:
-        typer.echo(f"Task limit exceeded ({MAX_TASKS_PER_RUN})", err=True)
+    max_tasks = cfg.execution.max_tasks_per_run
+    if len(persisted) + len(additions) > max_tasks:
+        typer.echo(f"Task limit exceeded ({max_tasks})", err=True)
         raise typer.Exit(2)
     tasks = (*persisted, *(Task.from_issue(item) for item in additions))
     context.store.save_tasks(tasks, paused=context.store.is_paused())

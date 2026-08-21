@@ -158,3 +158,22 @@ def test_cli_enforces_task_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
     assert result.exit_code != 0
     assert "Task limit exceeded (50)" in result.output
+
+
+def test_cli_runs_with_natural_language_query(tmp_path: Path) -> None:
+    result = invoke(
+        tmp_path, "run", "GitHubのopen issueをすべて実行", "--repo", "owner/project", "--dry-run"
+    )
+    assert result.exit_code == 0, result.output
+    assert "4 issue(s) discovered" in result.output
+
+
+def test_cli_runs_with_config_file(tmp_path: Path) -> None:
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\n  mode: all-open\nexecution:\n  concurrency: 1\n",
+        encoding="utf-8",
+    )
+    result = invoke(tmp_path, "run", "--config", str(config_file), "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert "4 issue(s) discovered" in result.output
