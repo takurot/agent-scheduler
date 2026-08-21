@@ -208,6 +208,7 @@ class Task:
     dependencies: tuple[int, ...] = ()
     pr: int | None = None
     updated_at: datetime | None = None
+    description: str = ""
 
     @classmethod
     def from_issue(cls, issue: Issue, *, worktree: str | None = None) -> Task:
@@ -226,6 +227,7 @@ class Task:
             status=initial,
             worktree=worktree,
             dependencies=dependencies,
+            description=issue.body,
         )
 
     def transition(
@@ -263,6 +265,7 @@ class Task:
             "dependencies": list(self.dependencies),
             "pr": self.pr,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "description": self.description,
         }
 
     @classmethod
@@ -282,6 +285,7 @@ class Task:
                 dependencies=tuple(int(item) for item in value["dependencies"]),
                 pr=value.get("pr"),
                 updated_at=datetime.fromisoformat(updated) if updated else None,
+                description=str(value.get("description", "")),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("invalid task state") from error

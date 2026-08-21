@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
+from subsched.contract import bootstrap_task_files
 from subsched.events import Clock, EventSource, EventType, SystemClock
 from subsched.models import (
     AgentResult,
@@ -171,6 +172,9 @@ class Scheduler:
             self._validate_worktree_path(task)
             self._ensure_worktree_directory(task)
             self._validate_worktree(task)
+
+        if task.worktree is not None:
+            bootstrap_task_files(Path(task.worktree), task)
 
         dispatched = task.transition(TaskState.DISPATCHED, current_agent=agent, now=current)
         running = dispatched.transition(TaskState.IN_PROGRESS, current_agent=agent, now=current)
