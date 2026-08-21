@@ -203,6 +203,10 @@ class Task:
     status: TaskState
     attempt: int = 0
     agent_switches: int = 0
+    capacity_events: int = 0
+    actual_agent_switches: int = 0
+    last_dispatched_agent: str | None = None
+    per_agent_failures: tuple[tuple[str, int], ...] = ()
     current_agent: str | None = None
     worktree: str | None = None
     dependencies: tuple[int, ...] = ()
@@ -260,6 +264,10 @@ class Task:
             "status": self.status.value,
             "attempt": self.attempt,
             "agent_switches": self.agent_switches,
+            "capacity_events": self.capacity_events,
+            "actual_agent_switches": self.actual_agent_switches,
+            "last_dispatched_agent": self.last_dispatched_agent,
+            "per_agent_failures": dict(self.per_agent_failures),
             "current_agent": self.current_agent,
             "worktree": self.worktree,
             "dependencies": list(self.dependencies),
@@ -280,6 +288,12 @@ class Task:
                 status=TaskState(value["status"]),
                 attempt=int(value["attempt"]),
                 agent_switches=int(value.get("agent_switches", 0)),
+                capacity_events=int(value.get("capacity_events", 0)),
+                actual_agent_switches=int(value.get("actual_agent_switches", 0)),
+                last_dispatched_agent=value.get("last_dispatched_agent"),
+                per_agent_failures=tuple(
+                    (str(k), int(v)) for k, v in value.get("per_agent_failures", {}).items()
+                ),
                 current_agent=value.get("current_agent"),
                 worktree=value.get("worktree"),
                 dependencies=tuple(int(item) for item in value["dependencies"]),

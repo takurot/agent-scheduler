@@ -176,7 +176,15 @@ class Scheduler:
         if task.worktree is not None:
             bootstrap_task_files(Path(task.worktree), task)
 
+        actual_switches = task.actual_agent_switches
+        if task.last_dispatched_agent is not None and task.last_dispatched_agent != agent:
+            actual_switches += 1
         dispatched = task.transition(TaskState.DISPATCHED, current_agent=agent, now=current)
+        dispatched = replace(
+            dispatched,
+            actual_agent_switches=actual_switches,
+            last_dispatched_agent=agent,
+        )
         running = dispatched.transition(TaskState.IN_PROGRESS, current_agent=agent, now=current)
         self.queue = self.queue.replace(running)
         self._persist()
@@ -226,7 +234,12 @@ class Scheduler:
                     confidence="high",
                 ),
             }
-            switched = replace(task, agent_switches=task.agent_switches + 1)
+            new_capacity_events = task.capacity_events + 1
+            switched = replace(
+                task,
+                agent_switches=task.agent_switches + 1,
+                capacity_events=new_capacity_events,
+            )
             self.queue = self.queue.replace(switched)
             if switched.agent_switches >= self.max_agent_switches:
                 waiting = switched.transition(TaskState.WAITING_CAPACITY, current_agent=None)
@@ -236,12 +249,16 @@ class Scheduler:
             else:
                 self.queue = self.queue.requeue_after_capacity_event(task.issue_number)
         else:
+            failures_dict = dict(task.per_agent_failures)
+            failures_dict[agent] = failures_dict.get(agent, 0) + 1
+            per_agent = tuple(sorted(failures_dict.items()))
             retry = task.transition(
                 TaskState.RETRY,
                 current_agent=None,
                 increment_attempt=True,
                 now=now,
             )
+            retry = replace(retry, per_agent_failures=per_agent)
             next_state = (
                 TaskState.NEEDS_HUMAN
                 if retry.attempt >= self.max_agent_failures
