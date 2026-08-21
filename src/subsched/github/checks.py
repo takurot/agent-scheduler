@@ -26,6 +26,7 @@ class PRChecksStatus:
     pr_number: int
     overall_state: CICheckState
     checks: tuple[CICheckResult, ...]
+    detail: str = ""
 
 
 def fetch_pr_checks(
@@ -57,19 +58,23 @@ def fetch_pr_checks(
             env=env,
             check=False,
         )
-        if res.returncode != 0:
-            return PRChecksStatus(
-                pr_number=pr_number, overall_state=CICheckState.UNKNOWN, checks=()
-            )
-        data = json.loads(res.stdout)
+        try:
+            data = json.loads(res.stdout)
+        except json.JSONDecodeError:
+            data = None
+
         if not isinstance(data, list):
             return PRChecksStatus(
-                pr_number=pr_number, overall_state=CICheckState.UNKNOWN, checks=()
+                pr_number=pr_number,
+                overall_state=CICheckState.UNKNOWN,
+                checks=(),
+                detail=res.stderr.strip() if res.stderr else "invalid JSON response from gh",
             )
 
         checks: list[CICheckResult] = []
         has_fail = False
         has_pending = False
+        has_unknown = False
 
         for item in data:
             if not isinstance(item, dict):
@@ -82,7 +87,13 @@ def fetch_pr_checks(
 
             if bucket == "pass" or state_raw in {"success", "pass"}:
                 st = CICheckState.PASS
-            elif bucket == "fail" or state_raw in {"failure", "fail", "error", "timed_out"}:
+            elif bucket in {"fail", "cancel"} or state_raw in {
+                "failure",
+                "fail",
+                "error",
+                "timed_out",
+                "cancelled",
+            }:
                 st = CICheckState.FAIL
                 has_fail = True
             elif bucket == "pending" or state_raw in {"pending", "queued", "in_progress"}:
@@ -90,18 +101,31 @@ def fetch_pr_checks(
                 has_pending = True
             else:
                 st = CICheckState.UNKNOWN
+                has_unknown = True
 
             checks.append(CICheckResult(name=name, state=st, description=desc, link=link))
 
         if not checks:
-            overall = CICheckState.PASS
+            overall = CICheckState.UNKNOWN
         elif has_fail:
             overall = CICheckState.FAIL
         elif has_pending:
             overall = CICheckState.PENDING
+        elif has_unknown:
+            overall = CICheckState.UNKNOWN
         else:
             overall = CICheckState.PASS
 
-        return PRChecksStatus(pr_number=pr_number, overall_state=overall, checks=tuple(checks))
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
-        return PRChecksStatus(pr_number=pr_number, overall_state=CICheckState.UNKNOWN, checks=())
+        return PRChecksStatus(
+            pr_number=pr_number,
+            overall_state=overall,
+            checks=tuple(checks),
+            detail=res.stderr.strip(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return PRChecksStatus(
+            pr_number=pr_number,
+            overall_state=CICheckState.UNKNOWN,
+            checks=(),
+            detail=f"{type(exc).__name__}: {exc}",
+        )
