@@ -173,7 +173,12 @@ def run(
 
 
 @app.command()
-def status(ctx: typer.Context) -> None:
+def status(
+    ctx: typer.Context,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Show detailed task and capacity info")
+    ] = False,
+) -> None:
     """Show persisted scheduler state without contacting providers."""
     context: Context = ctx.obj
     try:
@@ -189,6 +194,13 @@ def status(ctx: typer.Context) -> None:
     counts = Counter(task.status.value for task in tasks)
     for name in sorted(counts):
         typer.echo(f"{name:<22} {counts[name]}")
+
+    if verbose:
+        typer.echo("\nTasks:")
+        for t in tasks:
+            pr_str = f" [PR #{t.pr}]" if t.pr else ""
+            agent_str = f" (agent: {t.current_agent})" if t.current_agent else ""
+            typer.echo(f"  #{t.issue_number:<4} {t.status.value:<18} {t.title}{pr_str}{agent_str}")
 
 
 @app.command()
