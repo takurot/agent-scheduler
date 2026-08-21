@@ -19,6 +19,7 @@ from subsched.models import (
 from subsched.queue import TaskQueue
 from subsched.router import FRESHNESS, Router
 from subsched.storage import JsonStateStore
+from subsched.tasks.worktree import WorktreeAdapter
 
 
 class Worker(Protocol):
@@ -50,6 +51,7 @@ class Scheduler:
         router: Router,
         worker: Worker,
         worktree_root: Path,
+        worktree_adapter: WorktreeAdapter | None = None,
         label_scores: dict[str, int] | None = None,
         max_agent_failures: int = 2,
         max_agent_switches: int = 6,
@@ -59,6 +61,7 @@ class Scheduler:
         self.router = router
         self.worker = worker
         self.worktree_root = worktree_root.resolve()
+        self.worktree_adapter = worktree_adapter
         self.queue = TaskQueue(store.load_tasks(), label_scores=label_scores)
         persisted_capacities = store.load_capacities()
         allowed_cooldowns = {
@@ -129,12 +132,18 @@ class Scheduler:
                 return
 
             task = self.queue.ready()[0]
-            if task.worktree is None:
-                task = task.with_worktree(str(self.worktree_root / f"issue-{task.issue_number}"))
+            if self.worktree_adapter is not None:
+                ctx = self.worktree_adapter.prepare_worktree(task.issue_number)
+                task = task.with_worktree(str(ctx.path))
                 self.queue = self.queue.replace(task)
-            self._validate_worktree_path(task)
-            self._ensure_worktree_directory(task)
-            self._validate_worktree(task)
+            else:
+                if task.worktree is None:
+                    worktree_path = self.worktree_root / f"issue-{task.issue_number}"
+                    task = task.with_worktree(str(worktree_path))
+                    self.queue = self.queue.replace(task)
+                self._validate_worktree_path(task)
+                self._ensure_worktree_directory(task)
+                self._validate_worktree(task)
             dispatched = task.transition(TaskState.DISPATCHED, current_agent=agent, now=current)
             running = dispatched.transition(TaskState.IN_PROGRESS, current_agent=agent, now=current)
             self.queue = self.queue.replace(running)
