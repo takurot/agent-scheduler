@@ -183,8 +183,26 @@ class SchedulerLock:
 class JsonStateStore:
     def __init__(self, repository: Path) -> None:
         self.state_dir = repository / ".ai"
+        self.tasks_dir = self.state_dir / "tasks"
+        self.handoffs_dir = self.state_dir / "handoffs"
+        self.runtime_dir = self.state_dir / "runtime"
+        self.quarantine_dir = self.state_dir / "quarantine"
+        self.backup_dir = self.state_dir / "backup"
         self.path = self.state_dir / "scheduler.json"
         self.lock_file = self.state_dir / "scheduler.lock"
+
+    def init_directories(self) -> None:
+        self._validate_state_directory()
+        for directory in (
+            self.state_dir,
+            self.tasks_dir,
+            self.handoffs_dir,
+            self.runtime_dir,
+            self.quarantine_dir,
+            self.backup_dir,
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+            os.chmod(directory, 0o700)
 
     def lock(self) -> SchedulerLock:
         return SchedulerLock(self.lock_file)
@@ -232,9 +250,13 @@ class JsonStateStore:
             "tasks": [task.to_dict() for task in tasks],
             "capacities": [capacity.to_dict() for capacity in capacities],
         }
-        self._validate_state_directory()
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.state_dir, 0o700)
+        self.init_directories()
+
+        if self.path.exists():
+            backup_file = self.backup_dir / "scheduler.bak.json"
+            with contextlib.suppress(OSError):
+                backup_file.write_bytes(self.path.read_bytes())
+
         descriptor, temporary_name = tempfile.mkstemp(
             prefix="scheduler.", suffix=".tmp", dir=self.state_dir
         )
@@ -261,8 +283,10 @@ class JsonStateStore:
         try:
             tasks = tuple(Task.from_dict(item) for item in payload["tasks"])
         except (AttributeError, KeyError, TypeError, ValueError) as error:
+            self._quarantine_corrupt_file("invalid task data")
             raise StateCorruptionError("invalid task data in scheduler state") from error
         if len({task.issue_number for task in tasks}) != len(tasks):
+            self._quarantine_corrupt_file("duplicate task")
             raise StateCorruptionError("duplicate task in scheduler state")
         return tasks
 
@@ -276,6 +300,7 @@ class JsonStateStore:
                 raise TypeError
             return tuple(Capacity.from_dict(item) for item in raw)
         except (AttributeError, TypeError, ValueError) as error:
+            self._quarantine_corrupt_file("invalid capacity data")
             raise StateCorruptionError("invalid capacity data in scheduler state") from error
 
     def is_paused(self) -> bool:
@@ -285,17 +310,35 @@ class JsonStateStore:
         with self.lock():
             self.save_tasks(self.load_tasks(), paused=paused)
 
+    def _quarantine_corrupt_file(self, reason: str) -> Path | None:
+        if not self.path.exists():
+            return None
+        self.quarantine_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+        dest = self.quarantine_dir / f"scheduler-{timestamp}.corrupt.json"
+        try:
+            os.replace(self.path, dest)
+            return dest
+        except OSError:
+            return None
+
     def _load_payload(self) -> dict[str, Any]:
         self._validate_state_directory()
         try:
             if self.path.stat().st_size > MAX_STATE_BYTES:
+                self._quarantine_corrupt_file("oversized state file")
                 raise StateCorruptionError("scheduler state exceeds the size limit")
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+        except json.JSONDecodeError as error:
+            self._quarantine_corrupt_file("json decode error")
+            raise StateCorruptionError(f"cannot parse scheduler state: {self.path}") from error
+        except OSError as error:
             raise StateCorruptionError(f"cannot read scheduler state: {self.path}") from error
         if not isinstance(payload, dict) or payload.get("schema_version") != SCHEMA_VERSION:
+            self._quarantine_corrupt_file("schema version mismatch")
             raise StateCorruptionError("unsupported or missing scheduler state schema")
         if not isinstance(payload.get("paused", False), bool):
+            self._quarantine_corrupt_file("invalid paused flag")
             raise StateCorruptionError("scheduler paused state must be boolean")
         return payload
 
