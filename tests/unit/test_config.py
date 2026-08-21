@@ -1,20 +1,102 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 import pytest
 
-from subsched.config import ConfigError, load_config
+from subsched.config import (
+    ConfigError,
+    load_config,
+    parse_duration,
+    parse_natural_language_instruction,
+)
 
 
-def test_config_loads_safe_defaults(tmp_path: Path) -> None:
-    path = tmp_path / "scheduler.yaml"
-    path.write_text("github:\n  repo: owner/project\n", encoding="utf-8")
-
-    config = load_config(path)
+def test_config_loads_example_yaml() -> None:
+    example_path = Path(__file__).parents[2] / "examples" / "scheduler.yaml"
+    assert example_path.exists()
+    config = load_config(example_path)
 
     assert config.github.repo == "owner/project"
+    assert config.github.include_labels == ("ai-ready",)
+    assert config.github.exclude_labels == ("blocked", "human-only", "security-sensitive")
     assert config.execution.concurrency == 1
+    assert config.execution.max_agent_switches == 6
+    assert config.execution.max_tasks_per_run == 50
+    assert config.billing.api_fallback is False
     assert config.billing.metered_usage is False
     assert config.billing.unknown_mode == "disable"
+
+
+def test_config_loads_all_spec_sections(tmp_path: Path) -> None:
+    yaml_content = """
+github:
+  repo: takurot/project
+  mode: label
+  include_labels:
+    - ai-ready
+  exclude_labels:
+    - blocked
+    - human-only
+    - security-sensitive
+  completion:
+    create_pr: true
+    close_issue: false
+
+agents:
+  claude:
+    enabled: true
+    priority: 100
+  codex:
+    enabled: true
+    priority: 90
+
+routing:
+  strategy: capacity-aware
+  provider_capacity:
+    preferred: true
+  local_estimate:
+    proactive_switch: false
+
+billing:
+  api_fallback: false
+  metered_usage: false
+  unknown_mode: disable
+
+execution:
+  concurrency: 1
+  max_agent_switches: 6
+  max_task_runtime: 6h
+  max_tasks_per_run: 50
+  pause_running_policy: continue
+
+queue:
+  priority:
+    label_scores:
+      p0: 100
+      p1: 50
+    tie_break: issue_number_asc
+
+handoff:
+  continuous: true
+
+verification:
+  commands:
+    - pytest
+    - ruff check .
+"""
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(yaml_content, encoding="utf-8")
+    config = load_config(path)
+
+    assert config.github.repo == "takurot/project"
+    assert config.agents["claude"].priority == 100
+    assert config.agents["codex"].priority == 90
+    assert config.routing.strategy == "capacity-aware"
+    assert config.execution.pause_running_policy == "continue"
+    assert config.queue.priority.label_scores == {"p0": 100, "p1": 50}
+    assert config.queue.priority.tie_break == "issue_number_asc"
+    assert config.verification.commands == ("pytest", "ruff check .")
 
 
 def test_config_rejects_parallel_execution_in_phase1(tmp_path: Path) -> None:
@@ -25,9 +107,51 @@ def test_config_rejects_parallel_execution_in_phase1(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_config_rejects_unsafe_billing(tmp_path: Path) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text("github:\n  repo: o/r\nbilling:\n  api_fallback: true\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="billing must remain fail-closed"):
+        load_config(path)
+
+
 def test_config_rejects_unknown_keys(tmp_path: Path) -> None:
     path = tmp_path / "scheduler.yaml"
-    path.write_text("github:\n  repo: o/r\nunknown: true\n", encoding="utf-8")
+    path.write_text("github:\n  repo: o/r\nunknown_key: true\n", encoding="utf-8")
 
-    with pytest.raises(ConfigError, match="unknown"):
+    with pytest.raises(ConfigError, match="unknown config keys"):
         load_config(path)
+
+
+def test_config_strict_validation(tmp_path: Path) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\nexecution:\n  max_agent_switches: \"six\"\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="positive integer"):
+        load_config(path)
+
+
+def test_parse_duration() -> None:
+    assert parse_duration("6h") == 21600
+    assert parse_duration("30m") == 1800
+    assert parse_duration("45s") == 45
+    assert parse_duration("1d") == 86400
+    assert parse_duration(100) == 100
+
+    with pytest.raises(ConfigError, match="invalid duration format"):
+        parse_duration("invalid")
+
+
+def test_parse_natural_language_instruction() -> None:
+    intent1 = parse_natural_language_instruction("GitHubのopen issueをすべて実行")
+    assert intent1.issues == "all-open"
+
+    intent2 = parse_natural_language_instruction("owner/projectのopen issueをすべて実行")
+    assert intent2.repo == "owner/project"
+    assert intent2.issues == "all-open"
+
+    intent3 = parse_natural_language_instruction("issue #101, #103を実行")
+    assert intent3.issues == "101,103"
