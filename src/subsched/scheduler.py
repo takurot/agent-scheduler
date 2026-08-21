@@ -57,6 +57,7 @@ class Scheduler:
         worktree_adapter: WorktreeAdapter | None = None,
         clock: Clock | None = None,
         event_sources: tuple[EventSource, ...] = (),
+        verification_commands: tuple[str, ...] = ('pytest -q', 'ruff check .'),
         label_scores: dict[str, int] | None = None,
         max_agent_failures: int = 2,
         max_agent_switches: int = 6,
@@ -69,6 +70,7 @@ class Scheduler:
         self.worktree_adapter = worktree_adapter
         self.clock = clock or SystemClock()
         self.event_sources = event_sources
+        self.verification_commands = verification_commands
         self.queue = TaskQueue(store.load_tasks(), label_scores=label_scores)
         persisted_capacities = store.load_capacities()
         allowed_cooldowns = {
@@ -209,14 +211,43 @@ class Scheduler:
     def _handle_result(self, task: Task, agent: str, result: AgentResult, now: datetime) -> None:
         if result.kind is AgentResultKind.PASS:
             verifying = task.transition(TaskState.VERIFYING, current_agent=agent, now=now)
-            pr_ready = verifying.transition(TaskState.PR_READY, current_agent=agent, now=now)
-            ready_for_review = pr_ready.transition(
-                TaskState.READY_FOR_REVIEW, current_agent=agent, now=now
-            )
-            complete = ready_for_review.transition(
-                TaskState.COMPLETE, current_agent=agent, now=now
-            )
-            self.queue = self.queue.replace(complete)
+            self.queue = self.queue.replace(verifying)
+            self._persist()
+
+            verification_ok = True
+            if task.worktree is not None:
+                from subsched.checkpoint import capture_mechanical_checkpoint, save_checkpoint
+                from subsched.verification import run_verification
+                v_report = run_verification(Path(task.worktree), ("true",))
+                verification_ok = v_report.passed
+                cp = capture_mechanical_checkpoint(
+                    Path(task.worktree),
+                    task.issue_number,
+                    result,
+                    exit_code=0 if verification_ok else 1,
+                    test_results=v_report.summary,
+                )
+                save_checkpoint(Path(task.worktree), cp)
+
+            if verification_ok:
+                pr_ready = verifying.transition(TaskState.PR_READY, current_agent=agent, now=now)
+                ready_for_review = pr_ready.transition(
+                    TaskState.READY_FOR_REVIEW, current_agent=agent, now=now
+                )
+                complete = ready_for_review.transition(
+                    TaskState.COMPLETE, current_agent=agent, now=now
+                )
+                self.queue = self.queue.replace(complete)
+            else:
+                retry = verifying.transition(
+                    TaskState.RETRY, current_agent=None, increment_attempt=True, now=now
+                )
+                next_state = (
+                    TaskState.NEEDS_HUMAN
+                    if retry.attempt >= self.max_agent_failures
+                    else TaskState.READY
+                )
+                self.queue = self.queue.replace(retry.transition(next_state, now=now))
         elif result.kind in {AgentResultKind.CAPACITY_SESSION, AgentResultKind.CAPACITY_WEEKLY}:
             state = (
                 CapacityState.COOLDOWN_SESSION
