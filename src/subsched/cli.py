@@ -176,7 +176,7 @@ def run(
 def status(
     ctx: typer.Context,
     verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Show detailed task and capacity info")
+        bool, typer.Option("--verbose", "-v", help="Show detailed per-task info")
     ] = False,
 ) -> None:
     """Show persisted scheduler state without contacting providers."""
