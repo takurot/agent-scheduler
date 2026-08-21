@@ -218,3 +218,31 @@ def test_live_probe_wraps_subprocess_failures(
         )
 
     assert "private process detail" not in str(error.value)
+
+
+def test_bernstein_compatibility_decision_is_deferred() -> None:
+    from subsched.assumptions import (
+        AdoptionDecision,
+        BernsteinCompatibilityCriterion,
+        get_bernstein_compatibility_report,
+    )
+
+    report = get_bernstein_compatibility_report()
+    assert report.decision is AdoptionDecision.DEFER
+    assert (
+        report.criteria[BernsteinCompatibilityCriterion.BS2_DIRTY_WORKTREE]
+        is AssumptionDecision.FAIL
+    )
+    assert (
+        report.criteria[BernsteinCompatibilityCriterion.BS3_CAPACITY_SEMANTICS]
+        is AssumptionDecision.FAIL
+    )
+    assert report.adapter_strategy == "custom_git_worktree"
+    assert "Phase 2" in report.reevaluation_milestone
+
+
+def test_bernstein_is_not_runtime_dependency() -> None:
+    pyproject_path = Path(__file__).parents[2] / "pyproject.toml"
+    assert pyproject_path.exists()
+    content = pyproject_path.read_text(encoding="utf-8")
+    assert "bernstein" not in content.lower()

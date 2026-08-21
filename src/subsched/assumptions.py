@@ -343,3 +343,44 @@ def run_live_probe(
         stdout=SECRET_PATTERN.sub(REDACTED, result.stdout),
         stderr=SECRET_PATTERN.sub(REDACTED, result.stderr),
     )
+
+
+class BernsteinCompatibilityCriterion(StrEnum):
+    BS1_SAME_WORKTREE = "BS1_SAME_WORKTREE"
+    BS2_DIRTY_WORKTREE = "BS2_DIRTY_WORKTREE"
+    BS3_CAPACITY_SEMANTICS = "BS3_CAPACITY_SEMANTICS"
+    BS4_VERIFICATION_REUSE = "BS4_VERIFICATION_REUSE"
+
+
+class AdoptionDecision(StrEnum):
+    ADOPT = "ADOPT"
+    REJECT = "REJECT"
+    DEFER = "DEFER"
+
+
+@dataclass(frozen=True, slots=True)
+class BernsteinCompatibilityReport:
+    decision: AdoptionDecision
+    criteria: dict[BernsteinCompatibilityCriterion, AssumptionDecision]
+    rationale: str
+    reevaluation_milestone: str
+    adapter_strategy: str
+
+
+def get_bernstein_compatibility_report() -> BernsteinCompatibilityReport:
+    return BernsteinCompatibilityReport(
+        decision=AdoptionDecision.DEFER,
+        criteria={
+            BernsteinCompatibilityCriterion.BS1_SAME_WORKTREE: AssumptionDecision.UNKNOWN,
+            BernsteinCompatibilityCriterion.BS2_DIRTY_WORKTREE: AssumptionDecision.FAIL,
+            BernsteinCompatibilityCriterion.BS3_CAPACITY_SEMANTICS: AssumptionDecision.FAIL,
+            BernsteinCompatibilityCriterion.BS4_VERIFICATION_REUSE: AssumptionDecision.PASS,
+        },
+        rationale=(
+            "Bernstein does not natively support preserving uncommitted dirty worktrees "
+            "across different agent switches and classifies capacity/rate-limit exits as "
+            "task failure rather than provider unavailable."
+        ),
+        reevaluation_milestone="Phase 2 Native execution stabilization",
+        adapter_strategy="custom_git_worktree",
+    )
