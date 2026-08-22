@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "subscription-agent-scheduler"
+name = "agent-scheduler"
 version = "0.1.0"
 description = "A deterministic, subscription-aware coding agent scheduler"
 readme = "README.md"

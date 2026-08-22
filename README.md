@@ -31,8 +31,8 @@
 
 #### Option A: Run immediately without installation (`uvx`)
 ```bash
-uvx subscription-agent-scheduler doctor
-uvx subscription-agent-scheduler run --repo owner/project --issues 101 --dry-run
+uvx agent-scheduler doctor
+uvx agent-scheduler run --repo owner/project --issues 101 --dry-run
 ```
 
 #### Option B: Global CLI install (`uv tool`)
@@ -41,7 +41,7 @@ uvx subscription-agent-scheduler run --repo owner/project --issues 101 --dry-run
 uv tool install -e .
 
 # Or install from PyPI (once published)
-uv tool install subscription-agent-scheduler
+uv tool install agent-scheduler
 ```
 
 #### Option C: Development setup

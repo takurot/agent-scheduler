@@ -152,9 +152,9 @@ Once published, users can run `subsched` without manual cloning:
 
 ```bash
 # Run immediately without installation (like npx)
-uvx subscription-agent-scheduler run --help
+uvx agent-scheduler run --help
 
 # Global installation
-uv tool install subscription-agent-scheduler
+uv tool install agent-scheduler
 subsched doctor
 ```
