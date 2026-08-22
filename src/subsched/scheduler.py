@@ -59,6 +59,7 @@ class Scheduler:
         event_sources: tuple[EventSource, ...] = (),
         verification_commands: tuple[str, ...] = ('pytest -q', 'ruff check .'),
         label_scores: dict[str, int] | None = None,
+        concurrency: int = 1,
         max_agent_failures: int = 2,
         max_agent_switches: int = 6,
         max_tasks: int = 50,
@@ -71,7 +72,11 @@ class Scheduler:
         self.clock = clock or SystemClock()
         self.event_sources = event_sources
         self.verification_commands = verification_commands
+        self.concurrency = concurrency
+        from subsched.lease import LeaseManager
+        self.lease_manager = LeaseManager(max_concurrency=concurrency)
         self.queue = TaskQueue(store.load_tasks(), label_scores=label_scores)
+        self.lease_manager.reconcile(self.queue.tasks)
         persisted_capacities = store.load_capacities()
         allowed_cooldowns = {
             CapacityState.COOLDOWN_SESSION,
@@ -150,11 +155,19 @@ class Scheduler:
             task.status is TaskState.WAITING_CAPACITY for task in self.tasks
         )
 
-        ready_tasks = self.queue.ready()
+        if self.lease_manager.active_count >= self.concurrency:
+            return False
+
+        ready_tasks = [
+            t for t in self.queue.ready() if not self.lease_manager.is_task_leased(t.issue_number)
+        ]
         if not ready_tasks:
             return False
 
-        agent = self.router.select(effective.values(), now=current)
+        available_capacities = [
+            c for c in effective.values() if not self.lease_manager.is_agent_busy(c.agent)
+        ]
+        agent = self.router.select(available_capacities, now=current)
         if agent is None:
             task = ready_tasks[0]
             self.queue = self.queue.replace(task.transition(TaskState.WAITING_CAPACITY))
@@ -163,6 +176,7 @@ class Scheduler:
             return False
 
         task = ready_tasks[0]
+        lease = self.lease_manager.acquire(task.issue_number, agent, now=current)
         if self.worktree_adapter is not None:
             ctx = self.worktree_adapter.prepare_worktree(task.issue_number)
             task = task.with_worktree(str(ctx.path))
@@ -192,10 +206,13 @@ class Scheduler:
         self.queue = self.queue.replace(running)
         self._persist()
         try:
-            result = self.worker.run(running, agent)
-        except Exception as error:
-            result = AgentResult(AgentResultKind.FAILURE, output=type(error).__name__)
-        self._handle_result(running, agent, result, current)
+            try:
+                result = self.worker.run(running, agent)
+            except Exception as error:
+                result = AgentResult(AgentResultKind.FAILURE, output=type(error).__name__)
+            self._handle_result(running, agent, result, current)
+        finally:
+            self.lease_manager.release(task.issue_number, nonce=lease.nonce)
         self._effective_capacities(supplied, current)
         self._release_dependencies(current)
         return True
