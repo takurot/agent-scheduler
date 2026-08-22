@@ -109,6 +109,8 @@ def handle_rebase_outcome(task: Task, result: RebaseResult) -> tuple[Task, str]:
         if task.status == TaskState.IN_PROGRESS:
             verifying = task.transition(TaskState.VERIFYING)
             return verifying.transition(TaskState.NEEDS_HUMAN), msg
+        if task.status == TaskState.FAILED:
+            return task, msg
         return task.transition(TaskState.FAILED), msg
     else:
         msg = f"rebase failed: {result.output}; escalated to NEEDS_HUMAN"
@@ -117,4 +119,6 @@ def handle_rebase_outcome(task: Task, result: RebaseResult) -> tuple[Task, str]:
         if task.status == TaskState.IN_PROGRESS:
             verifying = task.transition(TaskState.VERIFYING)
             return verifying.transition(TaskState.NEEDS_HUMAN), msg
+        if task.status == TaskState.FAILED:
+            return task, msg
         return task.transition(TaskState.FAILED), msg
