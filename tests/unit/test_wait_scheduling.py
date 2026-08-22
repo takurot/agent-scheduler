@@ -112,6 +112,32 @@ def test_bounded_backoff_when_reset_is_unknown(tmp_path: Path) -> None:
     assert 30 <= (next_reset - now).total_seconds() <= 900
 
 
+def test_backoff_step_increments_on_repeated_unavailable_ticks(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 12, 10, 0, tzinfo=UTC)
+    clock = FakeClock(now)
+    store = JsonStateStore(tmp_path / "state.json")
+    router = Router([AgentConfig("claude", priority=100)])
+
+    scheduler = Scheduler(
+        store=store,
+        router=router,
+        worker=ScriptedWorker({}),
+        worktree_root=tmp_path / "worktrees",
+        clock=clock,
+    )
+    scheduler.discover([Issue(number=101, title="Task 101")])
+
+    # No capacities available
+    assert scheduler.tick([]) is False
+    assert scheduler._backoff_step == 1
+    dur1 = scheduler.wait_duration()
+
+    assert scheduler.tick([]) is False
+    assert scheduler._backoff_step == 2
+    dur2 = scheduler.wait_duration()
+    assert dur2 > dur1
+
+
 def test_manual_wake_and_capacity_refresh(tmp_path: Path) -> None:
     now = datetime(2026, 8, 12, 10, 0, tzinfo=UTC)
     clock = FakeClock(now)
