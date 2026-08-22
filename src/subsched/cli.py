@@ -280,3 +280,37 @@ def doctor() -> None:
     if missing:
         raise typer.Exit(1)
     typer.echo("Native workers remain disabled until Phase 2 assumptions are validated")
+
+
+@app.command()
+def metrics(
+    ctx: typer.Context,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Output metrics in structured JSON format")
+    ] = False,
+    report_file: Annotated[
+        Path | None, typer.Option("--report", help="Save run report to specified file")
+    ] = None,
+) -> None:
+    """Display Productivity, Reliability, and Capacity metrics."""
+    import json
+
+    from subsched.metrics import calculate_metrics, format_run_report
+
+    context: Context = ctx.obj
+    try:
+        tasks = context.store.load_tasks()
+    except StateCorruptionError as error:
+        typer.echo(f"State corruption error: {error}", err=True)
+        raise typer.Exit(1) from error
+
+    calculated = calculate_metrics(tasks)
+    report_text = format_run_report(calculated)
+
+    if report_file is not None:
+        report_file.write_text(report_text, encoding="utf-8")
+
+    if json_output:
+        typer.echo(json.dumps(calculated.to_dict(), indent=2))
+    else:
+        typer.echo(report_text)
