@@ -92,6 +92,7 @@ class Scheduler:
         self.is_waiting_for_capacity = any(
             task.status is TaskState.WAITING_CAPACITY for task in self.tasks
         )
+        self._backoff_step = 0
 
     @property
     def tasks(self) -> tuple[Task, ...]:
@@ -207,6 +208,55 @@ class Scheduler:
     ) -> None:
         while self.tick(capacities, now=now):
             pass
+
+    def next_reset_at(self, *, now: datetime | None = None) -> datetime | None:
+        current = now or self.clock.now()
+        future_resets = [
+            c.reset_at
+            for c in self._cooldowns.values()
+            if c.reset_at is not None and c.reset_at > current
+        ]
+        if future_resets:
+            return min(future_resets)
+        if self.is_waiting_for_capacity or self._cooldowns:
+            backoff_secs = min(900.0, max(60.0, 60.0 * (2 ** min(self._backoff_step, 4))))
+            return current + timedelta(seconds=backoff_secs)
+        return None
+
+    def wait_duration(self, *, now: datetime | None = None) -> timedelta:
+        current = now or self.clock.now()
+        target = self.next_reset_at(now=current)
+        if target is None:
+            return timedelta(0)
+        return max(timedelta(0), target - current)
+
+    def refresh_capacities(
+        self, capacities: Iterable[Capacity], *, now: datetime | None = None
+    ) -> None:
+        current = now or self.clock.now()
+        supplied = {capacity.agent: capacity for capacity in capacities}
+        for agent, cap in supplied.items():
+            if (
+                cap.state is CapacityState.AVAILABLE
+                and cap.source == "provider"
+                and cap.confidence == "high"
+            ):
+                self._cooldowns.pop(agent, None)
+        self._effective_capacities(supplied, current)
+        if self.router.select(supplied.values(), now=current) is not None:
+            self._release_waiting_tasks(current)
+        self.is_waiting_for_capacity = any(
+            task.status is TaskState.WAITING_CAPACITY for task in self.tasks
+        )
+        self._persist()
+
+    def manual_wake(self, *, now: datetime | None = None) -> None:
+        current = now or self.clock.now()
+        self._cooldowns.clear()
+        self._release_waiting_tasks(current)
+        self.is_waiting_for_capacity = False
+        self._backoff_step = 0
+        self._persist()
 
     def _handle_result(self, task: Task, agent: str, result: AgentResult, now: datetime) -> None:
         if result.kind is AgentResultKind.PASS:
