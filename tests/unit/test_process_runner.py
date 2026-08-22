@@ -157,7 +157,7 @@ def test_stop_process_group_edge_cases() -> None:
     assert _reap_proc(None, 0.1) is True
 
 
-def test_streams_properly_closed(tmp_path: Path) -> None:
+def test_streams_properly_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     import io
     import queue
 
@@ -172,10 +172,12 @@ def test_streams_properly_closed(tmp_path: Path) -> None:
             self.closed_count += 1
             super().close()
 
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
+
     # Read stream close
     read_stream = TrackingBytesIO(b"sample data")
     q: queue.Queue[tuple[bytes, bool, bool]] = queue.Queue()
-    _read_bounded_stream(read_stream, 100, os.getpid(), q)
+    _read_bounded_stream(read_stream, 100, 99999, q)
     assert read_stream.closed_count >= 1
 
     # Write stream close
