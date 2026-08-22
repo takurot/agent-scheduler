@@ -241,3 +241,55 @@ def test_state_store_cas_lost_update_detection(tmp_path: Path) -> None:
     # Save with stale expected_revision raises StateCorruptionError
     with pytest.raises(StateCorruptionError, match="lost update"):
         store.save_tasks((), expected_revision=rev)
+
+
+def test_invalid_revision_quarantined(tmp_path: Path) -> None:
+    state_file = tmp_path / ".ai" / "scheduler.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(
+        json.dumps({"schema_version": 1, "revision": "invalid_string", "tasks": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(StateCorruptionError, match="revision"):
+        JsonStateStore(tmp_path).load_tasks()
+
+    assert not state_file.exists()
+    quarantine_files = list((tmp_path / ".ai" / "quarantine").glob("*.corrupt.json"))
+    assert len(quarantine_files) == 1
+
+
+def test_lock_acquire_cleans_up_on_partial_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_file = tmp_path / ".ai" / "scheduler.lock"
+    lock = SchedulerLock(lock_file)
+
+    def mock_dump(*args: object, **kwargs: object) -> None:
+        raise OSError("disk write failed")
+
+    monkeypatch.setattr(json, "dump", mock_dump)
+
+    with pytest.raises(OSError, match="disk write failed"):
+        lock.acquire()
+
+    assert not lock_file.exists()
+    assert lock._held is False
+
+
+def test_is_process_alive_permission_error_fallthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    from subsched.storage import is_process_alive
+
+    def mock_kill(pid: int, sig: int) -> None:
+        raise PermissionError("EPERM")
+
+    monkeypatch.setattr(os, "kill", mock_kill)
+    monkeypatch.setattr("subsched.storage.get_process_start_time", lambda pid: "start_time_abc")
+
+    # Matching start time
+    assert is_process_alive(1234, "start_time_abc") is True
+    # Mismatched start time
+    assert is_process_alive(1234, "different_start_time") is False
+    # No expected start time
+    assert is_process_alive(1234, None) is True
+

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import secrets
 import socket
@@ -18,6 +19,8 @@ from subsched.models import Capacity, Task
 
 SCHEMA_VERSION = 1
 MAX_STATE_BYTES = 10 * 1024 * 1024
+
+logger = logging.getLogger(__name__)
 
 
 class StateCorruptionError(RuntimeError):
@@ -82,11 +85,7 @@ def is_process_alive(pid: int, expected_start_time: str | None = None) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        if expected_start_time is not None:
-            actual_start = get_process_start_time(pid)
-            if actual_start is not None and actual_start != expected_start_time:
-                return False
-        return True
+        pass
 
     if expected_start_time is not None:
         actual_start = get_process_start_time(pid)
@@ -130,11 +129,16 @@ class SchedulerLock:
                         os.O_CREAT | os.O_EXCL | os.O_WRONLY,
                         0o600,
                     )
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        json.dump(my_record.to_dict(), f, indent=2)
-                        f.write("\n")
-                        f.flush()
-                        os.fsync(f.fileno())
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8") as f:
+                            json.dump(my_record.to_dict(), f, indent=2)
+                            f.write("\n")
+                            f.flush()
+                            os.fsync(f.fileno())
+                    except BaseException:
+                        with contextlib.suppress(OSError):
+                            self.lock_path.unlink(missing_ok=True)
+                        raise
                     self.nonce = my_nonce
                     self._held = True
                     return
@@ -165,8 +169,8 @@ class SchedulerLock:
             existing = self._read_lock()
             if existing is not None and existing.nonce == self.nonce:
                 self.lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as err:
+            logger.warning("failed to remove lock file %s: %s", self.lock_path, err)
         finally:
             self._held = False
             self.nonce = None
@@ -219,7 +223,8 @@ class JsonStateStore:
     def get_revision(self) -> int:
         if not self.path.exists():
             return 0
-        return int(self._load_payload().get("revision", 1))
+        payload = self._load_payload()
+        return int(payload.get("revision", 1))
 
     def save_tasks(
         self,
@@ -263,8 +268,10 @@ class JsonStateStore:
 
         if self.path.exists():
             backup_file = self.backup_dir / "scheduler.bak.json"
-            with contextlib.suppress(OSError):
+            try:
                 backup_file.write_bytes(self.path.read_bytes())
+            except OSError as err:
+                logger.warning("failed to create backup before saving state: %s", err)
 
         descriptor, temporary_name = tempfile.mkstemp(
             prefix="scheduler.", suffix=".tmp", dir=self.state_dir
@@ -349,6 +356,13 @@ class JsonStateStore:
         if not isinstance(payload.get("paused", False), bool):
             self._quarantine_corrupt_file("invalid paused flag")
             raise StateCorruptionError("scheduler paused state must be boolean")
+        if "revision" in payload:
+            raw_rev = payload["revision"]
+            if not isinstance(raw_rev, int) or isinstance(raw_rev, bool) or raw_rev < 0:
+                self._quarantine_corrupt_file("invalid revision value")
+                raise StateCorruptionError(
+                    "scheduler state revision must be a non-negative integer"
+                )
         return payload
 
     def _validate_state_directory(self) -> None:
