@@ -154,3 +154,77 @@ def format_run_report(metrics: SchedulerMetrics) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def format_run_report_markdown(metrics: SchedulerMetrics) -> str:
+    prod = metrics.productivity
+    rel = metrics.reliability
+    cap = metrics.capacity
+
+    lines = [
+        "# Scheduler Run Report",
+        "",
+        "## Productivity Metrics",
+        "",
+        "| Metric | Value |",
+        "| --- | --- |",
+        f"| Issues Attempted | {prod.issues_attempted} |",
+        f"| Issues Implemented | {prod.issues_implemented} |",
+        f"| PRs Created | {prod.prs_created} |",
+    ]
+    if prod.autonomous_completion_rate is not None:
+        lines.append(
+            f"| Autonomous Issue Completion Rate | {prod.autonomous_completion_rate * 100:.1f}% |"
+        )
+    else:
+        lines.append("| Autonomous Issue Completion Rate | N/A |")
+
+    lines.extend(
+        [
+            "",
+            "## Reliability Metrics",
+            "",
+            "| Metric | Value |",
+            "| --- | --- |",
+        ]
+    )
+    if rel.task_completion_rate is not None:
+        lines.append(f"| Task Completion Rate | {rel.task_completion_rate * 100:.1f}% |")
+    else:
+        lines.append("| Task Completion Rate | N/A |")
+
+    if rel.manual_intervention_rate is not None:
+        lines.append(f"| Manual Intervention Rate | {rel.manual_intervention_rate * 100:.1f}% |")
+    else:
+        lines.append("| Manual Intervention Rate | N/A |")
+
+    lines.extend(
+        [
+            "",
+            "## Capacity Metrics",
+            "",
+            "| Metric | Value |",
+            "| --- | --- |",
+            f"| Capacity Exhaustion Events | {cap.capacity_exhaustion_events} |",
+            f"| Failover Attempts | {cap.failover_attempts} |",
+            f"| Successful Continuations | {cap.successful_continuations} |",
+            f"| Excluded Events | {cap.excluded_events} |",
+        ]
+    )
+    if cap.failover_success_rate is not None:
+        lines.append(f"| Capacity Failover Success Rate | {cap.failover_success_rate * 100:.1f}% |")
+    else:
+        lines.append("| Capacity Failover Success Rate | N/A |")
+
+    if cap.exclusion_reasons:
+        lines.extend(
+            [
+                "",
+                "### Exclusion Reasons",
+                "",
+            ]
+        )
+        for r in cap.exclusion_reasons:
+            lines.append(f"- {r}")
+
+    return "\n".join(lines)
