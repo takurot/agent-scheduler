@@ -7,6 +7,7 @@ import secrets
 import socket
 import subprocess
 import tempfile
+import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -96,6 +97,8 @@ def is_process_alive(pid: int, expected_start_time: str | None = None) -> bool:
 
 
 class SchedulerLock:
+    _thread_lock = threading.RLock()
+
     def __init__(self, lock_path: Path) -> None:
         self.lock_path = lock_path
         self.nonce: str | None = None
@@ -104,51 +107,56 @@ class SchedulerLock:
     def acquire(self) -> None:
         if self._held:
             return
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.lock_path.parent, 0o700)
+        self._thread_lock.acquire()
+        try:
+            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(self.lock_path.parent, 0o700)
 
-        my_pid = os.getpid()
-        my_start_time = get_process_start_time(my_pid) or datetime.now(UTC).isoformat()
-        my_nonce = secrets.token_hex(16)
-        my_record = LockRecord(
-            pid=my_pid,
-            process_start_time=my_start_time,
-            nonce=my_nonce,
-            created_at=datetime.now(UTC).isoformat(),
-            hostname=socket.gethostname(),
-        )
+            my_pid = os.getpid()
+            my_start_time = get_process_start_time(my_pid) or datetime.now(UTC).isoformat()
+            my_nonce = secrets.token_hex(16)
+            my_record = LockRecord(
+                pid=my_pid,
+                process_start_time=my_start_time,
+                nonce=my_nonce,
+                created_at=datetime.now(UTC).isoformat(),
+                hostname=socket.gethostname(),
+            )
 
-        for _ in range(2):
-            try:
-                fd = os.open(
-                    self.lock_path,
-                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                    0o600,
-                )
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(my_record.to_dict(), f, indent=2)
-                    f.write("\n")
-                    f.flush()
-                    os.fsync(f.fileno())
-                self.nonce = my_nonce
-                self._held = True
-                return
-            except FileExistsError as err:
-                existing = self._read_lock()
-                if existing is None:
+            for _ in range(2):
+                try:
+                    fd = os.open(
+                        self.lock_path,
+                        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                        0o600,
+                    )
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(my_record.to_dict(), f, indent=2)
+                        f.write("\n")
+                        f.flush()
+                        os.fsync(f.fileno())
+                    self.nonce = my_nonce
+                    self._held = True
+                    return
+                except FileExistsError as err:
+                    existing = self._read_lock()
+                    if existing is None:
+                        with contextlib.suppress(OSError):
+                            self.lock_path.unlink(missing_ok=True)
+                        continue
+                    if is_process_alive(existing.pid, existing.process_start_time):
+                        raise SchedulerLockError(
+                            f"scheduler is already running with PID {existing.pid} "
+                            f"on {existing.hostname}"
+                        ) from err
                     with contextlib.suppress(OSError):
                         self.lock_path.unlink(missing_ok=True)
                     continue
-                if is_process_alive(existing.pid, existing.process_start_time):
-                    raise SchedulerLockError(
-                        f"scheduler is already running with PID {existing.pid} "
-                        f"on {existing.hostname}"
-                    ) from err
-                with contextlib.suppress(OSError):
-                    self.lock_path.unlink(missing_ok=True)
-                continue
 
-        raise SchedulerLockError("failed to acquire scheduler lock")
+            raise SchedulerLockError("failed to acquire scheduler lock")
+        except Exception:
+            self._thread_lock.release()
+            raise
 
     def release(self) -> None:
         if not self._held:
@@ -162,6 +170,7 @@ class SchedulerLock:
         finally:
             self._held = False
             self.nonce = None
+            self._thread_lock.release()
 
     def _read_lock(self) -> LockRecord | None:
         try:
