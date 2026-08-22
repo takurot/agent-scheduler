@@ -146,6 +146,7 @@ time.sleep(10)
     if child_marker.exists():
         val1 = child_marker.read_text(encoding="utf-8")
         import time
+
         time.sleep(0.1)
         val2 = child_marker.read_text(encoding="utf-8")
         assert val1 == val2
@@ -154,3 +155,30 @@ time.sleep(10)
 def test_stop_process_group_edge_cases() -> None:
     assert stop_process_group(-1, 0.1) is False
     assert _reap_proc(None, 0.1) is True
+
+
+def test_streams_properly_closed(tmp_path: Path) -> None:
+    import io
+    import queue
+
+    from subsched.agents.process import _read_bounded_stream, _write_stream
+
+    class TrackingBytesIO(io.BytesIO):
+        def __init__(self, initial_bytes: bytes = b"") -> None:
+            super().__init__(initial_bytes)
+            self.closed_count = 0
+
+        def close(self) -> None:
+            self.closed_count += 1
+            super().close()
+
+    # Read stream close
+    read_stream = TrackingBytesIO(b"sample data")
+    q: queue.Queue[tuple[bytes, bool, bool]] = queue.Queue()
+    _read_bounded_stream(read_stream, 100, os.getpid(), q)
+    assert read_stream.closed_count >= 1
+
+    # Write stream close
+    write_stream = TrackingBytesIO()
+    _write_stream(write_stream, b"payload")
+    assert write_stream.closed_count >= 1

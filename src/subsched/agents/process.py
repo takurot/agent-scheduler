@@ -81,7 +81,6 @@ def run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResul
 
     output_queue: queue.Queue[tuple[bytes, bool, bool]] = queue.Queue(maxsize=1)
     stderr_queue: queue.Queue[tuple[bytes, bool, bool]] = queue.Queue(maxsize=1)
-    input_queue: queue.Queue[bool] = queue.Queue(maxsize=1)
 
     stdout_reader = threading.Thread(
         target=_read_bounded_stream,
@@ -95,7 +94,7 @@ def run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResul
     )
     stdin_writer = threading.Thread(
         target=_write_stream,
-        args=(process.stdin, request.stdin_payload, input_queue),
+        args=(process.stdin, request.stdin_payload),
         daemon=True,
     )
 
@@ -171,7 +170,10 @@ def stop_process_group(
         return False
 
     deadline = time.monotonic() + grace_seconds
-    while _process_group_alive(pid) and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        _reap_proc(proc_obj, timeout=0.001)
+        if not _process_group_alive(pid):
+            break
         time.sleep(min(0.01, grace_seconds))
 
     if _process_group_alive(pid):
@@ -183,7 +185,10 @@ def stop_process_group(
             return False
 
     deadline = time.monotonic() + grace_seconds
-    while _process_group_alive(pid) and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        _reap_proc(proc_obj, timeout=0.001)
+        if not _process_group_alive(pid):
+            break
         time.sleep(min(0.01, grace_seconds))
 
     _reap_proc(proc_obj, grace_seconds)
@@ -231,22 +236,23 @@ def _read_bounded_stream(
     except OSError:
         out_queue.put((buf, False, True))
         return
+    finally:
+        with suppress(OSError):
+            stream.close()
     out_queue.put((buf, False, False))
 
 
 def _write_stream(
     stream: Any,
     payload: bytes,
-    out_queue: queue.Queue[bool],
 ) -> None:
     if stream is None:
-        out_queue.put(True)
         return
     try:
         if payload:
             stream.write(payload)
-        stream.close()
     except (BrokenPipeError, OSError):
-        out_queue.put(True)
-        return
-    out_queue.put(False)
+        pass
+    finally:
+        with suppress(OSError):
+            stream.close()

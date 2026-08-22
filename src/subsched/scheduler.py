@@ -57,7 +57,7 @@ class Scheduler:
         worktree_adapter: WorktreeAdapter | None = None,
         clock: Clock | None = None,
         event_sources: tuple[EventSource, ...] = (),
-        verification_commands: tuple[str, ...] = ('pytest -q', 'ruff check .'),
+        verification_commands: tuple[str, ...] = ("true",),
         label_scores: dict[str, int] | None = None,
         concurrency: int = 1,
         max_agent_failures: int = 2,
@@ -74,6 +74,7 @@ class Scheduler:
         self.verification_commands = verification_commands
         self.concurrency = concurrency
         from subsched.lease import LeaseManager
+
         self.lease_manager = LeaseManager(max_concurrency=concurrency)
         self.queue = TaskQueue(store.load_tasks(), label_scores=label_scores)
         self.lease_manager.reconcile(self.queue.tasks)
@@ -162,6 +163,8 @@ class Scheduler:
             t for t in self.queue.ready() if not self.lease_manager.is_task_leased(t.issue_number)
         ]
         if not ready_tasks:
+            if self.is_waiting_for_capacity:
+                self._backoff_step = min(self._backoff_step + 1, 10)
             return False
 
         available_capacities = [
@@ -172,40 +175,42 @@ class Scheduler:
             task = ready_tasks[0]
             self.queue = self.queue.replace(task.transition(TaskState.WAITING_CAPACITY))
             self.is_waiting_for_capacity = True
+            self._backoff_step = min(self._backoff_step + 1, 10)
             self._persist()
             return False
 
         task = ready_tasks[0]
         lease = self.lease_manager.acquire(task.issue_number, agent, now=current)
-        if self.worktree_adapter is not None:
-            ctx = self.worktree_adapter.prepare_worktree(task.issue_number)
-            task = task.with_worktree(str(ctx.path))
-            self.queue = self.queue.replace(task)
-        else:
-            if task.worktree is None:
-                worktree_path = self.worktree_root / f"issue-{task.issue_number}"
-                task = task.with_worktree(str(worktree_path))
-                self.queue = self.queue.replace(task)
-            self._validate_worktree_path(task)
-            self._ensure_worktree_directory(task)
-            self._validate_worktree(task)
-
-        if task.worktree is not None:
-            bootstrap_task_files(Path(task.worktree), task)
-
-        actual_switches = task.actual_agent_switches
-        if task.last_dispatched_agent is not None and task.last_dispatched_agent != agent:
-            actual_switches += 1
-        dispatched = task.transition(TaskState.DISPATCHED, current_agent=agent, now=current)
-        dispatched = replace(
-            dispatched,
-            actual_agent_switches=actual_switches,
-            last_dispatched_agent=agent,
-        )
-        running = dispatched.transition(TaskState.IN_PROGRESS, current_agent=agent, now=current)
-        self.queue = self.queue.replace(running)
-        self._persist()
         try:
+            if self.worktree_adapter is not None:
+                ctx = self.worktree_adapter.prepare_worktree(task.issue_number)
+                task = task.with_worktree(str(ctx.path))
+                self.queue = self.queue.replace(task)
+            else:
+                if task.worktree is None:
+                    worktree_path = self.worktree_root / f"issue-{task.issue_number}"
+                    task = task.with_worktree(str(worktree_path))
+                    self.queue = self.queue.replace(task)
+                self._validate_worktree_path(task)
+                self._ensure_worktree_directory(task)
+                self._validate_worktree(task)
+
+            if task.worktree is not None:
+                bootstrap_task_files(Path(task.worktree), task)
+
+            actual_switches = task.actual_agent_switches
+            if task.last_dispatched_agent is not None and task.last_dispatched_agent != agent:
+                actual_switches += 1
+            dispatched = task.transition(TaskState.DISPATCHED, current_agent=agent, now=current)
+            dispatched = replace(
+                dispatched,
+                actual_agent_switches=actual_switches,
+                last_dispatched_agent=agent,
+            )
+            running = dispatched.transition(TaskState.IN_PROGRESS, current_agent=agent, now=current)
+            self.queue = self.queue.replace(running)
+            self._persist()
+
             try:
                 result = self.worker.run(running, agent)
             except Exception as error:
@@ -215,6 +220,7 @@ class Scheduler:
             self.lease_manager.release(task.issue_number, nonce=lease.nonce)
         self._effective_capacities(supplied, current)
         self._release_dependencies(current)
+        self._backoff_step = 0
         return True
 
     def run_until_waiting(
@@ -285,7 +291,8 @@ class Scheduler:
             if task.worktree is not None:
                 from subsched.checkpoint import capture_mechanical_checkpoint, save_checkpoint
                 from subsched.verification import run_verification
-                v_report = run_verification(Path(task.worktree), ("true",))
+
+                v_report = run_verification(Path(task.worktree), self.verification_commands)
                 verification_ok = v_report.passed
                 cp = capture_mechanical_checkpoint(
                     Path(task.worktree),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -105,10 +106,48 @@ def test_lease_manager_thread_safety_race() -> None:
             failures.append(err)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [
-            executor.submit(try_acquire, 101, f"agent-{i}") for i in range(8)
-        ]
+        futures = [executor.submit(try_acquire, 101, f"agent-{i}") for i in range(8)]
         concurrent.futures.wait(futures)
 
     assert len(successes) == 1
     assert len(failures) == 7
+
+
+def test_lease_released_when_worktree_preparation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from subsched.models import Capacity, CapacityState, Issue
+    from subsched.router import AgentConfig, Router
+    from subsched.scheduler import Scheduler, ScriptedWorker
+    from subsched.storage import JsonStateStore
+
+    store = JsonStateStore(tmp_path / "state.json")
+    router = Router([AgentConfig("claude", priority=100)])
+    worker = ScriptedWorker({})
+
+    scheduler = Scheduler(
+        store=store,
+        router=router,
+        worker=worker,
+        worktree_root=tmp_path / "worktrees",
+    )
+    scheduler.discover([Issue(number=101, title="Task 101")])
+
+    def mock_validate_worktree(task: object) -> None:
+        raise RuntimeError("worktree preparation error")
+
+    monkeypatch.setattr(scheduler, "_validate_worktree", mock_validate_worktree)
+
+    cap = Capacity(
+        agent="claude",
+        state=CapacityState.AVAILABLE,
+        observed_at=datetime.now(UTC),
+        source="provider",
+        confidence="high",
+    )
+
+    with pytest.raises(RuntimeError, match="worktree preparation error"):
+        scheduler.tick([cap])
+
+    assert not scheduler.lease_manager.is_task_leased(101)
+    assert not scheduler.lease_manager.is_agent_busy("claude")
