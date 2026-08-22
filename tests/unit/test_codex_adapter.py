@@ -615,3 +615,74 @@ def test_codex_agent_executes_when_verified(tmp_path: Path) -> None:
     )
     result = agent.execute(req)
     assert result.kind is AgentResultKind.PASS
+
+
+def test_codex_probe_config_validations(tmp_path: Path) -> None:
+    exe = tmp_path / "codex"
+    exe.write_text("", encoding="utf-8")
+    exe.chmod(0o755)
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+
+    # Non-executable file
+    non_exe = tmp_path / "non_exe"
+    non_exe.write_text("", encoding="utf-8")
+    non_exe.chmod(0o644)
+    with pytest.raises(ValueError, match="must be executable"):
+        CodexProbeConfig(executable=non_exe, cwd=tmp_path, output_schema=schema)
+
+    # Relative cwd
+    with pytest.raises(ValueError, match="Codex cwd must be"):
+        CodexProbeConfig(executable=exe, cwd=Path("rel"), output_schema=schema)
+
+    # Invalid timeouts
+    with pytest.raises(ValueError, match="timeouts must be positive"):
+        CodexProbeConfig(executable=exe, cwd=tmp_path, output_schema=schema, timeout_seconds=0)
+
+    # Invalid output limit
+    with pytest.raises(ValueError, match="output limit must be positive"):
+        CodexProbeConfig(executable=exe, cwd=tmp_path, output_schema=schema, output_limit_bytes=0)
+
+    # Non-dict schema
+    from subsched.agents.codex import _validate_schema
+    bad_schema = tmp_path / "bad.json"
+    bad_schema.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        _validate_schema(bad_schema)
+
+
+def test_codex_parse_jsonl_malformed_variations() -> None:
+    # Less than 4 events
+    assert parse_codex_jsonl("[]", returncode=0).kind is AgentResultKind.FAILURE
+
+    # Bad header
+    bad_header = [
+        json.dumps({"type": "other"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
+    assert parse_codex_jsonl("\n".join(bad_header), returncode=0).kind is AgentResultKind.FAILURE
+
+    # Bad middle item
+    bad_item = [
+        json.dumps({"type": "thread.started", "thread_id": "th_1"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps({"type": "item.completed", "item": {"type": "wrong_type"}}),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
+    assert parse_codex_jsonl("\n".join(bad_item), returncode=0).kind is AgentResultKind.FAILURE
+
+
+def test_codex_parse_jsonl_returncode_error() -> None:
+    msg = "{\"result\": \"pass\", \"summary\": \"all good\"}"
+    payload = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "th_1"}),
+            json.dumps({"type": "turn.started"}),
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": msg}}),
+            json.dumps({"type": "turn.completed", "usage": {}}),
+        ]
+    )
+    res = parse_codex_jsonl(payload, returncode=1)
+    assert res.kind is AgentResultKind.FAILURE
+    assert "execution failed" in res.output

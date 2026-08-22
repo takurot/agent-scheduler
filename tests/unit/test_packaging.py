@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import runpy
 import subprocess
 import sys
+from unittest.mock import patch
 
 from subsched.cli import app
 
@@ -15,6 +17,12 @@ def test_python_module_entrypoint() -> None:
     )
     assert res.returncode == 0
     assert "Subscription-aware coding agent scheduler" in res.stdout
+
+
+def test_main_module_execution() -> None:
+    with patch("subsched.cli.app") as mock_app:
+        runpy.run_module("subsched.__main__", run_name="__main__")
+        mock_app.assert_called_once()
 
 
 def test_cli_app_commands_registered() -> None:
