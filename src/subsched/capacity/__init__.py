@@ -9,6 +9,7 @@ from subsched.capacity.base import (
     merge_capacities,
     select_strongest_blocker,
 )
+from subsched.capacity.ccusage import CcusageSensor, parse_ccusage_output
 from subsched.capacity.claude import ClaudeCapacitySensor, parse_claude_capacity
 from subsched.capacity.codex import CodexCapacitySensor, parse_codex_capacity
 
@@ -17,12 +18,14 @@ __all__ = [
     "SOURCE_PRIORITY",
     "AgentCapacityRecord",
     "CapacitySensor",
+    "CcusageSensor",
     "ClaudeCapacitySensor",
     "CodexCapacitySensor",
     "canonicalize_scope",
     "find_earliest_reset",
     "get_source_priority",
     "merge_capacities",
+    "parse_ccusage_output",
     "parse_claude_capacity",
     "parse_codex_capacity",
     "select_strongest_blocker",
