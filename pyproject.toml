@@ -8,10 +8,28 @@ version = "0.1.0"
 description = "A deterministic, subscription-aware coding agent scheduler"
 readme = "README.md"
 requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+  { name = "Takuro Tsujikawa" }
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Build Tools",
+]
 dependencies = [
   "PyYAML>=6.0.2,<7",
   "typer>=0.16,<1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/takurot/agent-scheduler"
+Repository = "https://github.com/takurot/agent-scheduler"
+Documentation = "https://github.com/takurot/agent-scheduler/blob/main/docs/RUNBOOK.md"
+Issues = "https://github.com/takurot/agent-scheduler/issues"
 
 [project.optional-dependencies]
 dev = [

@@ -130,3 +130,31 @@ When a task branch conflicts with the base branch:
 - `rebase_onto_base` detects the conflict and immediately executes `git rebase --abort`.
 - The worktree is preserved in a clean state.
 - The task is escalated to `NEEDS_HUMAN` for manual review.
+
+---
+
+## 6. Release & Distribution
+
+### PyPI Trusted Publishing
+Releases are automatically built and published to PyPI via GitHub Actions when a version tag is pushed:
+
+```bash
+# 1. Update version in pyproject.toml
+# 2. Commit and tag release
+git tag v0.1.0
+
+# 3. Push tag to GitHub
+git push origin v0.1.0
+```
+
+### Installation from PyPI
+Once published, users can run `subsched` without manual cloning:
+
+```bash
+# Run immediately without installation (like npx)
+uvx subscription-agent-scheduler run --help
+
+# Global installation
+uv tool install subscription-agent-scheduler
+subsched doctor
+```
