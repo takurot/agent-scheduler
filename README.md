@@ -27,7 +27,13 @@ calling GitHub:
 ```bash
 uv run subsched run --repo owner/project --issues 101,103 --dry-run
 uv run subsched status
+uv run subsched metrics
 ```
 
 Runtime state is written atomically beneath `.ai/`. Do not delete it while the scheduler is
 running. Native Claude/Codex execution and GitHub writes remain fail-closed until later phases.
+
+## Documentation
+- [`docs/SPEC.md`](docs/SPEC.md): Ground-truth specification and safety invariants.
+- [`docs/RUNBOOK.md`](docs/RUNBOOK.md): Operator runbook for running, monitoring, and disaster recovery.
+- [`docs/WORKFLOW.md`](docs/WORKFLOW.md): Contributor and development workflow.
