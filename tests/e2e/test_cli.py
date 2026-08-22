@@ -6,7 +6,8 @@ from typer.testing import CliRunner, Result
 
 from subsched.cli import app
 from subsched.github.issues import GitHubIssueSource
-from subsched.models import Issue
+from subsched.models import Issue, Task, TaskState
+from subsched.storage import JsonStateStore
 
 runner = CliRunner()
 
@@ -53,6 +54,12 @@ def test_run_requires_exactly_one_selection_mode(tmp_path: Path) -> None:
     assert "exactly one" in result.output
 
 
+def test_run_invalid_issue_formats(tmp_path: Path) -> None:
+    assert invoke(tmp_path, "run", "--repo", "o/r", "--issues", "abc", "--dry-run").exit_code != 0
+    assert invoke(tmp_path, "run", "--repo", "o/r", "--issues", "-1", "--dry-run").exit_code != 0
+    assert invoke(tmp_path, "run", "--repo", "o/r", "--issues", "1,1", "--dry-run").exit_code != 0
+
+
 def test_pause_resume_and_cancel_preserve_worktree_state(tmp_path: Path) -> None:
     assert (
         invoke(tmp_path, "run", "--repo", "owner/project", "--issues", "7", "--dry-run").exit_code
@@ -64,6 +71,30 @@ def test_pause_resume_and_cancel_preserve_worktree_state(tmp_path: Path) -> None
     assert invoke(tmp_path, "resume").exit_code == 0
     assert invoke(tmp_path, "cancel", "7").exit_code == 0
     assert "CANCELLED" in invoke(tmp_path, "status").output
+
+
+def test_cancel_non_existent_issue(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    result = invoke(tmp_path, "cancel", "999")
+    assert result.exit_code != 0
+    assert "not in scheduler state" in result.output or "not found" in result.output
+
+
+def test_cancel_invalid_state_transition(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    t = Task(
+        task_id="github-101",
+        issue_number=101,
+        title="Task 101",
+        labels=(),
+        status=TaskState.COMPLETE,
+    )
+    store.save_tasks([t])
+    result = invoke(tmp_path, "cancel", "101")
+    assert result.exit_code != 0
+    assert "cannot be cancelled" in result.output
 
 
 def test_native_execution_is_fail_closed(tmp_path: Path) -> None:
@@ -109,6 +140,17 @@ def test_doctor_warns_on_broad_token_scope(
     assert "broader than required" in result.output.lower()
     assert "gho_" not in result.output
     assert "token=" not in result.output.lower()
+
+
+def test_doctor_reports_missing_executables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda command: None)
+    result = invoke(tmp_path, "doctor")
+    assert result.exit_code != 0
+    assert "MISSING" in result.output
 
 
 def test_doctor_reports_no_warning_for_minimal_scope(

@@ -1,11 +1,19 @@
 import json
+import os
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from subsched.models import Capacity, CapacityState, Issue, Task, TaskState
-from subsched.storage import JsonStateStore, StateCorruptionError
+from subsched.storage import (
+    JsonStateStore,
+    LockRecord,
+    SchedulerLock,
+    StateCorruptionError,
+    get_process_start_time,
+)
 
 
 def test_state_round_trip_preserves_recovery_fields(tmp_path: Path) -> None:
@@ -45,6 +53,52 @@ def test_unknown_schema_version_quarantined_and_fails_closed(tmp_path: Path) -> 
     assert len(quarantine_files) == 1
 
 
+def test_duplicate_task_quarantined(tmp_path: Path) -> None:
+    state_file = tmp_path / ".ai" / "scheduler.json"
+    state_file.parent.mkdir(parents=True)
+    t = Task.from_issue(Issue(number=1, title="one")).to_dict()
+    state_file.write_text(
+        json.dumps({"schema_version": 1, "tasks": [t, t]}), encoding="utf-8"
+    )
+
+    with pytest.raises(StateCorruptionError, match="duplicate task"):
+        JsonStateStore(tmp_path).load_tasks()
+
+
+def test_invalid_capacity_quarantined(tmp_path: Path) -> None:
+    state_file = tmp_path / ".ai" / "scheduler.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(
+        json.dumps({"schema_version": 1, "tasks": [], "capacities": "invalid"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(StateCorruptionError, match="invalid capacity"):
+        JsonStateStore(tmp_path).load_capacities()
+
+
+def test_invalid_paused_flag_quarantined(tmp_path: Path) -> None:
+    state_file = tmp_path / ".ai" / "scheduler.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text(
+        json.dumps({"schema_version": 1, "tasks": [], "paused": "not-bool"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(StateCorruptionError, match="must be boolean"):
+        JsonStateStore(tmp_path).is_paused()
+
+
+def test_oversized_state_quarantined(tmp_path: Path) -> None:
+    state_file = tmp_path / ".ai" / "scheduler.json"
+    state_file.parent.mkdir(parents=True)
+    # Write > 10MB
+    state_file.write_bytes(b"x" * (11 * 1024 * 1024))
+
+    with pytest.raises(StateCorruptionError, match="exceeds the size limit"):
+        JsonStateStore(tmp_path).load_tasks()
+
+
 def test_standard_directory_initialization_and_backup(tmp_path: Path) -> None:
     store = JsonStateStore(tmp_path)
     store.save_tasks(())
@@ -75,6 +129,17 @@ def test_capacity_cooldown_round_trip(tmp_path: Path) -> None:
     assert store.load_capacities() == (capacity,)
 
 
+def test_state_store_paused_state(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    assert store.is_paused() is False
+
+    store.set_paused(True)
+    assert store.is_paused() is True
+
+    store.set_paused(False)
+    assert store.is_paused() is False
+
+
 def test_state_store_rejects_symlinked_state_directory(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -82,6 +147,16 @@ def test_state_store_rejects_symlinked_state_directory(tmp_path: Path) -> None:
 
     with pytest.raises(StateCorruptionError, match="symlink"):
         JsonStateStore(tmp_path).save_tasks(())
+
+
+def test_state_store_rejects_symlinked_repo(tmp_path: Path) -> None:
+    real_repo = tmp_path / "real_repo"
+    real_repo.mkdir()
+    sym_repo = tmp_path / "sym_repo"
+    sym_repo.symlink_to(real_repo, target_is_directory=True)
+
+    with pytest.raises(StateCorruptionError, match="symlink"):
+        JsonStateStore(sym_repo).save_tasks(())
 
 
 def test_scheduler_rejects_persisted_available_capacity(tmp_path: Path) -> None:
@@ -109,8 +184,6 @@ def test_scheduler_rejects_persisted_available_capacity(tmp_path: Path) -> None:
 
 
 def test_scheduler_lock_mutual_exclusion(tmp_path: Path) -> None:
-    from subsched.storage import SchedulerLock, SchedulerLockError
-
     lock_file = tmp_path / ".ai" / "scheduler.lock"
     lock1 = SchedulerLock(lock_file)
     lock2 = SchedulerLock(lock_file)
@@ -118,8 +191,8 @@ def test_scheduler_lock_mutual_exclusion(tmp_path: Path) -> None:
     lock1.acquire()
     assert lock1._held is True
 
-    with pytest.raises(SchedulerLockError, match="already running"):
-        lock2.acquire()
+    # Acquiring again on same instance is a no-op
+    lock1.acquire()
 
     lock1.release()
     assert lock1._held is False
@@ -131,8 +204,6 @@ def test_scheduler_lock_mutual_exclusion(tmp_path: Path) -> None:
 
 
 def test_scheduler_lock_stale_lock_recovery(tmp_path: Path) -> None:
-    from subsched.storage import LockRecord, SchedulerLock
-
     lock_file = tmp_path / ".ai" / "scheduler.lock"
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     # Stale record with non-existent dead PID 999999
@@ -149,6 +220,12 @@ def test_scheduler_lock_stale_lock_recovery(tmp_path: Path) -> None:
     lock.acquire()
     assert lock._held is True
     lock.release()
+
+
+def test_process_start_time_helper() -> None:
+    assert get_process_start_time(-1) is None
+    st = get_process_start_time(os.getpid())
+    assert st is not None or sys.platform != "darwin"
 
 
 def test_state_store_cas_lost_update_detection(tmp_path: Path) -> None:

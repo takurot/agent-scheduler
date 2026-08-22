@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -90,9 +91,15 @@ def test_rebase_conflict_detects_and_aborts(git_repo_with_branch: tuple[Path, Pa
 
 
 def test_rebase_invalid_branch(tmp_path: Path) -> None:
-    # Rebase on non-repo directory fails safely
     result = rebase_onto_base(tmp_path, base_branch="non-existent")
     assert result.status in {RebaseStatus.FAILURE, RebaseStatus.CONFLICT}
+
+
+def test_rebase_subprocess_exception(tmp_path: Path) -> None:
+    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="git", timeout=1)):
+        result = rebase_onto_base(tmp_path, base_branch="main")
+        assert result.status == RebaseStatus.FAILURE
+        assert "timed out" in result.output.casefold() or "execution failed" in result.output
 
 
 def test_handle_rebase_outcome() -> None:
@@ -109,6 +116,17 @@ def test_handle_rebase_outcome() -> None:
     assert updated.status == TaskState.READY
     assert "cleanly" in msg
 
+    # PR_READY on success
+    pr_task = Task(
+        task_id="github-102",
+        issue_number=102,
+        title="Task 102",
+        labels=(),
+        status=TaskState.PR_READY,
+    )
+    updated_pr, _ = handle_rebase_outcome(pr_task, success_result)
+    assert updated_pr.status == TaskState.PR_READY
+
     conflict_result = RebaseResult(
         status=RebaseStatus.CONFLICT, conflicted_files=("README.md",)
     )
@@ -116,7 +134,31 @@ def test_handle_rebase_outcome() -> None:
     assert updated.status == TaskState.NEEDS_HUMAN
     assert "conflict" in msg.casefold()
 
+    # IN_PROGRESS on conflict
+    ip_task = Task(
+        task_id="github-103",
+        issue_number=103,
+        title="Task 103",
+        labels=(),
+        status=TaskState.IN_PROGRESS,
+    )
+    updated_ip, _ = handle_rebase_outcome(ip_task, conflict_result)
+    assert updated_ip.status == TaskState.NEEDS_HUMAN
+
+    # IN_PROGRESS on failure
     fail_result = RebaseResult(status=RebaseStatus.FAILURE, output="fatal error")
-    updated, msg = handle_rebase_outcome(task, fail_result)
-    assert updated.status == TaskState.NEEDS_HUMAN
-    assert "fatal error" in msg
+    updated_ip_fail, _ = handle_rebase_outcome(ip_task, fail_result)
+    assert updated_ip_fail.status == TaskState.NEEDS_HUMAN
+
+    # FAILED task
+    failed_task = Task(
+        task_id="github-104",
+        issue_number=104,
+        title="Task 104",
+        labels=(),
+        status=TaskState.FAILED,
+    )
+    updated_f, _ = handle_rebase_outcome(failed_task, conflict_result)
+    assert updated_f.status == TaskState.FAILED
+    updated_f2, _ = handle_rebase_outcome(failed_task, fail_result)
+    assert updated_f2.status == TaskState.FAILED

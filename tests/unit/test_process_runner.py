@@ -4,12 +4,38 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.process import (
+    _reap_proc,
     filter_environment,
     redact_sensitive_command_audit,
     run_process_group,
+    stop_process_group,
 )
+
+
+def test_process_execution_request_validations(tmp_path: Path) -> None:
+    # Empty argv
+    with pytest.raises(ValueError, match="argv must not be empty"):
+        ProcessExecutionRequest(argv=(), cwd=tmp_path, env={})
+
+    # Relative cwd
+    with pytest.raises(ValueError, match="cwd must be an absolute"):
+        ProcessExecutionRequest(argv=("echo",), cwd=Path("relative"), env={})
+
+    # Invalid timeout
+    with pytest.raises(ValueError, match="timeout_seconds must be positive"):
+        ProcessExecutionRequest(argv=("echo",), cwd=tmp_path, env={}, timeout_seconds=0)
+
+    # Invalid grace
+    with pytest.raises(ValueError, match="grace_seconds must be positive"):
+        ProcessExecutionRequest(argv=("echo",), cwd=tmp_path, env={}, grace_seconds=0)
+
+    # Invalid output limit
+    with pytest.raises(ValueError, match="output_limit_bytes must be positive"):
+        ProcessExecutionRequest(argv=("echo",), cwd=tmp_path, env={}, output_limit_bytes=0)
 
 
 def test_filter_environment_applies_allowlist() -> None:
@@ -123,3 +149,8 @@ time.sleep(10)
         time.sleep(0.1)
         val2 = child_marker.read_text(encoding="utf-8")
         assert val1 == val2
+
+
+def test_stop_process_group_edge_cases() -> None:
+    assert stop_process_group(-1, 0.1) is False
+    assert _reap_proc(None, 0.1) is True
