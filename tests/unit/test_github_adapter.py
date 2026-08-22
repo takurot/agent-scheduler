@@ -168,3 +168,62 @@ def test_diagnose_token_fails_closed_on_malformed_json() -> None:
 
     assert diagnosis.authenticated is False
     assert diagnosis.scopes == ()
+
+
+def test_github_environment_includes_proxy_and_tls_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    from subsched.github.issues import _github_environment
+
+    proxy_tls_vars = {
+        "HTTP_PROXY": "http://proxy.internal:8080",
+        "http_proxy": "http://proxy.internal:8080",
+        "HTTPS_PROXY": "https://proxy.internal:8443",
+        "https_proxy": "https://proxy.internal:8443",
+        "ALL_PROXY": "socks5://proxy.internal:1080",
+        "all_proxy": "socks5://proxy.internal:1080",
+        "NO_PROXY": "localhost,127.0.0.1,.local",
+        "no_proxy": "localhost,127.0.0.1,.local",
+        "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
+        "SSL_CERT_DIR": "/etc/ssl/certs",
+        "REQUESTS_CA_BUNDLE": "/etc/ssl/certs/ca-certificates.crt",
+        "CURL_CA_BUNDLE": "/etc/ssl/certs/ca-certificates.crt",
+        "GH_HTTP_UNIX_SOCKET": "/tmp/gh.sock",
+    }
+    for key, val in proxy_tls_vars.items():
+        monkeypatch.setenv(key, val)
+
+    env = _github_environment()
+    for key, val in proxy_tls_vars.items():
+        assert env.get(key) == val
+
+
+def test_parse_issue_handles_malformed_labels() -> None:
+    # 1. Labels with mixed types (string, dict with name, dict without name, None)
+    payload = {
+        "number": 42,
+        "title": "Bug report",
+        "body": "Details",
+        "labels": [
+            "direct-string-label",
+            {"name": "dict-label"},
+            {"other_key": "val"},
+            {"name": None},
+            12345,
+        ],
+        "url": "https://github.com/owner/repo/issues/42",
+    }
+    issue = GitHubIssueSource._parse_issue(payload)
+    assert issue.number == 42
+    assert issue.title == "Bug report"
+    assert issue.labels == ("direct-string-label", "dict-label")
+
+    # 2. Labels is not a list (e.g. None or int)
+    payload_no_list = {
+        "number": 43,
+        "title": "Another",
+        "body": "",
+        "labels": None,
+    }
+    issue2 = GitHubIssueSource._parse_issue(payload_no_list)
+    assert issue2.number == 43
+    assert issue2.labels == ()
+

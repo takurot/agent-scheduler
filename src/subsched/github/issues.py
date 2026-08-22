@@ -83,17 +83,30 @@ def diagnose_token(run: RunCommand | None = None) -> TokenDiagnosis:
 
 def _github_environment() -> dict[str, str]:
     allowed = {
+        "ALL_PROXY",
+        "all_proxy",
+        "CURL_CA_BUNDLE",
         "GH_CONFIG_DIR",
         "GH_ENTERPRISE_TOKEN",
         "GH_HOST",
+        "GH_HTTP_UNIX_SOCKET",
         "GH_TOKEN",
         "GITHUB_ENTERPRISE_TOKEN",
         "GITHUB_TOKEN",
         "HOME",
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
         "LANG",
         "LC_ALL",
         "NO_COLOR",
+        "NO_PROXY",
+        "no_proxy",
         "PATH",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
         "XDG_CONFIG_HOME",
     }
     return {name: value for name, value in os.environ.items() if name in allowed}
@@ -147,13 +160,23 @@ class GitHubIssueSource:
 
     @staticmethod
     def _parse_issue(value: Any) -> Issue:
-        if not isinstance(value, dict) or not isinstance(value.get("labels", []), list):
-            raise TypeError
-        labels = tuple(str(label["name"]) for label in value.get("labels", []))
+        if not isinstance(value, dict):
+            raise TypeError("issue must be a dict")
+        raw_labels = value.get("labels", [])
+        if not isinstance(raw_labels, list):
+            raw_labels = []
+        parsed_labels: list[str] = []
+        for item in raw_labels:
+            if isinstance(item, dict):
+                name = item.get("name")
+                if name is not None:
+                    parsed_labels.append(str(name))
+            elif isinstance(item, str) and item:
+                parsed_labels.append(item)
         return Issue(
             number=int(value["number"]),
             title=str(value["title"]),
             body=str(value.get("body") or ""),
-            labels=labels,
+            labels=tuple(parsed_labels),
             url=str(value["url"]) if value.get("url") else None,
         )

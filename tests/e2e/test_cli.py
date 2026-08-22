@@ -219,3 +219,83 @@ def test_cli_runs_with_config_file(tmp_path: Path) -> None:
     result = invoke(tmp_path, "run", "--config", str(config_file), "--dry-run")
     assert result.exit_code == 0, result.output
     assert "4 issue(s) discovered" in result.output
+
+
+def test_cli_commands_catch_state_corruption_error(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+
+    def corrupt() -> None:
+        store.path.write_text("invalid json content", encoding="utf-8")
+
+    # status
+    corrupt()
+    res_status = invoke(tmp_path, "status")
+    assert res_status.exit_code == 1
+    assert "State error:" in res_status.output
+
+    # run
+    corrupt()
+    res_run = invoke(tmp_path, "run", "--repo", "owner/project", "--issues", "1", "--dry-run")
+    assert res_run.exit_code == 1
+    assert "State error:" in res_run.output
+
+    # pause
+    corrupt()
+    res_pause = invoke(tmp_path, "pause")
+    assert res_pause.exit_code == 1
+    assert "State error:" in res_pause.output
+
+    # resume
+    corrupt()
+    res_resume = invoke(tmp_path, "resume")
+    assert res_resume.exit_code == 1
+    assert "State error:" in res_resume.output
+
+    # cancel
+    corrupt()
+    res_cancel = invoke(tmp_path, "cancel", "1")
+    assert res_cancel.exit_code == 1
+    assert "State error:" in res_cancel.output
+
+    # metrics
+    corrupt()
+    res_metrics = invoke(tmp_path, "metrics")
+    assert res_metrics.exit_code == 1
+    assert "State error:" in res_metrics.output
+
+
+def test_metrics_handles_report_write_failure(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+
+    # Pass directory path as report file to cause OSError on write_text
+    report_dir = tmp_path / "a_directory"
+    report_dir.mkdir()
+
+    result = invoke(tmp_path, "metrics", "--report", str(report_dir))
+    assert result.exit_code == 0
+    assert f"Failed to write report to {report_dir}" in result.output
+    assert "Productivity Metrics" in result.output
+
+
+def test_run_output_message_reflects_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    # Dry-run
+    res_dry = invoke(tmp_path, "run", "--repo", "owner/project", "--issues", "1", "--dry-run")
+    assert res_dry.exit_code == 0
+    assert "(dry-run)" in res_dry.output
+
+    # Native allow
+    tmp_path2 = tmp_path / "sub"
+    tmp_path2.mkdir()
+    res_native = invoke(
+        tmp_path2, "run", "--repo", "owner/project", "--issues", "1", "--allow-native"
+    )
+    assert res_native.exit_code == 0
+    assert "discovered and persisted" in res_native.output
+    assert "(dry-run)" not in res_native.output
+

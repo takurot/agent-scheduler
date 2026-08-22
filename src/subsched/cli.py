@@ -166,10 +166,11 @@ def run(
                 raise typer.Exit(2)
             tasks = (*persisted, *(Task.from_issue(item) for item in additions))
             context.store.save_tasks(tasks, paused=context.store.is_paused())
-    except SchedulerLockError as error:
-        typer.echo(f"Lock error: {error}", err=True)
+    except (SchedulerLockError, StateCorruptionError) as error:
+        typer.echo(f"State error: {error}", err=True)
         raise typer.Exit(1) from error
-    typer.echo(f"{len(additions)} issue(s) discovered and persisted (dry-run)")
+    mode_suffix = " (dry-run)" if dry_run else ""
+    typer.echo(f"{len(additions)} issue(s) discovered and persisted{mode_suffix}")
 
 
 @app.command()
@@ -183,10 +184,11 @@ def status(
     context: Context = ctx.obj
     try:
         tasks = context.store.load_tasks()
+        is_paused = context.store.is_paused()
     except StateCorruptionError as error:
         typer.echo(f"State error: {error}", err=True)
         raise typer.Exit(1) from error
-    state = "PAUSED" if context.store.is_paused() else "READY"
+    state = "PAUSED" if is_paused else "READY"
     typer.echo(f"Scheduler {state}")
     if not tasks:
         typer.echo("Queue is empty")
@@ -209,8 +211,8 @@ def pause(ctx: typer.Context) -> None:
     context: Context = ctx.obj
     try:
         context.store.set_paused(True)
-    except SchedulerLockError as error:
-        typer.echo(f"Lock error: {error}", err=True)
+    except (SchedulerLockError, StateCorruptionError) as error:
+        typer.echo(f"State error: {error}", err=True)
         raise typer.Exit(1) from error
     typer.echo("Scheduler paused; running work is unchanged")
 
@@ -221,8 +223,8 @@ def resume(ctx: typer.Context) -> None:
     context: Context = ctx.obj
     try:
         context.store.set_paused(False)
-    except SchedulerLockError as error:
-        typer.echo(f"Lock error: {error}", err=True)
+    except (SchedulerLockError, StateCorruptionError) as error:
+        typer.echo(f"State error: {error}", err=True)
         raise typer.Exit(1) from error
     typer.echo("Scheduler resumed")
 
@@ -249,8 +251,8 @@ def cancel(ctx: typer.Context, issue: Annotated[int, typer.Argument(min=1)]) -> 
                     replacement if item.issue_number == issue else item for item in tasks
                 )
                 context.store.save_tasks(updated, paused=context.store.is_paused())
-    except SchedulerLockError as error:
-        typer.echo(f"Lock error: {error}", err=True)
+    except (SchedulerLockError, StateCorruptionError) as error:
+        typer.echo(f"State error: {error}", err=True)
         raise typer.Exit(1) from error
     typer.echo(f"Issue #{issue} cancelled; worktree was preserved")
 
@@ -301,14 +303,17 @@ def metrics(
     try:
         tasks = context.store.load_tasks()
     except StateCorruptionError as error:
-        typer.echo(f"State corruption error: {error}", err=True)
+        typer.echo(f"State error: {error}", err=True)
         raise typer.Exit(1) from error
 
     calculated = calculate_metrics(tasks)
     report_text = format_run_report(calculated)
 
     if report_file is not None:
-        report_file.write_text(report_text, encoding="utf-8")
+        try:
+            report_file.write_text(report_text, encoding="utf-8")
+        except OSError as error:
+            typer.echo(f"Failed to write report to {report_file}: {error}", err=True)
 
     if json_output:
         typer.echo(json.dumps(calculated.to_dict(), indent=2))
