@@ -8,6 +8,7 @@ from pathlib import Path
 
 from subsched.handoff import reconstruct_or_quarantine_handoff
 from subsched.models import Task, TaskState
+from subsched.storage import get_process_start_time
 
 
 class ProcessStatus(StrEnum):
@@ -72,16 +73,28 @@ def clear_process_record(worktree_dir: Path, issue_number: int) -> None:
 
 
 def check_process_liveness(record: ProcessRecord) -> ProcessStatus:
-    """Check if the recorded PID is currently running and matches."""
+    """Check if the recorded PID is currently running and still the same process.
+
+    Matches the recorded pid against its process start time (the same PID + start-time
+    comparison storage.is_process_alive uses) so that OS PID reuse cannot be mistaken for
+    the original worker still being live: if `record.pid` has since been reassigned to an
+    unrelated process, this returns DEAD instead of LIVE.
+    """
     if record.pid <= 0:
         return ProcessStatus.DEAD
     try:
         os.kill(record.pid, 0)
-        return ProcessStatus.LIVE
     except ProcessLookupError:
         return ProcessStatus.DEAD
     except OSError:
         return ProcessStatus.UNKNOWN
+
+    if record.started_at:
+        actual_start_time = get_process_start_time(record.pid)
+        if actual_start_time is not None and actual_start_time != record.started_at:
+            return ProcessStatus.DEAD
+
+    return ProcessStatus.LIVE
 
 
 def reconcile_task_recovery(worktree_dir: Path, task: Task) -> tuple[Task, str]:
