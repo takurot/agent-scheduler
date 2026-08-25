@@ -15,6 +15,16 @@
 
 ---
 
+## ⚠️ Security Notice: No OS-Level Sandbox
+
+`--allow-native` execution runs the Claude Code / Codex CLI with permission checks bypassed (`bypassPermissions`), so the agent can run Bash commands, edit files, and read files without per-command confirmation. This is required for unattended execution — in non-interactive mode there is no human to confirm anything, so any mode other than `bypassPermissions` denies every action and the agent can do nothing.
+
+**The task's Git worktree is a working-directory default, not an OS-level sandbox.** It does not use a container, chroot, or network isolation. A Bash command run by the agent can technically read or write files outside the worktree and reach the network. Pull request review only inspects the code diff the agent proposes to commit — it does not catch side effects of commands executed during the session (e.g. files touched outside the repo, data sent over the network). Environment variables passed to the agent process are filtered to a small allowlist (no secrets), but this does not restrict filesystem access to files such as `~/.ssh`.
+
+**Only run `--allow-native` against issues and repositories you trust.** True OS-level sandboxing (containerized execution, filesystem/network isolation) is a planned hardening item, not yet implemented.
+
+---
+
 ## Requirements
 
 - Python `>=3.12`
