@@ -29,18 +29,35 @@ def _run_commands(job: dict[str, Any]) -> list[str]:
     return [step["run"] for step in job.get("steps", []) if "run" in step]
 
 
+def _needed_job_names(publish_job: dict[str, Any]) -> set[str]:
+    needs = publish_job.get("needs")
+    return {needs} if isinstance(needs, str) else set(needs or ())
+
+
+def _find_quality_gate_job_name(jobs: dict[str, Any], needed: set[str]) -> str | None:
+    """Among pypi-publish's dependencies, find the one that actually runs the lint/
+    typecheck/test/audit gate (as opposed to e.g. a tag-vs-version check job)."""
+    required_substrings = ("ruff check", "mypy", "pytest", "pip-audit")
+    for name in needed:
+        commands = _run_commands(jobs[name])
+        if all(any(substring in cmd for cmd in commands) for substring in required_substrings):
+            return name
+    return None
+
+
 def test_release_publish_job_requires_the_quality_gate_job() -> None:
     release = _load_workflow("release.yml")
     jobs = release["jobs"]
     assert "pypi-publish" in jobs
 
-    publish_job = jobs["pypi-publish"]
-    needs = publish_job.get("needs")
-    needed = {needs} if isinstance(needs, str) else set(needs or ())
+    needed = _needed_job_names(jobs["pypi-publish"])
     assert needed, "pypi-publish must depend on a quality-gate job (needs: ...)"
+    assert needed <= jobs.keys(), f"dependency job(s) not defined: {needed - jobs.keys()}"
 
-    gate_job_name = next(iter(needed))
-    assert gate_job_name in jobs, f"quality gate job '{gate_job_name}' is not defined"
+    gate_job_name = _find_quality_gate_job_name(jobs, needed)
+    assert gate_job_name is not None, (
+        "none of pypi-publish's dependencies run the full lint/typecheck/test/audit gate"
+    )
 
 
 def test_release_quality_gate_runs_the_same_checks_as_ci() -> None:
@@ -49,10 +66,11 @@ def test_release_quality_gate_runs_the_same_checks_as_ci() -> None:
 
     ci_commands = _run_commands(ci["jobs"]["verify"])
 
-    gate_job_name = release["jobs"]["pypi-publish"]["needs"]
-    if not isinstance(gate_job_name, str):
-        gate_job_name = next(iter(gate_job_name))
-    gate_commands = _run_commands(release["jobs"][gate_job_name])
+    jobs = release["jobs"]
+    needed = _needed_job_names(jobs["pypi-publish"])
+    gate_job_name = _find_quality_gate_job_name(jobs, needed)
+    assert gate_job_name is not None
+    gate_commands = _run_commands(jobs[gate_job_name])
 
     # Every quality-gate command in CI (lint, typecheck, test+coverage, dependency audit)
     # must also run before a release is published.
@@ -69,10 +87,6 @@ def test_release_and_ci_pin_the_same_action_versions() -> None:
     release = _load_workflow("release.yml")
 
     ci_versions = _action_versions(ci["jobs"]["verify"])
-
-    gate_job_name = release["jobs"]["pypi-publish"]["needs"]
-    if not isinstance(gate_job_name, str):
-        gate_job_name = next(iter(gate_job_name))
 
     for job in release["jobs"].values():
         job_versions = _action_versions(job)
