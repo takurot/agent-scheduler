@@ -1,15 +1,42 @@
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner, Result
 
+from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
 from subsched.cli import app
 from subsched.github.issues import GitHubIssueSource
+from subsched.github.pull_requests import PullRequestInfo
 from subsched.models import Issue, Task, TaskState
 from subsched.storage import JsonStateStore
 
 runner = CliRunner()
+
+
+def _git(path: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, text=True)
+
+
+def _init_git_repo(path: Path) -> None:
+    """Create a minimal real local git repository with one commit on `main`."""
+    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True, capture_output=True)
+    _git(path, "config", "user.email", "test@example.invalid")
+    _git(path, "config", "user.name", "Test")
+    _git(path, "commit", "--allow-empty", "-q", "-m", "init")
+
+
+def _claude_success_stdout() -> str:
+    return json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 1,
+            "result": "done",
+        }
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -289,13 +316,73 @@ def test_run_output_message_reflects_mode(tmp_path: Path, monkeypatch: pytest.Mo
     assert res_dry.exit_code == 0
     assert "(dry-run)" in res_dry.output
 
-    # Native allow
+    # Native allow: real (remote-less) git repo, so the wiring runs for real instead of
+    # failing worktree setup; with no remote configured the task ends up NEEDS_HUMAN after
+    # a failed push, which is fine here -- this test only cares about the persisted-count
+    # message, not the final task state.
     tmp_path2 = tmp_path / "sub"
     tmp_path2.mkdir()
+    _init_git_repo(tmp_path2)
     res_native = invoke(
         tmp_path2, "run", "--repo", "owner/project", "--issues", "1", "--allow-native"
     )
     assert res_native.exit_code == 0
     assert "discovered and persisted" in res_native.output
     assert "(dry-run)" not in res_native.output
+
+
+def test_native_run_drives_scheduler_to_complete_and_opens_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end (per WORKFLOW.md's E2E policy: real git, no real provider or GitHub calls)
+    check that `--allow-native` actually dispatches, verifies, pushes, and creates a PR --
+    not just discovers and persists."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+    remote_dir = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(remote_dir)], check=True, capture_output=True
+    )
+    _git(repo_dir, "remote", "add", "origin", str(remote_dir))
+    _git(repo_dir, "push", "-q", "-u", "origin", "main")
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\nverification:\n  commands:\n    - 'true'\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
+
+    monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
+    monkeypatch.setattr(
+        "subsched.github.pull_requests.create_or_get_pull_request",
+        lambda *a, **k: PullRequestInfo(
+            number=7, url="https://example.invalid/pull/7", title="t", body="b"
+        ),
+    )
+
+    result = invoke(
+        repo_dir,
+        "run",
+        "--config",
+        str(config_file),
+        "--issues",
+        "1",
+        "--allow-native",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 issue(s) discovered and persisted" in result.output
+    assert "COMPLETE" in result.output
+
+    status = invoke(repo_dir, "status", "--verbose")
+    assert "COMPLETE" in status.output
+    assert "PR #7" in status.output
 

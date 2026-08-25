@@ -8,6 +8,10 @@ from typing import Annotated
 
 import typer
 
+from subsched.agents.claude import ClaudeBillingMode, ClaudeExecutionPolicy
+from subsched.agents.native import NativeWorker
+from subsched.capacity.claude import ClaudeCapacitySensor
+from subsched.capacity.codex import CodexCapacitySensor
 from subsched.config import (
     ConfigError,
     SchedulerConfig,
@@ -16,8 +20,11 @@ from subsched.config import (
     validate_repo,
 )
 from subsched.github.issues import GitHubCliError, GitHubIssueSource, diagnose_token
-from subsched.models import Task, TaskState
+from subsched.models import TaskState
+from subsched.router import AgentConfig, Router
+from subsched.scheduler import Scheduler
 from subsched.storage import JsonStateStore, SchedulerLockError, StateCorruptionError
+from subsched.tasks.worktree import GitWorktreeAdapter, WorktreeAdapter, WorktreeError
 
 app = typer.Typer(no_args_is_help=True, help="Subscription-aware coding agent scheduler")
 RepositoryOption = Annotated[
@@ -144,10 +151,7 @@ def run(
 
     exclude_labels = frozenset(cfg.github.exclude_labels)
     discovered = tuple(
-        issue
-        for issue in open_issues
-        if (requested is None or issue.number in requested)
-        and not exclude_labels.intersection(issue.labels)
+        issue for issue in open_issues if (requested is None or issue.number in requested)
     )
     if requested is not None:
         missing = requested - {issue.number for issue in open_issues}
@@ -155,22 +159,78 @@ def run(
             typer.echo("Requested issues are not open or were not found", err=True)
             raise typer.Exit(1)
 
+    worktree_root = context.repository / ".ai" / "worktrees"
+    worktree_adapter: WorktreeAdapter | None = None
+    if not dry_run:
+        try:
+            worktree_adapter = GitWorktreeAdapter(context.repository, worktree_root)
+        except WorktreeError as error:
+            typer.echo(f"Worktree setup failed: {error}", err=True)
+            raise typer.Exit(1) from error
+
     try:
-        with context.store.lock():
-            persisted = context.store.load_tasks()
-            existing = {task.issue_number for task in persisted}
-            additions = tuple(task for task in discovered if task.number not in existing)
-            max_tasks = cfg.execution.max_tasks_per_run
-            if len(persisted) + len(additions) > max_tasks:
-                typer.echo(f"Task limit exceeded ({max_tasks})", err=True)
-                raise typer.Exit(2)
-            tasks = (*persisted, *(Task.from_issue(item) for item in additions))
-            context.store.save_tasks(tasks, paused=context.store.is_paused())
+        scheduler = Scheduler(
+            store=context.store,
+            router=Router(
+                AgentConfig(name, priority=settings.priority, enabled=settings.enabled)
+                for name, settings in cfg.agents.items()
+            ),
+            worker=NativeWorker(),
+            worktree_root=worktree_root,
+            worktree_adapter=worktree_adapter,
+            verification_commands=cfg.verification.commands,
+            verification_timeout_seconds=float(cfg.verification.timeout_seconds),
+            concurrency=cfg.execution.concurrency,
+            max_agent_failures=cfg.execution.max_agent_failures,
+            max_agent_switches=cfg.execution.max_agent_switches,
+            max_tasks=cfg.execution.max_tasks_per_run,
+            push_enabled=not dry_run,
+            repo=resolved_repo,
+        )
+    except (ValueError, StateCorruptionError) as error:
+        typer.echo(f"State error: {error}", err=True)
+        raise typer.Exit(1) from error
+
+    before_count = len(scheduler.tasks)
+    try:
+        scheduler.discover(discovered, exclude_labels=exclude_labels)
+    except ValueError as error:
+        typer.echo(f"Task limit exceeded ({cfg.execution.max_tasks_per_run})", err=True)
+        raise typer.Exit(2) from error
     except (SchedulerLockError, StateCorruptionError) as error:
         typer.echo(f"State error: {error}", err=True)
         raise typer.Exit(1) from error
+
+    additions_count = len(scheduler.tasks) - before_count
     mode_suffix = " (dry-run)" if dry_run else ""
-    typer.echo(f"{len(additions)} issue(s) discovered and persisted{mode_suffix}")
+    typer.echo(f"{additions_count} issue(s) discovered and persisted{mode_suffix}")
+
+    if dry_run:
+        return
+
+    claude_sensor = ClaudeCapacitySensor(
+        ClaudeExecutionPolicy(
+            live_probe_opt_in=True, billing_mode=ClaudeBillingMode.SUBSCRIPTION_VERIFIED
+        )
+    )
+    codex_sensor = CodexCapacitySensor(allow_live=True, subscription_billing_verified=True)
+    capacities = (*claude_sensor.observe("claude"), *codex_sensor.observe("codex"))
+
+    try:
+        scheduler.run_until_waiting(capacities)
+    except KeyboardInterrupt:
+        typer.echo("\nInterrupted; in-progress task state was saved safely.", err=True)
+        raise typer.Exit(130) from None
+
+    if scheduler.is_waiting_for_capacity:
+        wait_seconds = int(scheduler.wait_duration().total_seconds())
+        typer.echo(
+            f"Waiting for agent capacity; re-run later (earliest retry in ~{wait_seconds}s)"
+        )
+
+    counts = Counter(task.status.value for task in scheduler.tasks)
+    for name in sorted(counts):
+        typer.echo(f"{name:<22} {counts[name]}")
 
 
 @app.command()

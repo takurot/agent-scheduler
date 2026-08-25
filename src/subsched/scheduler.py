@@ -64,6 +64,9 @@ class Scheduler:
         max_agent_failures: int = 2,
         max_agent_switches: int = 6,
         max_tasks: int = 50,
+        push_enabled: bool = False,
+        repo: str | None = None,
+        base_branch: str = "main",
     ) -> None:
         self.store = store
         self.router = router
@@ -76,6 +79,9 @@ class Scheduler:
         if verification_timeout_seconds <= 0:
             raise ValueError("verification_timeout_seconds must be positive")
         self.verification_timeout_seconds = verification_timeout_seconds
+        self.push_enabled = push_enabled
+        self.repo = repo
+        self.base_branch = base_branch
         self.concurrency = concurrency
         from subsched.lease import LeaseManager
 
@@ -285,6 +291,57 @@ class Scheduler:
         self._backoff_step = 0
         self._persist()
 
+    def _finalize_verified_task(
+        self, verifying: Task, agent: str, now: datetime, verification_summary: str
+    ) -> Task:
+        """Complete a task that has passed verification: rebase, push, and open/reuse its PR.
+
+        When push_enabled is False (the default, and what every existing test uses), or the
+        task has no worktree, this only advances local task state to COMPLETE -- no git or
+        GitHub calls are made. This keeps the change additive: nothing that already worked
+        without push/PR wiring changes behavior.
+        """
+        if not self.push_enabled or verifying.worktree is None:
+            pr_ready = verifying.transition(TaskState.PR_READY, current_agent=agent, now=now)
+            ready_for_review = pr_ready.transition(
+                TaskState.READY_FOR_REVIEW, current_agent=agent, now=now
+            )
+            return ready_for_review.transition(TaskState.COMPLETE, current_agent=agent, now=now)
+
+        from subsched.github.conflict import handle_rebase_outcome, rebase_onto_base
+        from subsched.github.pull_requests import create_or_get_pull_request
+        from subsched.github.push import PushResultKind, push_task_branch
+
+        worktree_dir = Path(verifying.worktree)
+        branch_name = f"subsched/issue-{verifying.issue_number}"
+
+        rebase_result = rebase_onto_base(worktree_dir, base_branch=self.base_branch)
+        after_rebase, _rebase_msg = handle_rebase_outcome(verifying, rebase_result)
+        if after_rebase.status is not verifying.status:
+            # handle_rebase_outcome escalated (e.g. NEEDS_HUMAN) on conflict/failure.
+            return after_rebase
+
+        push_result = push_task_branch(worktree_dir, branch_name)
+        if push_result.kind is not PushResultKind.SUCCESS:
+            return verifying.transition(TaskState.NEEDS_HUMAN, current_agent=agent, now=now)
+
+        pr_info = create_or_get_pull_request(
+            verifying,
+            branch_name,
+            base=self.base_branch,
+            repo=self.repo,
+            verification_summary=verification_summary,
+        )
+        if pr_info is None:
+            return verifying.transition(TaskState.NEEDS_HUMAN, current_agent=agent, now=now)
+
+        with_pr = replace(verifying, pr=pr_info.number)
+        pr_ready = with_pr.transition(TaskState.PR_READY, current_agent=agent, now=now)
+        ready_for_review = pr_ready.transition(
+            TaskState.READY_FOR_REVIEW, current_agent=agent, now=now
+        )
+        return ready_for_review.transition(TaskState.COMPLETE, current_agent=agent, now=now)
+
     def _handle_result(self, task: Task, agent: str, result: AgentResult, now: datetime) -> None:
         if result.kind is AgentResultKind.PASS:
             verifying = task.transition(TaskState.VERIFYING, current_agent=agent, now=now)
@@ -292,6 +349,7 @@ class Scheduler:
             self._persist()
 
             verification_ok = True
+            verification_summary = ""
             if task.worktree is not None:
                 from subsched.checkpoint import capture_mechanical_checkpoint, save_checkpoint
                 from subsched.verification import run_verification
@@ -302,6 +360,7 @@ class Scheduler:
                     timeout_seconds=self.verification_timeout_seconds,
                 )
                 verification_ok = v_report.passed
+                verification_summary = v_report.summary
                 cp = capture_mechanical_checkpoint(
                     Path(task.worktree),
                     task.issue_number,
@@ -312,14 +371,10 @@ class Scheduler:
                 save_checkpoint(Path(task.worktree), cp)
 
             if verification_ok:
-                pr_ready = verifying.transition(TaskState.PR_READY, current_agent=agent, now=now)
-                ready_for_review = pr_ready.transition(
-                    TaskState.READY_FOR_REVIEW, current_agent=agent, now=now
+                final_task = self._finalize_verified_task(
+                    verifying, agent, now, verification_summary
                 )
-                complete = ready_for_review.transition(
-                    TaskState.COMPLETE, current_agent=agent, now=now
-                )
-                self.queue = self.queue.replace(complete)
+                self.queue = self.queue.replace(final_task)
             else:
                 retry = verifying.transition(
                     TaskState.RETRY, current_agent=None, increment_attempt=True, now=now

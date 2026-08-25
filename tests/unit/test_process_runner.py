@@ -152,6 +152,61 @@ time.sleep(10)
         assert val1 == val2
 
 
+def test_run_process_group_cleans_up_on_keyboard_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the wait for the subprocess is interrupted (e.g. Ctrl+C in the foreground CLI
+    loop), the child process group must still be terminated instead of left running."""
+    import subprocess as subprocess_module
+    import time
+
+    marker = tmp_path / "still_running.txt"
+    script = (
+        "import pathlib, signal, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"path = pathlib.Path({str(marker)!r}); "
+        "[(path.write_text(str(i)), time.sleep(0.02)) for i in range(1000)]"
+    )
+    request = ProcessExecutionRequest(
+        argv=(sys.executable, "-c", script),
+        cwd=tmp_path,
+        env={"PATH": os.environ.get("PATH", "")},
+        timeout_seconds=5.0,
+        grace_seconds=0.2,
+    )
+
+    original_wait = subprocess_module.Popen.wait
+    triggered = False
+
+    def wait_then_interrupt(
+        self: subprocess_module.Popen[bytes], timeout: float | None = None
+    ) -> int:
+        # Only the *first* wait() call (run_process_group's own) should simulate Ctrl+C.
+        # stop_process_group()'s cleanup waits (via _reap_proc) must run for real, or this
+        # test can't distinguish "cleanup ran" from "cleanup itself got interrupted".
+        nonlocal triggered
+        if triggered:
+            return original_wait(self, timeout=timeout)
+        triggered = True
+        # Let the child actually start and begin writing before we simulate Ctrl+C, so the
+        # assertion below observes a genuinely running process, not a race against startup.
+        deadline = time.monotonic() + 2.0
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess_module.Popen, "wait", wait_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_process_group(request)
+
+    assert marker.exists(), "child process never started writing before the interrupt"
+    val1 = marker.read_text(encoding="utf-8")
+    time.sleep(0.1)
+    val2 = marker.read_text(encoding="utf-8")
+    assert val1 == val2, "child process group kept running after KeyboardInterrupt"
+
+
 def test_stop_process_group_edge_cases() -> None:
     assert stop_process_group(-1, 0.1) is False
     assert _reap_proc(None, 0.1) is True

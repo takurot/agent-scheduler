@@ -114,6 +114,11 @@ def run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResul
             output_limit_exceeded=False,
             cleanup_succeeded=cleanup_ok,
         )
+    except BaseException:
+        # Covers KeyboardInterrupt (Ctrl+C) as well as ordinary exceptions raised while
+        # waiting: the child process group must not be left running unattended.
+        stop_process_group(process, request.grace_seconds)
+        raise
 
     stdout_reader.join(timeout=request.grace_seconds)
     stderr_reader.join(timeout=request.grace_seconds)
