@@ -22,4 +22,5 @@ dist/
 .ai/scheduler.json
 .ai/tasks/
 .ai/handoffs/
+.ai/worktrees/
 docs/PLAN.md
