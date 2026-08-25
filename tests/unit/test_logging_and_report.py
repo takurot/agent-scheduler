@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 from subsched.capacity.metrics import CapacityMetrics
-from subsched.logging import StructuredLogger, redact_sensitive_text
 from subsched.metrics import (
     ProductivityMetrics,
     ReliabilityMetrics,
@@ -14,6 +13,7 @@ from subsched.metrics import (
     format_run_report_markdown,
 )
 from subsched.models import Task, TaskState
+from subsched.structured_logger import StructuredLogger, redact_sensitive_text
 
 
 def test_redact_sensitive_text() -> None:

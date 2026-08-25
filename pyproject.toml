@@ -42,6 +42,7 @@ dev = [
 
 [project.scripts]
 subsched = "subsched.cli:app"
+agent-scheduler = "subsched.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/subsched"]
