@@ -9,6 +9,7 @@ from subsched.config import (
     load_config,
     parse_duration,
     parse_natural_language_instruction,
+    validate_repo,
 )
 
 
@@ -143,6 +144,36 @@ def test_parse_duration() -> None:
 
     with pytest.raises(ConfigError, match="invalid duration format"):
         parse_duration("invalid")
+
+
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "owner/..",
+        "../repo",
+        "../..",
+        "./repo",
+        "owner/.",
+        "owner/...",
+    ],
+)
+def test_validate_repo_rejects_dot_only_segments(repo: str) -> None:
+    with pytest.raises(ConfigError, match="owner/name format"):
+        validate_repo(repo)
+
+
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "owner/repo",
+        "takurot/agent-scheduler",
+        "my.org/my.repo",
+        "..foo/repo",
+        "owner/repo..bak",
+    ],
+)
+def test_validate_repo_accepts_legitimate_values(repo: str) -> None:
+    assert validate_repo(repo) == repo
 
 
 def test_parse_natural_language_instruction() -> None:
