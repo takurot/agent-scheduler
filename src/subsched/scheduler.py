@@ -58,6 +58,7 @@ class Scheduler:
         clock: Clock | None = None,
         event_sources: tuple[EventSource, ...] = (),
         verification_commands: tuple[str, ...] = ("true",),
+        verification_timeout_seconds: float = 120.0,
         label_scores: dict[str, int] | None = None,
         concurrency: int = 1,
         max_agent_failures: int = 2,
@@ -72,6 +73,9 @@ class Scheduler:
         self.clock = clock or SystemClock()
         self.event_sources = event_sources
         self.verification_commands = verification_commands
+        if verification_timeout_seconds <= 0:
+            raise ValueError("verification_timeout_seconds must be positive")
+        self.verification_timeout_seconds = verification_timeout_seconds
         self.concurrency = concurrency
         from subsched.lease import LeaseManager
 
@@ -292,7 +296,11 @@ class Scheduler:
                 from subsched.checkpoint import capture_mechanical_checkpoint, save_checkpoint
                 from subsched.verification import run_verification
 
-                v_report = run_verification(Path(task.worktree), self.verification_commands)
+                v_report = run_verification(
+                    Path(task.worktree),
+                    self.verification_commands,
+                    timeout_seconds=self.verification_timeout_seconds,
+                )
                 verification_ok = v_report.passed
                 cp = capture_mechanical_checkpoint(
                     Path(task.worktree),

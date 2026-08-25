@@ -129,6 +129,7 @@ class HandoffConfig:
 @dataclass(frozen=True, slots=True)
 class VerificationConfig:
     commands: tuple[str, ...] = ("pytest", "ruff check .")
+    timeout_seconds: int = 120
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,7 +178,7 @@ SECTION_KEYS: dict[str, frozenset[str]] = {
     ),
     "queue": frozenset({"priority"}),
     "handoff": frozenset({"continuous"}),
-    "verification": frozenset({"commands"}),
+    "verification": frozenset({"commands", "timeout_seconds"}),
 }
 
 
@@ -342,7 +343,13 @@ def _parse_verification_config(raw: Mapping[str, Any]) -> VerificationConfig:
     commands_raw = raw.get("commands", ("pytest", "ruff check ."))
     if not isinstance(commands_raw, (list, tuple)):
         raise ConfigError("verification.commands must be a list of strings")
-    return VerificationConfig(commands=tuple(str(c) for c in commands_raw))
+    timeout_seconds = _strict_pos_int(
+        raw.get("timeout_seconds", 120), "verification.timeout_seconds"
+    )
+    return VerificationConfig(
+        commands=tuple(str(c) for c in commands_raw),
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def load_config(path: Path) -> SchedulerConfig:
