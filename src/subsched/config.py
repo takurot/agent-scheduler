@@ -46,6 +46,12 @@ def _strict_pos_int(value: Any, name: str, *, min_val: int = 1) -> int:
 def validate_repo(repo: str) -> str:
     if not isinstance(repo, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise ConfigError("repo must use owner/name format")
+    owner, name = repo.split("/", 1)
+    # Reject segments made up entirely of dots (".", "..", "..." etc.) so a value like
+    # "../.." cannot masquerade as an owner/repo pair; a normal owner/repo segment is never
+    # only dots.
+    if owner.strip(".") == "" or name.strip(".") == "":
+        raise ConfigError("repo must use owner/name format")
     return repo
 
 
