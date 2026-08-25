@@ -13,7 +13,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from subsched.models import Capacity, Task
 
@@ -96,12 +96,27 @@ def is_process_alive(pid: int, expected_start_time: str | None = None) -> bool:
 
 
 class SchedulerLock:
-    _thread_lock = threading.RLock()
+    # Per-lock-path thread locks, so instances guarding unrelated lock files (different
+    # repositories/state directories) never block each other within the same process.
+    # `_registry_guard` only protects registry lookups/inserts, not lock hold duration.
+    _registry_guard: ClassVar[threading.Lock] = threading.Lock()
+    _path_locks: ClassVar[dict[Path, threading.RLock]] = {}
 
     def __init__(self, lock_path: Path) -> None:
         self.lock_path = lock_path
         self.nonce: str | None = None
         self._held = False
+        self._thread_lock = self._thread_lock_for(lock_path)
+
+    @classmethod
+    def _thread_lock_for(cls, lock_path: Path) -> threading.RLock:
+        key = lock_path.resolve()
+        with cls._registry_guard:
+            thread_lock = cls._path_locks.get(key)
+            if thread_lock is None:
+                thread_lock = threading.RLock()
+                cls._path_locks[key] = thread_lock
+            return thread_lock
 
     def acquire(self) -> None:
         if self._held:

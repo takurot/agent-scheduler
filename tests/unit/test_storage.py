@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -201,6 +202,55 @@ def test_scheduler_lock_mutual_exclusion(tmp_path: Path) -> None:
     lock2.acquire()
     assert lock2._held is True
     lock2.release()
+
+
+def test_scheduler_lock_different_paths_do_not_block_across_threads(tmp_path: Path) -> None:
+    """SchedulerLock instances guarding unrelated lock files (different
+    repositories/state directories) must not contend for the same thread lock. Regression
+    test for a class-level shared RLock that serialized unrelated stores."""
+    lock_a = SchedulerLock(tmp_path / "repo-a" / ".ai" / "scheduler.lock")
+    lock_b = SchedulerLock(tmp_path / "repo-b" / ".ai" / "scheduler.lock")
+
+    lock_a.acquire()
+    b_acquired = threading.Event()
+
+    def acquire_b() -> None:
+        lock_b.acquire()
+        b_acquired.set()
+        lock_b.release()
+
+    thread = threading.Thread(target=acquire_b)
+    try:
+        thread.start()
+        completed = b_acquired.wait(timeout=2.0)
+        assert completed, "acquiring an unrelated lock_path blocked on another store's lock"
+    finally:
+        lock_a.release()
+        thread.join(timeout=2.0)
+
+
+def test_scheduler_lock_same_path_still_serializes_across_threads(tmp_path: Path) -> None:
+    lock_file = tmp_path / ".ai" / "scheduler.lock"
+    lock1 = SchedulerLock(lock_file)
+    lock2 = SchedulerLock(lock_file)
+
+    lock1.acquire()
+    acquired = threading.Event()
+
+    def acquire_second() -> None:
+        lock2.acquire()
+        acquired.set()
+        lock2.release()
+
+    thread = threading.Thread(target=acquire_second)
+    try:
+        thread.start()
+        # lock2 must remain blocked while lock1 holds the same path's thread lock.
+        assert not acquired.wait(timeout=0.3)
+    finally:
+        lock1.release()
+        thread.join(timeout=2.0)
+    assert acquired.is_set()
 
 
 def test_scheduler_lock_stale_lock_recovery(tmp_path: Path) -> None:
