@@ -9,8 +9,24 @@ permissions:
   contents: read
 
 jobs:
+  quality-gate:
+    name: Quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --extra dev
+      - run: uv run ruff check .
+      - run: uv run mypy src
+      - run: uv run pytest --cov=subsched --cov-report=term-missing --cov-fail-under=80
+      - run: uv export --frozen --no-hashes --no-emit-project | uvx pip-audit -r /dev/stdin
+
   pypi-publish:
     name: Upload release to PyPI
+    needs: quality-gate
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -20,9 +36,9 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
