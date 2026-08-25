@@ -450,8 +450,16 @@ class Scheduler:
         candidate.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     def _persist(self) -> None:
-        self.store.save_state(
-            self.tasks,
-            paused=self.store.is_paused(),
-            capacities=self._cooldowns.values(),
-        )
+        # Serialize with CLI writers (pause/resume/cancel/run) via the same process-level
+        # lock they use, so a concurrent command cannot interleave with a tick's write and
+        # silently lose either side's update. expected_revision is re-read inside the lock
+        # (so it always matches at write time under correct lock usage) and is kept as a
+        # defense-in-depth CAS check in case that invariant is ever violated.
+        with self.store.lock():
+            expected_revision = self.store.get_revision()
+            self.store.save_state(
+                self.tasks,
+                paused=self.store.is_paused(),
+                capacities=self._cooldowns.values(),
+                expected_revision=expected_revision,
+            )
