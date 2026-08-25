@@ -98,6 +98,30 @@ verification:
     assert config.queue.priority.label_scores == {"p0": 100, "p1": 50}
     assert config.queue.priority.tie_break == "issue_number_asc"
     assert config.verification.commands == ("pytest", "ruff check .")
+    assert config.verification.timeout_seconds == 120
+
+
+def test_verification_timeout_seconds_default_and_override(tmp_path: Path) -> None:
+    default_path = tmp_path / "default.yaml"
+    default_path.write_text("github:\n  repo: o/r\n", encoding="utf-8")
+    assert load_config(default_path).verification.timeout_seconds == 120
+
+    override_path = tmp_path / "override.yaml"
+    override_path.write_text(
+        "github:\n  repo: o/r\nverification:\n  timeout_seconds: 300\n",
+        encoding="utf-8",
+    )
+    assert load_config(override_path).verification.timeout_seconds == 300
+
+
+def test_verification_timeout_seconds_rejects_non_positive(tmp_path: Path) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\nverification:\n  timeout_seconds: 0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="positive integer"):
+        load_config(path)
 
 
 def test_config_rejects_parallel_execution_in_phase1(tmp_path: Path) -> None:
