@@ -2386,6 +2386,16 @@ production deploy
 
 MVPは前者まで。
 
+## 72.1 既知の制約: OSレベルsandboxは未実装
+
+Native worker（`NativeWorker`）は、Claude Code CLIを`--permission-mode bypassPermissions`で起動する。これはtask worktree内での自律実行を機能させるために必要（`--print`非対話モードでは、`bypassPermissions`以外の承認モードは確認できる人間が存在しないため全アクションを拒否してしまい、実質何もできない）だが、以下を理解した上で運用すること。
+
+- worktreeはcwdの既定値に過ぎず、コンテナ・chroot・ネットワーク制限等のOSレベルsandboxではない。`bypassPermissions`下のBashツールは、technicalにはworktree外のファイル読み書きや外部ネットワークアクセスを妨げられない。
+- PRレビューは、エージェントが提案するコード差分（コミット内容）のみを検証する。セッション中に実行されたBashコマンドの副作用（worktree外のファイル変更、データの持ち出し等）はPRレビューの対象に含まれない。
+- 環境変数は`COMMON_ENV_ALLOWLIST`でフィルタしてから子プロセスへ渡すため、secretの環境変数経由での露出は防いでいるが、ファイルシステム上のsecret（例: `~/.ssh`）へのアクセス自体は制限していない。
+
+したがって現状のMVPは、**信頼できるIssue・信頼できるリポジトリでのみ**使用することを前提とする。真のOSレベルsandbox（コンテナ実行、ファイルシステム・ネットワークの隔離）は本Security Boundaryが要求する将来の強化項目であり、Phase 2実装時点では未達成である。
+
 ---
 
 # 73. Success Criteria
