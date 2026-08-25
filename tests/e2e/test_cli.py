@@ -319,7 +319,13 @@ def test_run_output_message_reflects_mode(tmp_path: Path, monkeypatch: pytest.Mo
     # Native allow: real (remote-less) git repo, so the wiring runs for real instead of
     # failing worktree setup; with no remote configured the task ends up NEEDS_HUMAN after
     # a failed push, which is fine here -- this test only cares about the persisted-count
-    # message, not the final task state.
+    # message, not the final task state. The process layer is mocked (per #120: fixing
+    # NativeWorker's env handling means "claude"/"codex" now genuinely resolve via PATH, so
+    # a real binary on the machine running the tests would otherwise actually get invoked).
+    monkeypatch.setattr(
+        "subsched.agents.claude.run_process_group",
+        lambda request: ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout()),
+    )
     tmp_path2 = tmp_path / "sub"
     tmp_path2.mkdir()
     _init_git_repo(tmp_path2)

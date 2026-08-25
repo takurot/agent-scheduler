@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from subsched.agents.base import ProcessExecutionRequest
@@ -46,20 +47,30 @@ class NativeWorker:
                 argv=(
                     "claude",
                     "--print",
-                    "--json-schema",
-                    "result.schema.json",
                     "--output-format",
                     "json",
+                    # bypassPermissions: --print is non-interactive, so any mode that can
+                    # prompt (including "dontAsk", which denies rather than auto-approves
+                    # when there is no one to ask) blocks every tool call and the agent can
+                    # never actually do anything. The task's isolated git worktree plus
+                    # mandatory PR review before merge are the safety boundary here, not
+                    # per-command approval.
                     "--permission-mode",
-                    "dontAsk",
-                    "--safe-mode",
+                    "bypassPermissions",
                     "--no-session-persistence",
                     "--strict-mcp-config",
                     "--tools",
-                    "bash,edit,view",
+                    "Bash,Edit,Read",
                 ),
                 cwd=worktree_path,
-                env={},
+                # ClaudeAgent/CodexAgent.execute() apply COMMON_ENV_ALLOWLIST to this before
+                # launching the subprocess, so secrets in the parent environment are not
+                # passed through. But subprocess.Popen(argv, env=...) treats an explicit env
+                # as *replacing* the child's environment entirely (not inheriting the
+                # parent's) -- so this must start from a real environment (with PATH, HOME,
+                # etc.) for the allowlist filtering to have anything useful left to keep, or
+                # a bare command name like "claude" can never be resolved (see #120).
+                env=dict(os.environ),
                 stdin_payload=prompt.encode("utf-8"),
             )
             return self.claude_agent.execute(req)
@@ -80,7 +91,14 @@ class NativeWorker:
                     "-",
                 ),
                 cwd=worktree_path,
-                env={},
+                # ClaudeAgent/CodexAgent.execute() apply COMMON_ENV_ALLOWLIST to this before
+                # launching the subprocess, so secrets in the parent environment are not
+                # passed through. But subprocess.Popen(argv, env=...) treats an explicit env
+                # as *replacing* the child's environment entirely (not inheriting the
+                # parent's) -- so this must start from a real environment (with PATH, HOME,
+                # etc.) for the allowlist filtering to have anything useful left to keep, or
+                # a bare command name like "claude" can never be resolved (see #120).
+                env=dict(os.environ),
                 stdin_payload=prompt.encode("utf-8"),
             )
             return self.codex_agent.execute(req)
