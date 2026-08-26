@@ -319,8 +319,7 @@ git status --short --branch
     https)
       test "$origin_push" = "https://github.com/takurot/agent-scheduler.git" || exit 1
       test -z "${https_proxy-}${HTTPS_PROXY-}${all_proxy-}${ALL_PROXY-}" || exit 1
-      test -z "$(git config --get http.proxy || true)" || exit 1
-      test -z "$(git config --get http.https://github.com.proxy || true)" || exit 1
+      test -z "$(git config --get-urlmatch http.proxy "$origin_push" || true)" || exit 1
       ;;
     *)
       exit 1
@@ -366,8 +365,7 @@ pushを明示した場合は例外を認める。通常のIssue実装、code、s
     https)
       test "$origin_push" = "https://github.com/takurot/agent-scheduler.git" || exit 1
       test -z "${https_proxy-}${HTTPS_PROXY-}${all_proxy-}${ALL_PROXY-}" || exit 1
-      test -z "$(git config --get http.proxy || true)" || exit 1
-      test -z "$(git config --get http.https://github.com.proxy || true)" || exit 1
+      test -z "$(git config --get-urlmatch http.proxy "$origin_push" || true)" || exit 1
       ;;
     *)
       exit 1
