@@ -22,6 +22,7 @@ from subsched.models import (
 from subsched.queue import TaskQueue
 from subsched.router import FRESHNESS, Router
 from subsched.storage import JsonStateStore
+from subsched.structured_logger import StructuredLogger
 from subsched.tasks.worktree import WorktreeAdapter
 
 
@@ -67,6 +68,7 @@ class Scheduler:
         push_enabled: bool = False,
         repo: str | None = None,
         base_branch: str = "main",
+        structured_logger: StructuredLogger | None = None,
     ) -> None:
         self.store = store
         self.router = router
@@ -75,6 +77,7 @@ class Scheduler:
         self.worktree_adapter = worktree_adapter
         self.clock = clock or SystemClock()
         self.event_sources = event_sources
+        self.structured_logger = structured_logger
         self.verification_commands = verification_commands
         if verification_timeout_seconds <= 0:
             raise ValueError("verification_timeout_seconds must be positive")
@@ -224,6 +227,19 @@ class Scheduler:
             try:
                 result = self.worker.run(running, agent)
             except Exception as error:
+                if self.structured_logger is not None:
+                    self.structured_logger.log(
+                        "worker_exception",
+                        level="ERROR",
+                        issue_number=running.issue_number,
+                        agent=agent,
+                        task_id=running.task_id,
+                        message=str(error),
+                        data={"exception_type": type(error).__name__},
+                    )
+                # AgentResult.output stays minimal (type name only): it becomes part of
+                # persisted task state, so it must not carry the exception message even
+                # though the structured logger above does (with its own redaction).
                 result = AgentResult(AgentResultKind.FAILURE, output=type(error).__name__)
             self._handle_result(running, agent, result, current)
         finally:

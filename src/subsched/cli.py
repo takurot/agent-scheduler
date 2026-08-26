@@ -24,6 +24,7 @@ from subsched.models import TaskState
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler
 from subsched.storage import JsonStateStore, SchedulerLockError, StateCorruptionError
+from subsched.structured_logger import StructuredLogger
 from subsched.tasks.worktree import GitWorktreeAdapter, WorktreeAdapter, WorktreeError
 
 app = typer.Typer(no_args_is_help=True, help="Subscription-aware coding agent scheduler")
@@ -186,6 +187,7 @@ def run(
             max_tasks=cfg.execution.max_tasks_per_run,
             push_enabled=not dry_run,
             repo=resolved_repo,
+            structured_logger=StructuredLogger(context.store.runtime_dir / "scheduler.jsonl"),
         )
     except (ValueError, StateCorruptionError) as error:
         typer.echo(f"State error: {error}", err=True)
