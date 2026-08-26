@@ -17,6 +17,7 @@ class GateResult:
     stderr: str
     passed: bool
     timed_out: bool = False
+    command_not_found: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +25,14 @@ class VerificationReport:
     passed: bool
     gates: tuple[GateResult, ...]
     summary: str
+
+
+def _gate_summary(gate: GateResult) -> str:
+    if gate.passed:
+        return "PASS"
+    if gate.command_not_found:
+        return f"FAIL (command not found: {gate.stderr})"
+    return f"FAIL (exit {gate.exit_code})"
 
 
 def run_verification(
@@ -76,14 +85,14 @@ def run_verification(
                 stderr=res.stderr,
                 passed=passed,
                 timed_out=res.timed_out,
+                command_not_found=res.command_not_found,
             )
         )
         if not passed:
             break
 
     summary_lines = [
-        f"{g.command}: {'PASS' if g.passed else 'FAIL (exit ' + str(g.exit_code) + ')'}"
-        for g in gate_results
+        f"{g.command}: {_gate_summary(g)}" for g in gate_results
     ]
     return VerificationReport(
         passed=all_passed,

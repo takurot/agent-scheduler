@@ -33,6 +33,18 @@ def test_run_verification_failure_stops_pipeline(tmp_path: Path) -> None:
     assert "FAIL" in report.summary
 
 
+def test_run_verification_reports_command_not_found_clearly(tmp_path: Path) -> None:
+    """Regression test for #129: a bare command that isn't on PATH (e.g. `pytest` in a
+    uv-managed project without an activated venv) must produce a summary that clearly
+    says the command was not found, not just a generic "FAIL (exit 1)" that is
+    indistinguishable from a real gate failure."""
+    commands = ("subsched-definitely-does-not-exist-abcxyz",)
+    report = run_verification(tmp_path, commands)
+    assert report.passed is False
+    assert report.gates[0].command_not_found is True
+    assert "command not found" in report.summary.casefold()
+
+
 def test_scheduler_passes_configured_verification_commands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

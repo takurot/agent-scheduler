@@ -38,6 +38,7 @@ class ProcessExecutionResult:
     timed_out: bool = False
     output_limit_exceeded: bool = False
     cleanup_succeeded: bool = True
+    command_not_found: bool = False
 
 
 class AgentAdapter(Protocol):
