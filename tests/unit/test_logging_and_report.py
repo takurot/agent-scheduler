@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from subsched.capacity.metrics import CapacityMetrics
@@ -12,7 +13,10 @@ from subsched.metrics import (
     calculate_metrics,
     format_run_report_markdown,
 )
-from subsched.models import Task, TaskState
+from subsched.models import Capacity, CapacityState, Issue, Task, TaskState
+from subsched.router import AgentConfig, Router
+from subsched.scheduler import Scheduler
+from subsched.storage import JsonStateStore
 from subsched.structured_logger import StructuredLogger, redact_sensitive_text
 
 
@@ -100,3 +104,75 @@ def test_format_run_report_markdown() -> None:
     assert "N/A" in empty_md
     assert "Exclusion Reasons" in empty_md
     assert "- Reason 1" in empty_md
+
+
+class _RaisingWorker:
+    """Worker double that raises instead of returning an AgentResult, simulating an
+    unexpected exception inside worker.run() (regression coverage for #104)."""
+
+    def run(self, task: Task, agent: str) -> object:
+        raise RuntimeError("connection reset by peer, token=ghp_secret123abc")
+
+
+def _available(agent: str) -> Capacity:
+    return Capacity(
+        agent=agent,
+        state=CapacityState.AVAILABLE,
+        observed_at=datetime.now(UTC),
+        source="provider",
+        confidence="high",
+    )
+
+
+def test_worker_exception_logs_detail_without_leaking_it_into_agent_result(
+    tmp_path: Path,
+) -> None:
+    """Regression test for #104: a worker exception's type name still becomes
+    AgentResult.output (unchanged, so it can't leak secrets into task state), but the
+    full (redacted) exception detail must now reach the structured logger for
+    troubleshooting, correlated by issue number and agent."""
+    stream = io.StringIO()
+    logger = StructuredLogger(stream)
+
+    scheduler = Scheduler(
+        store=JsonStateStore(tmp_path / "state.json"),
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=_RaisingWorker(),
+        worktree_root=tmp_path / "worktrees",
+        structured_logger=logger,
+    )
+    scheduler.discover([Issue(number=101, title="Task 101")])
+    scheduler.tick([_available("claude")])
+
+    task = scheduler.tasks[0]
+    # AgentResult.output stays minimal -- just the exception type name, no message.
+    assert task.per_agent_failures == (("claude", 1),)
+
+    lines = [json.loads(line) for line in stream.getvalue().strip().splitlines()]
+    exception_entries = [entry for entry in lines if entry["event"] == "worker_exception"]
+    assert len(exception_entries) == 1
+    entry = exception_entries[0]
+    assert entry["issue_number"] == 101
+    assert entry["agent"] == "claude"
+    assert entry["level"] == "ERROR"
+    assert "RuntimeError" in json.dumps(entry)
+    assert "connection reset by peer" in entry["message"]
+    # The structured logger's own redaction must still apply to the exception message.
+    assert "ghp_secret123abc" not in json.dumps(entry)
+    assert "[REDACTED]" in entry["message"]
+
+
+def test_worker_exception_without_structured_logger_still_completes(tmp_path: Path) -> None:
+    """The structured_logger must be optional -- existing callers that don't configure
+    one must keep working exactly as before (no crash, same AgentResult.output)."""
+    scheduler = Scheduler(
+        store=JsonStateStore(tmp_path / "state.json"),
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=_RaisingWorker(),
+        worktree_root=tmp_path / "worktrees",
+    )
+    scheduler.discover([Issue(number=101, title="Task 101")])
+    scheduler.tick([_available("claude")])
+
+    task = scheduler.tasks[0]
+    assert task.per_agent_failures == (("claude", 1),)
