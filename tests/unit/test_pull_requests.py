@@ -6,6 +6,7 @@ import subprocess
 import pytest
 
 from subsched.github.pull_requests import (
+    PullRequestResultKind,
     build_pr_body,
     create_or_get_pull_request,
     lookup_existing_pr,
@@ -57,18 +58,25 @@ def test_create_or_get_pull_request_creates_when_not_found(monkeypatch: pytest.M
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     task = Task.from_issue(Issue(number=103, title="Support timeout"))
-    pr = create_or_get_pull_request(task, "issue/103-timeout")
-    assert pr is not None
-    assert pr.number == 68
+    result = create_or_get_pull_request(task, "issue/103-timeout")
+    assert result.kind is PullRequestResultKind.SUCCESS
+    assert result.info is not None
+    assert result.info.number == 68
     assert len(calls) == 2
 
 
-def test_create_or_get_pull_request_returns_none_on_failure(
+def test_create_or_get_pull_request_returns_failure_with_output_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Regression test for #128: a failed `gh pr create` must surface *why* it failed
+    (redacted stderr/stdout), not just collapse to an unexplained None."""
+
     def fake_fail(argv, **kwargs):
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="gh: command not found")
 
     monkeypatch.setattr(subprocess, "run", fake_fail)
     task = Task.from_issue(Issue(number=103, title="Support timeout"))
-    assert create_or_get_pull_request(task, "issue/103-timeout") is None
+    result = create_or_get_pull_request(task, "issue/103-timeout")
+    assert result.kind is PullRequestResultKind.FAILURE
+    assert result.info is None
+    assert "gh: command not found" in result.output

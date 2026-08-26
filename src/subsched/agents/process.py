@@ -77,6 +77,7 @@ def run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResul
             timed_out=False,
             output_limit_exceeded=False,
             cleanup_succeeded=True,
+            command_not_found=isinstance(e, FileNotFoundError),
         )
 
     output_queue: queue.Queue[tuple[bytes, bool, bool]] = queue.Queue(maxsize=1)

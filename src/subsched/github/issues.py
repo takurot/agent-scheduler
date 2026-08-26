@@ -4,14 +4,80 @@ import json
 import os
 import subprocess
 from collections.abc import Callable
+from enum import StrEnum
 from typing import Any, NamedTuple
 
 from subsched.config import validate_repo
 from subsched.models import Issue
 
 
+class GitHubDiscoveryErrorKind(StrEnum):
+    """Safe, non-sensitive classification of a failed issue discovery call."""
+
+    NOT_FOUND = "NOT_FOUND"
+    NOT_AUTHENTICATED = "NOT_AUTHENTICATED"
+    PERMISSION_DENIED = "PERMISSION_DENIED"
+    NETWORK_ERROR = "NETWORK_ERROR"
+    UNKNOWN = "UNKNOWN"
+
+
+_DISCOVERY_ERROR_MESSAGES: dict[GitHubDiscoveryErrorKind, str] = {
+    GitHubDiscoveryErrorKind.NOT_FOUND: (
+        "repository not found; check --repo for a typo or missing access"
+    ),
+    GitHubDiscoveryErrorKind.NOT_AUTHENTICATED: (
+        "GitHub CLI is not authenticated; run `gh auth login`"
+    ),
+    GitHubDiscoveryErrorKind.PERMISSION_DENIED: (
+        "GitHub token does not have permission to read this repository"
+    ),
+    GitHubDiscoveryErrorKind.NETWORK_ERROR: (
+        "network error while contacting GitHub; check connectivity and retry"
+    ),
+    GitHubDiscoveryErrorKind.UNKNOWN: "GitHub CLI exited with an error; stderr hidden",
+}
+
+
+def _classify_discovery_failure(stderr: str) -> GitHubDiscoveryErrorKind:
+    """Classify `gh`'s stderr into a safe category without echoing its raw content.
+
+    Matches only known `gh`/network keyword patterns; anything else is reported as UNKNOWN so
+    the original stderr (which may contain hostnames, repo paths, or other operational detail)
+    is never surfaced to the user.
+    """
+    lowered = stderr.casefold()
+    if "could not resolve to a repository" in lowered or "http 404" in lowered:
+        return GitHubDiscoveryErrorKind.NOT_FOUND
+    if (
+        "not logged into any github hosts" in lowered
+        or "gh auth login" in lowered
+        or "http 401" in lowered
+        or "authentication" in lowered
+    ):
+        return GitHubDiscoveryErrorKind.NOT_AUTHENTICATED
+    if "http 403" in lowered or "forbidden" in lowered or "permission" in lowered:
+        return GitHubDiscoveryErrorKind.PERMISSION_DENIED
+    if any(
+        token in lowered
+        for token in (
+            "dial tcp",
+            "no such host",
+            "connection refused",
+            "network is unreachable",
+            "temporary failure in name resolution",
+            "timeout",
+        )
+    ):
+        return GitHubDiscoveryErrorKind.NETWORK_ERROR
+    return GitHubDiscoveryErrorKind.UNKNOWN
+
+
 class GitHubCliError(RuntimeError):
-    pass
+    def __init__(
+        self, message: str, kind: GitHubDiscoveryErrorKind = GitHubDiscoveryErrorKind.UNKNOWN
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
@@ -149,7 +215,8 @@ class GitHubIssueSource:
         except (OSError, subprocess.TimeoutExpired) as error:
             raise GitHubCliError("GitHub CLI could not be executed") from error
         if result.returncode != 0:
-            raise GitHubCliError(f"GitHub CLI exited with {result.returncode}; stderr hidden")
+            kind = _classify_discovery_failure(result.stderr)
+            raise GitHubCliError(_DISCOVERY_ERROR_MESSAGES[kind], kind=kind)
         try:
             payload: Any = json.loads(result.stdout)
             if not isinstance(payload, list):

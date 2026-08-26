@@ -9,7 +9,7 @@ import socket
 import subprocess
 import tempfile
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +21,36 @@ SCHEMA_VERSION = 1
 MAX_STATE_BYTES = 10 * 1024 * 1024
 
 logger = logging.getLogger(__name__)
+
+
+RunCommand = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def find_repository_root(start: Path, *, run: RunCommand | None = None) -> Path:
+    """Return the git repository root containing `start`, or `start` unchanged otherwise.
+
+    Uses `git rev-parse --show-toplevel` so state under `.ai/` resolves to the repository root
+    even when the CLI is invoked from a subdirectory (e.g. `src/`), instead of silently creating
+    or reading a separate, empty state tree there. Falls back to `start` when it is not inside a
+    git working tree, `git` is unavailable, or the probe fails or times out.
+    """
+    runner = run or subprocess.run
+    try:
+        result = runner(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return start
+    if result.returncode != 0:
+        return start
+    toplevel = result.stdout.strip()
+    if not toplevel:
+        return start
+    return Path(toplevel)
 
 
 class StateCorruptionError(RuntimeError):

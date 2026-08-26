@@ -8,7 +8,7 @@ from typer.testing import CliRunner, Result
 from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
 from subsched.cli import app
 from subsched.github.issues import GitHubIssueSource
-from subsched.github.pull_requests import PullRequestInfo
+from subsched.github.pull_requests import PullRequestInfo, PullRequestResult, PullRequestResultKind
 from subsched.models import Issue, Task, TaskState
 from subsched.storage import JsonStateStore
 
@@ -62,6 +62,24 @@ def test_explicit_issue_dry_run_persists_queue_and_status(tmp_path: Path) -> Non
     assert status.exit_code == 0
     assert "READY" in status.output
     assert "2" in status.output
+
+
+def test_run_without_repository_option_uses_git_repository_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When `--repository` is omitted, state resolves to the git root, not a subdirectory cwd."""
+    _init_git_repo(tmp_path)
+    subdir = tmp_path / "src"
+    subdir.mkdir()
+    monkeypatch.chdir(subdir)
+
+    result = runner.invoke(
+        app, ["run", "--repo", "owner/project", "--issues", "101", "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / ".ai" / "scheduler.json").exists()
+    assert not (subdir / ".ai").exists()
 
 
 def test_run_requires_exactly_one_selection_mode(tmp_path: Path) -> None:
@@ -369,8 +387,11 @@ def test_native_run_drives_scheduler_to_complete_and_opens_pr(
     monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
     monkeypatch.setattr(
         "subsched.github.pull_requests.create_or_get_pull_request",
-        lambda *a, **k: PullRequestInfo(
-            number=7, url="https://example.invalid/pull/7", title="t", body="b"
+        lambda *a, **k: PullRequestResult(
+            kind=PullRequestResultKind.SUCCESS,
+            info=PullRequestInfo(
+                number=7, url="https://example.invalid/pull/7", title="t", body="b"
+            ),
         ),
     )
 

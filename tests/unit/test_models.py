@@ -27,6 +27,36 @@ def test_issue_maps_to_immutable_ready_task() -> None:
         task.title = "changed"  # type: ignore[misc]
 
 
+def test_transition_to_needs_human_persists_reason() -> None:
+    """Regression test for #128: NEEDS_HUMAN transitions must be able to carry a
+    human-readable reason so it can be surfaced later (e.g. via `subsched status
+    --verbose`) instead of being discarded."""
+    task = Task(
+        task_id="github-1",
+        issue_number=1,
+        title="one",
+        labels=(),
+        status=TaskState.ELIGIBILITY_CHECK,
+    )
+    escalated = task.transition(TaskState.NEEDS_HUMAN, reason="push failed: permission denied")
+    assert escalated.needs_human_reason == "push failed: permission denied"
+
+
+def test_transition_clears_reason_when_not_provided() -> None:
+    """A reason set by one NEEDS_HUMAN escalation must not leak into a later, unrelated
+    transition that doesn't pass its own reason."""
+    task = Task(
+        task_id="github-1",
+        issue_number=1,
+        title="one",
+        labels=(),
+        status=TaskState.ELIGIBILITY_CHECK,
+    )
+    escalated = task.transition(TaskState.NEEDS_HUMAN, reason="push failed")
+    recovered = escalated.transition(TaskState.READY)
+    assert recovered.needs_human_reason is None
+
+
 def test_task_transition_rejects_terminal_state_restart() -> None:
     task = Task.from_issue(Issue(number=1, title="one"))
     running = task.transition(TaskState.DISPATCHED).transition(TaskState.IN_PROGRESS)

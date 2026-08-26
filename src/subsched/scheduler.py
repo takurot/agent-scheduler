@@ -325,7 +325,7 @@ class Scheduler:
             return ready_for_review.transition(TaskState.COMPLETE, current_agent=agent, now=now)
 
         from subsched.github.conflict import handle_rebase_outcome, rebase_onto_base
-        from subsched.github.pull_requests import create_or_get_pull_request
+        from subsched.github.pull_requests import PullRequestResultKind, create_or_get_pull_request
         from subsched.github.push import PushResultKind, push_task_branch
 
         worktree_dir = Path(verifying.worktree)
@@ -334,22 +334,30 @@ class Scheduler:
         rebase_result = rebase_onto_base(worktree_dir, base_branch=self.base_branch)
         after_rebase, _rebase_msg = handle_rebase_outcome(verifying, rebase_result)
         if after_rebase.status is not verifying.status:
-            # handle_rebase_outcome escalated (e.g. NEEDS_HUMAN) on conflict/failure.
+            # handle_rebase_outcome escalated (e.g. NEEDS_HUMAN) on conflict/failure; the
+            # reason is already attached to after_rebase.needs_human_reason.
             return after_rebase
 
         push_result = push_task_branch(worktree_dir, branch_name)
         if push_result.kind is not PushResultKind.SUCCESS:
-            return verifying.transition(TaskState.NEEDS_HUMAN, current_agent=agent, now=now)
+            reason = f"push failed ({push_result.kind.value}): {push_result.output}"
+            return verifying.transition(
+                TaskState.NEEDS_HUMAN, current_agent=agent, now=now, reason=reason
+            )
 
-        pr_info = create_or_get_pull_request(
+        pr_result = create_or_get_pull_request(
             verifying,
             branch_name,
             base=self.base_branch,
             repo=self.repo,
             verification_summary=verification_summary,
         )
-        if pr_info is None:
-            return verifying.transition(TaskState.NEEDS_HUMAN, current_agent=agent, now=now)
+        if pr_result.kind is not PullRequestResultKind.SUCCESS or pr_result.info is None:
+            reason = f"PR creation failed: {pr_result.output}"
+            return verifying.transition(
+                TaskState.NEEDS_HUMAN, current_agent=agent, now=now, reason=reason
+            )
+        pr_info = pr_result.info
 
         with_pr = replace(verifying, pr=pr_info.number)
         pr_ready = with_pr.transition(TaskState.PR_READY, current_agent=agent, now=now)

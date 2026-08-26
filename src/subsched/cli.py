@@ -23,13 +23,18 @@ from subsched.github.issues import GitHubCliError, GitHubIssueSource, diagnose_t
 from subsched.models import TaskState
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler
-from subsched.storage import JsonStateStore, SchedulerLockError, StateCorruptionError
+from subsched.storage import (
+    JsonStateStore,
+    SchedulerLockError,
+    StateCorruptionError,
+    find_repository_root,
+)
 from subsched.structured_logger import StructuredLogger
 from subsched.tasks.worktree import GitWorktreeAdapter, WorktreeAdapter, WorktreeError
 
 app = typer.Typer(no_args_is_help=True, help="Subscription-aware coding agent scheduler")
 RepositoryOption = Annotated[
-    Path,
+    Path | None,
     typer.Option("--repository", hidden=True, file_okay=False, resolve_path=True),
 ]
 
@@ -41,8 +46,14 @@ class Context:
 
 
 @app.callback()
-def main(ctx: typer.Context, repository: RepositoryOption = Path(".")) -> None:
-    ctx.obj = Context(repository)
+def main(ctx: typer.Context, repository: RepositoryOption = None) -> None:
+    # When --repository is not given explicitly, auto-detect the git repository root from the
+    # current directory instead of using the cwd verbatim, so running from a subdirectory (e.g.
+    # `src/`) resolves `.ai/` state to the repository root rather than a separate, empty tree.
+    resolved_repository = (
+        repository if repository is not None else find_repository_root(Path.cwd())
+    )
+    ctx.obj = Context(resolved_repository)
 
 
 def _parse_issue_numbers(value: str) -> tuple[int, ...]:
@@ -147,7 +158,7 @@ def run(
     try:
         open_issues = GitHubIssueSource().list_open(resolved_repo, label=resolved_label)
     except GitHubCliError as error:
-        typer.echo("GitHub discovery failed (gh exit/error); verify authentication", err=True)
+        typer.echo(f"GitHub discovery failed: {error}", err=True)
         raise typer.Exit(1) from error
 
     exclude_labels = frozenset(cfg.github.exclude_labels)
@@ -265,6 +276,8 @@ def status(
             pr_str = f" [PR #{t.pr}]" if t.pr else ""
             agent_str = f" (agent: {t.current_agent})" if t.current_agent else ""
             typer.echo(f"  #{t.issue_number:<4} {t.status.value:<18} {t.title}{pr_str}{agent_str}")
+            if t.needs_human_reason:
+                typer.echo(f"        reason: {t.needs_human_reason}")
 
 
 @app.command()

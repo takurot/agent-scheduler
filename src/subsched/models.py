@@ -213,6 +213,7 @@ class Task:
     pr: int | None = None
     updated_at: datetime | None = None
     description: str = ""
+    needs_human_reason: str | None = None
 
     @classmethod
     def from_issue(cls, issue: Issue, *, worktree: str | None = None) -> Task:
@@ -241,6 +242,7 @@ class Task:
         current_agent: str | None = None,
         increment_attempt: bool = False,
         now: datetime | None = None,
+        reason: str | None = None,
     ) -> Task:
         if status not in ALLOWED_TRANSITIONS[self.status]:
             raise StateTransitionError(f"invalid transition: {self.status} -> {status}")
@@ -250,6 +252,7 @@ class Task:
             current_agent=current_agent,
             attempt=self.attempt + int(increment_attempt),
             updated_at=now or datetime.now(UTC),
+            needs_human_reason=reason,
         )
 
     def with_worktree(self, worktree: str) -> Task:
@@ -274,6 +277,7 @@ class Task:
             "pr": self.pr,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "description": self.description,
+            "needs_human_reason": self.needs_human_reason,
         }
 
     @classmethod
@@ -300,6 +304,7 @@ class Task:
                 pr=value.get("pr"),
                 updated_at=datetime.fromisoformat(updated) if updated else None,
                 description=str(value.get("description", "")),
+                needs_human_reason=value.get("needs_human_reason"),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("invalid task state") from error
