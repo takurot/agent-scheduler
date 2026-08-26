@@ -64,6 +64,24 @@ def test_explicit_issue_dry_run_persists_queue_and_status(tmp_path: Path) -> Non
     assert "2" in status.output
 
 
+def test_run_without_repository_option_uses_git_repository_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When `--repository` is omitted, state resolves to the git root, not a subdirectory cwd."""
+    _init_git_repo(tmp_path)
+    subdir = tmp_path / "src"
+    subdir.mkdir()
+    monkeypatch.chdir(subdir)
+
+    result = runner.invoke(
+        app, ["run", "--repo", "owner/project", "--issues", "101", "--dry-run"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / ".ai" / "scheduler.json").exists()
+    assert not (subdir / ".ai").exists()
+
+
 def test_run_requires_exactly_one_selection_mode(tmp_path: Path) -> None:
     result = invoke(
         tmp_path,
