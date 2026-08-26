@@ -101,3 +101,44 @@ def test_native_worker_unsupported_agent(tmp_path: Path) -> None:
     result = worker.run(task, "unknown_agent")
     assert result.kind is AgentResultKind.FAILURE
     assert "unsupported agent" in result.output
+
+
+def test_native_worker_defaults_agent_timeout_to_300_seconds(tmp_path: Path) -> None:
+    """Regression test for #123: the agent execution timeout was hardcoded via the
+    ProcessExecutionRequest dataclass default (300s) instead of being an explicit,
+    configurable NativeWorker setting."""
+    mock_claude = MagicMock()
+    mock_claude.execute.return_value = AgentResult(AgentResultKind.PASS)
+    mock_codex = MagicMock()
+    mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(claude_agent=mock_claude, codex_agent=mock_codex)
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "claude")
+    assert mock_claude.execute.call_args[0][0].timeout_seconds == 300.0
+
+    worker.run(task, "codex")
+    assert mock_codex.execute.call_args[0][0].timeout_seconds == 300.0
+
+
+def test_native_worker_applies_configured_agent_timeout(tmp_path: Path) -> None:
+    """#123: NativeWorker's agent execution timeout must be configurable so it can be
+    raised above the 300s default for real issues that take longer to implement."""
+    mock_claude = MagicMock()
+    mock_claude.execute.return_value = AgentResult(AgentResultKind.PASS)
+    mock_codex = MagicMock()
+    mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(
+        claude_agent=mock_claude, codex_agent=mock_codex, agent_timeout_seconds=900.0
+    )
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "claude")
+    assert mock_claude.execute.call_args[0][0].timeout_seconds == 900.0
+
+    worker.run(task, "codex")
+    assert mock_codex.execute.call_args[0][0].timeout_seconds == 900.0

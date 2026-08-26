@@ -17,6 +17,7 @@ class NativeWorker:
         self,
         claude_agent: ClaudeAgent | None = None,
         codex_agent: CodexAgent | None = None,
+        agent_timeout_seconds: float = 300.0,
     ) -> None:
         self.claude_agent = claude_agent or ClaudeAgent(
             ClaudeExecutionPolicy(
@@ -28,6 +29,7 @@ class NativeWorker:
             allow_live=True,
             subscription_billing_verified=True,
         )
+        self.agent_timeout_seconds = agent_timeout_seconds
 
     def run(self, task: Task, agent: str) -> AgentResult:
         if task.worktree is None:
@@ -72,6 +74,7 @@ class NativeWorker:
                 # a bare command name like "claude" can never be resolved (see #120).
                 env=dict(os.environ),
                 stdin_payload=prompt.encode("utf-8"),
+                timeout_seconds=self.agent_timeout_seconds,
             )
             return self.claude_agent.execute(req)
         elif agent == "codex":
@@ -100,6 +103,7 @@ class NativeWorker:
                 # a bare command name like "claude" can never be resolved (see #120).
                 env=dict(os.environ),
                 stdin_payload=prompt.encode("utf-8"),
+                timeout_seconds=self.agent_timeout_seconds,
             )
             return self.codex_agent.execute(req)
         return AgentResult(AgentResultKind.FAILURE, output=f"unsupported agent: {agent}")
