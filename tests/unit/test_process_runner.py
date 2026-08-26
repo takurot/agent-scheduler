@@ -80,6 +80,24 @@ def test_run_process_group_success(tmp_path: Path) -> None:
     assert result.timed_out is False
     assert result.output_limit_exceeded is False
     assert result.cleanup_succeeded is True
+    assert result.command_not_found is False
+
+
+def test_run_process_group_command_not_found(tmp_path: Path) -> None:
+    """Regression test for #129: launching a nonexistent command (e.g. a bare `pytest`
+    that isn't on PATH in a uv-managed project) must be distinguishable from a command
+    that actually ran and exited non-zero, not just collapsed into a generic exit_code=1
+    result that looks identical to a real gate failure."""
+    request = ProcessExecutionRequest(
+        argv=("subsched-definitely-does-not-exist-abcxyz",),
+        cwd=tmp_path,
+        env={"PATH": os.environ.get("PATH", "")},
+        timeout_seconds=5.0,
+    )
+    result = run_process_group(request)
+    assert result.command_not_found is True
+    assert result.exit_code != 0
+    assert "subsched-definitely-does-not-exist-abcxyz" in result.stderr
 
 
 def test_run_process_group_output_size_limit(tmp_path: Path) -> None:

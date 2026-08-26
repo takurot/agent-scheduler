@@ -12,6 +12,20 @@ execution:
   max_agent_switches: 6
   max_tasks_per_run: 50
 
+# Each command runs directly (not through a shell) inside the task worktree, so it
+# must resolve on PATH there. The default below (bare pytest/ruff) assumes those are
+# already on PATH. For a uv-managed Python project (like this repository), bare
+# `pytest`/`ruff` are only installed inside .venv and won't resolve unless it's
+# activated -- prefix commands with `uv run` instead:
+#   verification:
+#     commands:
+#       - uv run pytest
+#       - uv run ruff check .
+verification:
+  commands:
+    - pytest
+    - ruff check .
+
 billing:
   api_fallback: false
   metered_usage: false

@@ -129,11 +129,17 @@ github:
 execution:
   concurrency: 1
 
-# Custom test and lint commands for your language
+# Custom test and lint commands for your language. Verification runs each command
+# directly (not through a shell), so it must resolve on PATH inside the task worktree.
 verification:
   commands:
     - pytest
     - ruff check .
+    # For a uv-managed Python project (like this repository), bare `pytest`/`ruff`
+    # are only installed inside .venv and won't resolve unless it's activated.
+    # Prefix commands with `uv run` instead:
+    # - uv run pytest
+    # - uv run ruff check .
     # For Node.js / TypeScript:
     # - npm test
     # - npm run lint
