@@ -171,10 +171,13 @@ def test_doctor_warns_on_broad_token_scope(
     monkeypatch.setattr(shutil, "which", lambda command: f"/usr/bin/{command}")
 
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        payload = (
-            '{"github.com":[{"active":true,"scopes":"repo, workflow","state":"success"}]}'
+        stdout = (
+            "github.com\n"
+            "  ✓ Logged in to github.com account octocat\n"
+            "  - Active account: true\n"
+            "  - Token scopes: 'repo', 'workflow'\n"
         )
-        return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -206,8 +209,13 @@ def test_doctor_reports_no_warning_for_minimal_scope(
     monkeypatch.setattr(shutil, "which", lambda command: f"/usr/bin/{command}")
 
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        payload = '{"github.com":[{"active":true,"scopes":"","state":"success"}]}'
-        return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
+        stdout = (
+            "github.com\n"
+            "  ✓ Logged in to github.com account octocat\n"
+            "  - Active account: true\n"
+            "  - Token scopes: \n"
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
