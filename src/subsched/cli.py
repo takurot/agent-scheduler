@@ -175,7 +175,7 @@ def run(
                 AgentConfig(name, priority=settings.priority, enabled=settings.enabled)
                 for name, settings in cfg.agents.items()
             ),
-            worker=NativeWorker(),
+            worker=NativeWorker(agent_timeout_seconds=float(cfg.execution.agent_timeout_seconds)),
             worktree_root=worktree_root,
             worktree_adapter=worktree_adapter,
             verification_commands=cfg.verification.commands,

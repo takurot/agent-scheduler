@@ -70,6 +70,7 @@ execution:
   max_task_runtime: 6h
   max_tasks_per_run: 50
   pause_running_policy: continue
+  agent_timeout_seconds: 450
 
 queue:
   priority:
@@ -95,6 +96,7 @@ verification:
     assert config.agents["codex"].priority == 90
     assert config.routing.strategy == "capacity-aware"
     assert config.execution.pause_running_policy == "continue"
+    assert config.execution.agent_timeout_seconds == 450
     assert config.queue.priority.label_scores == {"p0": 100, "p1": 50}
     assert config.queue.priority.tie_break == "issue_number_asc"
     assert config.verification.commands == ("pytest", "ruff check .")
@@ -118,6 +120,29 @@ def test_verification_timeout_seconds_rejects_non_positive(tmp_path: Path) -> No
     path = tmp_path / "scheduler.yaml"
     path.write_text(
         "github:\n  repo: o/r\nverification:\n  timeout_seconds: 0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="positive integer"):
+        load_config(path)
+
+
+def test_agent_timeout_seconds_default_and_override(tmp_path: Path) -> None:
+    default_path = tmp_path / "default.yaml"
+    default_path.write_text("github:\n  repo: o/r\n", encoding="utf-8")
+    assert load_config(default_path).execution.agent_timeout_seconds == 300
+
+    override_path = tmp_path / "override.yaml"
+    override_path.write_text(
+        "github:\n  repo: o/r\nexecution:\n  agent_timeout_seconds: 900\n",
+        encoding="utf-8",
+    )
+    assert load_config(override_path).execution.agent_timeout_seconds == 900
+
+
+def test_agent_timeout_seconds_rejects_non_positive(tmp_path: Path) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\nexecution:\n  agent_timeout_seconds: 0\n",
         encoding="utf-8",
     )
     with pytest.raises(ConfigError, match="positive integer"):

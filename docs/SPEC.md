@@ -1088,6 +1088,10 @@ execution:
 
 を持つ。
 
+上記の「Scheduler timeout」は`execution.agent_timeout_seconds`（既定300秒、config可変）として実装されており、
+`NativeWorker`が`claude`/`codex`を1回起動する際の`ProcessExecutionRequest.timeout_seconds`に渡される。これは
+`max_task_runtime`（Task全体に対するガード）とは別の、単一のagent process呼び出しに対するタイムアウトである。
+
 ---
 
 # 34. Billing Safety
@@ -1855,6 +1859,7 @@ execution:
   max_agent_switches: 6
   max_task_runtime: 6h
   max_tasks_per_run: 50
+  agent_timeout_seconds: 300
 
 
 handoff:
