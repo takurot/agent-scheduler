@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from enum import StrEnum
@@ -98,12 +99,46 @@ class TokenDiagnosis(NamedTuple):
     broad_scopes: tuple[str, ...]
 
 
+_NOT_AUTHENTICATED = TokenDiagnosis(
+    authenticated=False, scopes=(), can_discover=False, can_write=False, broad_scopes=()
+)
+
+_ACTIVE_ACCOUNT_RE = re.compile(r"^-\s*Active account:\s*(true|false)\s*$", re.IGNORECASE)
+_TOKEN_SCOPES_RE = re.compile(r"^-\s*Token scopes:\s*(.*)$")
+
+
+def _parse_active_token_scopes(text: str) -> tuple[str, ...] | None:
+    """Extract the active account's token scopes from `gh auth status` text output.
+
+    `gh auth status` has no `--json` support, so its human-readable output (which may list
+    multiple hosts/accounts) is parsed line by line. Scopes are only taken from the block
+    following an explicit "Active account: true" marker; if no such marker exists, the output
+    describes a single account and its scopes are used as-is. Returns None when the active
+    account's scopes line could not be found, so the caller can fail closed.
+    """
+    is_active = True
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        active_match = _ACTIVE_ACCOUNT_RE.match(line)
+        if active_match:
+            is_active = active_match.group(1).lower() == "true"
+            continue
+        scopes_match = _TOKEN_SCOPES_RE.match(line)
+        if scopes_match and is_active:
+            content = scopes_match.group(1).strip()
+            if "'" in content:
+                return tuple(sorted(re.findall(r"'([^']*)'", content)))
+            return tuple(sorted(item.strip() for item in content.split(",") if item.strip()))
+    return None
+
+
 def diagnose_token(run: RunCommand | None = None) -> TokenDiagnosis:
     """Diagnose the active `gh` token's read/write capability without exposing its value.
 
     Never passes `--show-token`; only scope names from `gh auth status` are inspected.
+    `gh auth status` does not support `--json`, so its plaintext output is parsed instead.
     """
-    argv = ["gh", "auth", "status", "--json", "hosts"]
+    argv = ["gh", "auth", "status"]
     try:
         runner = run or subprocess.run
         result = runner(
@@ -115,28 +150,12 @@ def diagnose_token(run: RunCommand | None = None) -> TokenDiagnosis:
             env=_github_environment(),
         )
     except (OSError, subprocess.TimeoutExpired):
-        return TokenDiagnosis(
-            authenticated=False, scopes=(), can_discover=False, can_write=False, broad_scopes=()
-        )
+        return _NOT_AUTHENTICATED
     if result.returncode != 0:
-        return TokenDiagnosis(
-            authenticated=False, scopes=(), can_discover=False, can_write=False, broad_scopes=()
-        )
-    try:
-        payload: Any = json.loads(result.stdout)
-        hosts = payload.get("hosts", payload)
-        active = next(
-            account
-            for accounts in hosts.values()
-            for account in accounts
-            if account.get("active")
-        )
-        raw_scopes = str(active.get("scopes") or "")
-        scopes = tuple(sorted(item.strip() for item in raw_scopes.split(",") if item.strip()))
-    except (KeyError, TypeError, ValueError, StopIteration, AttributeError):
-        return TokenDiagnosis(
-            authenticated=False, scopes=(), can_discover=False, can_write=False, broad_scopes=()
-        )
+        return _NOT_AUTHENTICATED
+    scopes = _parse_active_token_scopes(result.stdout + "\n" + result.stderr)
+    if scopes is None:
+        return _NOT_AUTHENTICATED
     broad = tuple(scope for scope in scopes if scope in WRITE_CAPABLE_SCOPES)
     return TokenDiagnosis(
         authenticated=True,

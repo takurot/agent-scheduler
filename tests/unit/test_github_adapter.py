@@ -136,25 +136,33 @@ def test_diagnose_token_never_requests_token_value() -> None:
 
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
-        payload = (
-            '{"github.com":[{"active":true,"login":"octocat",'
-            '"scopes":"gist, read:org, repo, workflow","state":"success"}]}'
+        stdout = (
+            "github.com\n"
+            "  ✓ Logged in to github.com account octocat (/home/user/.config/gh/hosts.yml)\n"
+            "  - Active account: true\n"
+            "  - Git operations protocol: https\n"
+            "  - Token: gho_************************************\n"
+            "  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'\n"
         )
-        return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
     diagnose_token(run=fake_run)
 
-    assert calls == [["gh", "auth", "status", "--json", "hosts"]]
+    assert calls == [["gh", "auth", "status"]]
     assert "--show-token" not in calls[0]
 
 
 def test_diagnose_token_reports_broad_write_scopes() -> None:
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        payload = (
-            '{"github.com":[{"active":true,"login":"octocat",'
-            '"scopes":"gist, read:org, repo, workflow","state":"success"}]}'
+        stdout = (
+            "github.com\n"
+            "  ✓ Logged in to github.com account octocat (/home/user/.config/gh/hosts.yml)\n"
+            "  - Active account: true\n"
+            "  - Git operations protocol: https\n"
+            "  - Token: gho_************************************\n"
+            "  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'\n"
         )
-        return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
     diagnosis = diagnose_token(run=fake_run)
 
@@ -167,8 +175,15 @@ def test_diagnose_token_reports_broad_write_scopes() -> None:
 
 def test_diagnose_token_read_only_scope_reports_no_write() -> None:
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        payload = '{"github.com":[{"active":true,"login":"octocat","scopes":"","state":"success"}]}'
-        return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
+        stdout = (
+            "github.com\n"
+            "  ✓ Logged in to github.com account octocat (/home/user/.config/gh/hosts.yml)\n"
+            "  - Active account: true\n"
+            "  - Git operations protocol: https\n"
+            "  - Token: gho_************************************\n"
+            "  - Token scopes: \n"
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
     diagnosis = diagnose_token(run=fake_run)
 
@@ -180,11 +195,18 @@ def test_diagnose_token_read_only_scope_reports_no_write() -> None:
 
 def test_diagnose_token_finds_active_account_on_non_first_host() -> None:
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        payload = (
-            '{"github.enterprise.example":[{"active":false,"scopes":"repo"}],'
-            '"github.com":[{"active":true,"scopes":"read:org"}]}'
+        stdout = (
+            "github.enterprise.example\n"
+            "  ✓ Logged in to github.enterprise.example account bot\n"
+            "  - Active account: false\n"
+            "  - Token scopes: 'repo'\n"
+            "\n"
+            "github.com\n"
+            "  ✓ Logged in to github.com account octocat\n"
+            "  - Active account: true\n"
+            "  - Token scopes: 'read:org'\n"
         )
-        return subprocess.CompletedProcess(argv, 0, stdout=payload, stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
     diagnosis = diagnose_token(run=fake_run)
 
@@ -205,14 +227,45 @@ def test_diagnose_token_fails_closed_when_unauthenticated() -> None:
     assert diagnosis.can_write is False
 
 
-def test_diagnose_token_fails_closed_on_malformed_json() -> None:
+def test_diagnose_token_fails_closed_when_gh_is_missing() -> None:
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 0, stdout="not json", stderr="")
+        raise OSError("gh: command not found")
 
     diagnosis = diagnose_token(run=fake_run)
 
     assert diagnosis.authenticated is False
     assert diagnosis.scopes == ()
+    assert diagnosis.can_discover is False
+    assert diagnosis.can_write is False
+
+
+def test_diagnose_token_fails_closed_when_active_account_not_found() -> None:
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        stdout = "github.com\n  ✓ Logged in to github.com account octocat\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    diagnosis = diagnose_token(run=fake_run)
+
+    assert diagnosis.authenticated is False
+    assert diagnosis.scopes == ()
+
+
+def test_diagnose_token_falls_back_to_stderr_output() -> None:
+    """Older `gh` versions write `auth status` to stderr instead of stdout."""
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        stderr = (
+            "github.com\n"
+            "  ✓ Logged in to github.com account octocat\n"
+            "  - Active account: true\n"
+            "  - Token scopes: 'repo'\n"
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr=stderr)
+
+    diagnosis = diagnose_token(run=fake_run)
+
+    assert diagnosis.authenticated is True
+    assert diagnosis.scopes == ("repo",)
 
 
 def test_github_environment_includes_proxy_and_tls_vars(monkeypatch: pytest.MonkeyPatch) -> None:
