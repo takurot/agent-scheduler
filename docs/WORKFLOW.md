@@ -275,6 +275,14 @@ SPECから逸脱する実装を先にmergeしない。別のstate layoutや延�
 
 対象ファイルだけをstageする。
 
+origin remoteはSSH（`ssh://git@github.com:22/takurot/agent-scheduler.git`）と
+HTTPS（`https://github.com/takurot/agent-scheduler.git`）のどちらの構成も正当とする。
+push前の安全確認スクリプトは`gh auth status --hostname github.com`が返す
+`Git operations protocol`でプロトコルを判定し、それぞれに対応するURLと転送経路の
+乗っ取り対策（SSH: `ssh -G`のhost/user/port/proxycommand、HTTPS: proxy環境変数と
+`http.proxy`系git config）を検証する。どちらのプロトコルにも該当しない場合はfail-closedで
+`exit 1`する。
+
 ```bash
 git status --short --branch
 git diff --check
@@ -295,14 +303,28 @@ git status --short --branch
   test "$(printf '%s\n' "$origin_fetch" | wc -l | tr -d ' ')" -eq 1 || exit 1
   test "$(printf '%s\n' "$origin_push" | wc -l | tr -d ' ')" -eq 1 || exit 1
   test "$origin_fetch" = "$origin_push" || exit 1
-  test "$origin_push" = "ssh://git@github.com:22/takurot/agent-scheduler.git" || exit 1
+  protocol="$(gh auth status --hostname github.com 2>&1 1>/dev/null | \
+    awk -F': ' '/Git operations protocol/ {print $2}')" || exit 1
   test -z "${GIT_SSH-}${GIT_SSH_COMMAND-}" || exit 1
   test -z "$(git config --get core.sshCommand || true)" || exit 1
-  ssh_config="$(ssh -G github.com 2>/dev/null)" || exit 1
-  test "$(printf '%s\n' "$ssh_config" | awk '$1 == "hostname" {print $2}')" = "github.com" || exit 1
-  test "$(printf '%s\n' "$ssh_config" | awk '$1 == "user" {print $2}')" = "git" || exit 1
-  test "$(printf '%s\n' "$ssh_config" | awk '$1 == "port" {print $2}')" = "22" || exit 1
-  ! printf '%s\n' "$ssh_config" | grep -Eq '^(proxycommand|proxyjump) ' || exit 1
+  case "$protocol" in
+    ssh)
+      test "$origin_push" = "ssh://git@github.com:22/takurot/agent-scheduler.git" || exit 1
+      ssh_config="$(ssh -G github.com 2>/dev/null)" || exit 1
+      test "$(printf '%s\n' "$ssh_config" | awk '$1 == "hostname" {print $2}')" = "github.com" || exit 1
+      test "$(printf '%s\n' "$ssh_config" | awk '$1 == "user" {print $2}')" = "git" || exit 1
+      test "$(printf '%s\n' "$ssh_config" | awk '$1 == "port" {print $2}')" = "22" || exit 1
+      ! printf '%s\n' "$ssh_config" | grep -Eq '^(proxycommand|proxyjump) ' || exit 1
+      ;;
+    https)
+      test "$origin_push" = "https://github.com/takurot/agent-scheduler.git" || exit 1
+      test -z "${https_proxy-}${HTTPS_PROXY-}${all_proxy-}${ALL_PROXY-}" || exit 1
+      test -z "$(git config --get-urlmatch http.proxy "$origin_push" || true)" || exit 1
+      ;;
+    *)
+      exit 1
+      ;;
+  esac
   git push -u origin "HEAD:refs/heads/$current_branch"
 )
 ```
@@ -327,14 +349,28 @@ pushを明示した場合は例外を認める。通常のIssue実装、code、s
   test "$(printf '%s\n' "$origin_fetch" | wc -l | tr -d ' ')" -eq 1 || exit 1
   test "$(printf '%s\n' "$origin_push" | wc -l | tr -d ' ')" -eq 1 || exit 1
   test "$origin_fetch" = "$origin_push" || exit 1
-  test "$origin_push" = "ssh://git@github.com:22/takurot/agent-scheduler.git" || exit 1
+  protocol="$(gh auth status --hostname github.com 2>&1 1>/dev/null | \
+    awk -F': ' '/Git operations protocol/ {print $2}')" || exit 1
   test -z "${GIT_SSH-}${GIT_SSH_COMMAND-}" || exit 1
   test -z "$(git config --get core.sshCommand || true)" || exit 1
-  ssh_config="$(ssh -G github.com 2>/dev/null)" || exit 1
-  test "$(printf '%s\n' "$ssh_config" | awk '$1 == "hostname" {print $2}')" = "github.com" || exit 1
-  test "$(printf '%s\n' "$ssh_config" | awk '$1 == "user" {print $2}')" = "git" || exit 1
-  test "$(printf '%s\n' "$ssh_config" | awk '$1 == "port" {print $2}')" = "22" || exit 1
-  ! printf '%s\n' "$ssh_config" | grep -Eq '^(proxycommand|proxyjump) ' || exit 1
+  case "$protocol" in
+    ssh)
+      test "$origin_push" = "ssh://git@github.com:22/takurot/agent-scheduler.git" || exit 1
+      ssh_config="$(ssh -G github.com 2>/dev/null)" || exit 1
+      test "$(printf '%s\n' "$ssh_config" | awk '$1 == "hostname" {print $2}')" = "github.com" || exit 1
+      test "$(printf '%s\n' "$ssh_config" | awk '$1 == "user" {print $2}')" = "git" || exit 1
+      test "$(printf '%s\n' "$ssh_config" | awk '$1 == "port" {print $2}')" = "22" || exit 1
+      ! printf '%s\n' "$ssh_config" | grep -Eq '^(proxycommand|proxyjump) ' || exit 1
+      ;;
+    https)
+      test "$origin_push" = "https://github.com/takurot/agent-scheduler.git" || exit 1
+      test -z "${https_proxy-}${HTTPS_PROXY-}${all_proxy-}${ALL_PROXY-}" || exit 1
+      test -z "$(git config --get-urlmatch http.proxy "$origin_push" || true)" || exit 1
+      ;;
+    *)
+      exit 1
+      ;;
+  esac
   test "$(gh repo view takurot/agent-scheduler --json nameWithOwner --jq .nameWithOwner)" = "takurot/agent-scheduler" || exit 1
   git fetch origin main || exit 1
   set -- $(git rev-list --left-right --count main...origin/main)
