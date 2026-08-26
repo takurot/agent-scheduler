@@ -274,6 +274,8 @@ def status(
             pr_str = f" [PR #{t.pr}]" if t.pr else ""
             agent_str = f" (agent: {t.current_agent})" if t.current_agent else ""
             typer.echo(f"  #{t.issue_number:<4} {t.status.value:<18} {t.title}{pr_str}{agent_str}")
+            if t.needs_human_reason:
+                typer.echo(f"        reason: {t.needs_human_reason}")
 
 
 @app.command()

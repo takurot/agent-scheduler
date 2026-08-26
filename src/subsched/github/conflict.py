@@ -105,20 +105,20 @@ def handle_rebase_outcome(task: Task, result: RebaseResult) -> tuple[Task, str]:
         files = list(result.conflicted_files)
         msg = f"merge conflict detected in {files}; escalated to NEEDS_HUMAN"
         if TaskState.NEEDS_HUMAN in ALLOWED_TRANSITIONS.get(task.status, frozenset()):
-            return task.transition(TaskState.NEEDS_HUMAN), msg
+            return task.transition(TaskState.NEEDS_HUMAN, reason=msg), msg
         if task.status == TaskState.IN_PROGRESS:
             verifying = task.transition(TaskState.VERIFYING)
-            return verifying.transition(TaskState.NEEDS_HUMAN), msg
+            return verifying.transition(TaskState.NEEDS_HUMAN, reason=msg), msg
         if task.status == TaskState.FAILED:
             return task, msg
         return task.transition(TaskState.FAILED), msg
     else:
         msg = f"rebase failed: {result.output}; escalated to NEEDS_HUMAN"
         if TaskState.NEEDS_HUMAN in ALLOWED_TRANSITIONS.get(task.status, frozenset()):
-            return task.transition(TaskState.NEEDS_HUMAN), msg
+            return task.transition(TaskState.NEEDS_HUMAN, reason=msg), msg
         if task.status == TaskState.IN_PROGRESS:
             verifying = task.transition(TaskState.VERIFYING)
-            return verifying.transition(TaskState.NEEDS_HUMAN), msg
+            return verifying.transition(TaskState.NEEDS_HUMAN, reason=msg), msg
         if task.status == TaskState.FAILED:
             return task, msg
         return task.transition(TaskState.FAILED), msg

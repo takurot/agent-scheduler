@@ -31,3 +31,26 @@ def test_status_verbose_output(tmp_path: Path) -> None:
     assert "#101" in res.output
     assert "#102" in res.output
     assert "codex" in res.output
+
+
+def test_status_verbose_shows_needs_human_reason(tmp_path: Path) -> None:
+    """Regression test for #128: a NEEDS_HUMAN task's escalation reason must be visible
+    in `subsched status --verbose`, not silently discarded."""
+    store = JsonStateStore(tmp_path)
+    task = Task.from_issue(Issue(number=103, title="Task with a push failure"))
+    task = (
+        task.transition(TaskState.DISPATCHED, current_agent="claude")
+        .transition(TaskState.IN_PROGRESS, current_agent="claude")
+        .transition(TaskState.VERIFYING, current_agent="claude")
+        .transition(
+            TaskState.NEEDS_HUMAN,
+            current_agent="claude",
+            reason="push failed (PERMISSION_DENIED): denied",
+        )
+    )
+    store.save_tasks((task,))
+
+    res = runner.invoke(app, ["--repository", str(tmp_path), "status", "--verbose"])
+    assert res.exit_code == 0
+    assert "#103" in res.output
+    assert "push failed (PERMISSION_DENIED): denied" in res.output

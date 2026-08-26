@@ -133,6 +133,9 @@ def test_handle_rebase_outcome() -> None:
     updated, msg = handle_rebase_outcome(task, conflict_result)
     assert updated.status == TaskState.NEEDS_HUMAN
     assert "conflict" in msg.casefold()
+    # Regression test for #128: the escalation reason must be persisted on the task,
+    # not just returned as a local message that the caller can drop.
+    assert updated.needs_human_reason == msg
 
     # IN_PROGRESS on conflict
     ip_task = Task(
@@ -142,13 +145,16 @@ def test_handle_rebase_outcome() -> None:
         labels=(),
         status=TaskState.IN_PROGRESS,
     )
-    updated_ip, _ = handle_rebase_outcome(ip_task, conflict_result)
+    updated_ip, ip_msg = handle_rebase_outcome(ip_task, conflict_result)
     assert updated_ip.status == TaskState.NEEDS_HUMAN
+    assert updated_ip.needs_human_reason == ip_msg
 
     # IN_PROGRESS on failure
     fail_result = RebaseResult(status=RebaseStatus.FAILURE, output="fatal error")
-    updated_ip_fail, _ = handle_rebase_outcome(ip_task, fail_result)
+    updated_ip_fail, fail_msg = handle_rebase_outcome(ip_task, fail_result)
     assert updated_ip_fail.status == TaskState.NEEDS_HUMAN
+    assert updated_ip_fail.needs_human_reason == fail_msg
+    assert "fatal error" in fail_msg
 
     # FAILED task
     failed_task = Task(

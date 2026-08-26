@@ -77,8 +77,11 @@ def test_push_enabled_happy_path_completes_with_pr_number(
     monkeypatch.setattr(
         pr_mod,
         "create_or_get_pull_request",
-        lambda task, branch_name, **kw: pr_mod.PullRequestInfo(
-            number=42, url="https://example.invalid/pull/42", title="t", body="b"
+        lambda task, branch_name, **kw: pr_mod.PullRequestResult(
+            kind=pr_mod.PullRequestResultKind.SUCCESS,
+            info=pr_mod.PullRequestInfo(
+                number=42, url="https://example.invalid/pull/42", title="t", body="b"
+            ),
         ),
     )
 
@@ -114,6 +117,9 @@ def test_rebase_conflict_escalates_to_needs_human(
     task = scheduler.tasks[0]
     assert task.status is TaskState.NEEDS_HUMAN
     assert task.pr is None
+    # Regression test for #128: the escalation reason must be persisted, not discarded.
+    assert task.needs_human_reason is not None
+    assert "conflict" in task.needs_human_reason.casefold()
 
 
 def test_push_failure_escalates_to_needs_human(
@@ -146,6 +152,9 @@ def test_push_failure_escalates_to_needs_human(
     task = scheduler.tasks[0]
     assert task.status is TaskState.NEEDS_HUMAN
     assert task.pr is None
+    # Regression test for #128: the push failure reason must be persisted, not discarded.
+    assert task.needs_human_reason is not None
+    assert "denied" in task.needs_human_reason
 
 
 def test_pr_creation_failure_escalates_to_needs_human(
@@ -166,7 +175,13 @@ def test_pr_creation_failure_escalates_to_needs_human(
         ),
     )
     monkeypatch.setattr(
-        pr_mod, "create_or_get_pull_request", lambda task, branch_name, **kw: None
+        pr_mod,
+        "create_or_get_pull_request",
+        lambda task, branch_name, **kw: pr_mod.PullRequestResult(
+            kind=pr_mod.PullRequestResultKind.FAILURE,
+            info=None,
+            output="gh: pull request create failed: already exists",
+        ),
     )
 
     scheduler = _scheduler(tmp_path, push_enabled=True)
@@ -176,3 +191,6 @@ def test_pr_creation_failure_escalates_to_needs_human(
     task = scheduler.tasks[0]
     assert task.status is TaskState.NEEDS_HUMAN
     assert task.pr is None
+    # Regression test for #128: the PR-creation failure reason must be persisted.
+    assert task.needs_human_reason is not None
+    assert "already exists" in task.needs_human_reason

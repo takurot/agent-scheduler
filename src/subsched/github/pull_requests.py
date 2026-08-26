@@ -4,7 +4,9 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
+from enum import StrEnum
 
+from subsched.agents.process import redact_sensitive_command_audit
 from subsched.models import Task
 
 _CLOSE_KEYWORD_RE = re.compile(r"\b(fix(e[sd])?|close[sd]?|resolve[sd]?)\s*#", re.IGNORECASE)
@@ -21,6 +23,22 @@ class PullRequestInfo:
     url: str
     title: str
     body: str
+
+
+class PullRequestResultKind(StrEnum):
+    SUCCESS = "SUCCESS"
+    FAILURE = "FAILURE"
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestResult:
+    kind: PullRequestResultKind
+    info: PullRequestInfo | None
+    output: str = ""
+
+
+def _redact(text: str) -> str:
+    return "\n".join(redact_sensitive_command_audit(tuple(text.splitlines())))
 
 
 def build_pr_body(issue_number: int, summary: str = "", verification_results: str = "") -> str:
@@ -97,11 +115,16 @@ def create_or_get_pull_request(
     verification_summary: str = "",
     env: dict[str, str] | None = None,
     timeout_seconds: float = 60.0,
-) -> PullRequestInfo | None:
-    """Idempotently create or retrieve existing PR using gh CLI."""
+) -> PullRequestResult:
+    """Idempotently create or retrieve existing PR using gh CLI.
+
+    Unlike a bare PullRequestInfo | None, PullRequestResult also carries a redacted
+    `output` describing *why* creation failed (regression test for #128: this was
+    previously discarded, making a resulting NEEDS_HUMAN escalation unexplainable).
+    """
     existing = lookup_existing_pr(branch_name, repo=repo, env=env, timeout_seconds=timeout_seconds)
     if existing is not None:
-        return existing
+        return PullRequestResult(kind=PullRequestResultKind.SUCCESS, info=existing)
 
     body = build_pr_body(
         issue_number=task.issue_number,
@@ -138,12 +161,20 @@ def create_or_get_pull_request(
             check=False,
         )
         if res.returncode != 0:
-            return None
+            output = _redact(f"{res.stdout}\n{res.stderr}".strip())
+            return PullRequestResult(kind=PullRequestResultKind.FAILURE, info=None, output=output)
         url = res.stdout.strip()
         match = re.search(r"/pull/(\d+)", url)
         if match is None:
-            return None
+            return PullRequestResult(
+                kind=PullRequestResultKind.FAILURE,
+                info=None,
+                output=_redact(f"could not parse PR number from gh output: {url}"),
+            )
         pr_number = int(match.group(1))
-        return PullRequestInfo(number=pr_number, url=url, title=title, body=body)
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return None
+        info = PullRequestInfo(number=pr_number, url=url, title=title, body=body)
+        return PullRequestResult(kind=PullRequestResultKind.SUCCESS, info=info)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+        return PullRequestResult(
+            kind=PullRequestResultKind.FAILURE, info=None, output=_redact(str(error))
+        )
