@@ -1692,6 +1692,8 @@ ambiguous requirements
 destructive migration
 security-sensitive change
 unresolvable merge conflict
+push failure
+PR creation failure
 test environment unavailable
 repeated Agent failures
 billing mode unknown
@@ -1704,6 +1706,19 @@ max retries exceeded
 ```text
 NEEDS_HUMAN
 ```
+
+`Task.needs_human_reason`に、遷移理由を表す人間可読な文字列（redact済み）を永続化する。
+`subsched status --verbose`で確認できる。理由が無い場合は`null`。
+
+## push / rebase / PR作成失敗のリトライ方針
+
+`Scheduler._finalize_verified_task()`内のrebase conflict、push失敗、PR作成失敗は、
+Agent自体の失敗（`per_agent_failures`が`max_agent_failures`に達するまでリトライされる）
+とは異なり、**リトライせず1回の失敗で即座にNEEDS_HUMANへ遷移する**。これは意図的な
+挙動である。push/rebase/PR作成はGitHub上の状態を書き換える操作であり、原因不明のまま
+自動リトライすると、non-fast-forward push、重複PR、意図しないrebaseなど、単純な
+再試行よりも回復困難な状態を招くリスクがある。「不明な場合はfail-closedにする」という
+本SPECの方針（§1）に従い、これらの失敗は都度人間の判断を挟む。
 
 ---
 
