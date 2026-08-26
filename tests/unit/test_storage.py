@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import threading
 from datetime import UTC, datetime, timedelta
@@ -13,6 +14,7 @@ from subsched.storage import (
     LockRecord,
     SchedulerLock,
     StateCorruptionError,
+    find_repository_root,
     get_process_start_time,
 )
 
@@ -342,4 +344,52 @@ def test_is_process_alive_permission_error_fallthrough(monkeypatch: pytest.Monke
     assert is_process_alive(1234, "different_start_time") is False
     # No expected start time
     assert is_process_alive(1234, None) is True
+
+
+def _init_git_repo(path: Path) -> None:
+    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.email", "test@example.invalid"], check=True
+    )
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "commit", "--allow-empty", "-q", "-m", "init"], check=True
+    )
+
+
+def test_find_repository_root_resolves_subdirectory_to_toplevel(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    subdir = tmp_path / "src" / "nested"
+    subdir.mkdir(parents=True)
+
+    root = find_repository_root(subdir)
+
+    assert root == tmp_path.resolve()
+
+
+def test_find_repository_root_falls_back_when_not_a_git_repo(tmp_path: Path) -> None:
+    non_repo = tmp_path / "plain"
+    non_repo.mkdir()
+
+    root = find_repository_root(non_repo)
+
+    assert root == non_repo
+
+
+def test_find_repository_root_falls_back_on_execution_failure(tmp_path: Path) -> None:
+    def failing_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        raise OSError("git not found")
+
+    root = find_repository_root(tmp_path, run=failing_run)
+
+    assert root == tmp_path
+
+
+def test_find_repository_root_falls_back_on_nonzero_exit(tmp_path: Path) -> None:
+    def failing_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 128, stdout="", stderr="not a git repository")
+
+    root = find_repository_root(tmp_path, run=failing_run)
+
+    assert root == tmp_path
 

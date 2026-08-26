@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from subsched.github.issues import GitHubCliError, GitHubIssueSource, diagnose_token
+from subsched.github.issues import (
+    GitHubCliError,
+    GitHubDiscoveryErrorKind,
+    GitHubIssueSource,
+    diagnose_token,
+)
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "github"
 
@@ -46,15 +51,55 @@ def test_github_adapter_uses_argv_and_validates_json(monkeypatch: pytest.MonkeyP
     ]
 
 
-def test_github_adapter_redacts_cli_failure() -> None:
+def test_github_adapter_redacts_cli_failure_with_unrecognized_stderr() -> None:
     def failed(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="authentication failed")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="something odd happened")
 
     source = GitHubIssueSource(run=failed)
 
     with pytest.raises(GitHubCliError, match="stderr hidden") as error:
         source.list_open("owner/project")
-    assert "authentication failed" not in str(error.value)
+    assert "something odd happened" not in str(error.value)
+    assert error.value.kind is GitHubDiscoveryErrorKind.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected_kind"),
+    [
+        (
+            "GraphQL: Could not resolve to a Repository with the name 'owner/nope'.",
+            GitHubDiscoveryErrorKind.NOT_FOUND,
+        ),
+        ("gh: HTTP 404: Not Found", GitHubDiscoveryErrorKind.NOT_FOUND),
+        (
+            "You are not logged into any GitHub hosts. To log in, run: gh auth login",
+            GitHubDiscoveryErrorKind.NOT_AUTHENTICATED,
+        ),
+        ("gh: HTTP 401: Bad credentials", GitHubDiscoveryErrorKind.NOT_AUTHENTICATED),
+        (
+            "gh: HTTP 403: Resource not accessible by integration",
+            GitHubDiscoveryErrorKind.PERMISSION_DENIED,
+        ),
+        (
+            "dial tcp: lookup api.github.com: no such host",
+            GitHubDiscoveryErrorKind.NETWORK_ERROR,
+        ),
+        ("connect: connection refused", GitHubDiscoveryErrorKind.NETWORK_ERROR),
+    ],
+)
+def test_github_adapter_classifies_known_gh_failures_without_leaking_stderr(
+    stderr: str, expected_kind: GitHubDiscoveryErrorKind
+) -> None:
+    def failed(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr=stderr)
+
+    source = GitHubIssueSource(run=failed)
+
+    with pytest.raises(GitHubCliError) as error:
+        source.list_open("owner/project")
+    assert error.value.kind is expected_kind
+    assert "owner/nope" not in str(error.value)
+    assert str(error.value)
 
 
 def test_github_adapter_default_limit_and_custom_limit() -> None:
