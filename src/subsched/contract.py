@@ -191,5 +191,17 @@ def build_worker_prompt(task: Task, verification_commands: Sequence[str] = ()) -
             lines.append(f"- {cmd}")
     else:
         lines.append("- (defined in docs/WORKFLOW.md or pyproject.toml)")
-    lines.extend(["", "Leave the worktree in a recoverable state."])
+    lines.extend(
+        [
+            "",
+            "Commit your changes to the current branch (git add + git commit) once",
+            "verification passes. This local commit is your responsibility.",
+            "Do not push or open a pull request. Push and PR creation are the",
+            "Scheduler's responsibility after verification passes.",
+            "Do not close the issue; issues are closed only via manual review",
+            "and merge, never automatically.",
+            "",
+            "Leave the worktree in a recoverable state.",
+        ]
+    )
     return "\n".join(lines) + "\n"

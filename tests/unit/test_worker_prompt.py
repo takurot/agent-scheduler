@@ -26,6 +26,13 @@ def test_build_worker_prompt_contains_mandatory_instructions() -> None:
     assert "Do not start another GitHub issue." in prompt
     assert "Do not attempt to merge, create releases, or deploy." in prompt
     assert "uv run pytest" in prompt
+    assert "Commit your changes to the current branch" in prompt
+    assert "git add" in prompt
+    assert "git commit" in prompt
+    assert "Do not push or open a pull request." in prompt
+    assert "Scheduler's responsibility after verification passes." in prompt
+    assert "Do not close the issue" in prompt
+    assert "never automatically" in prompt
 
 
 def test_validate_dispatch_preconditions_fails_if_files_missing(tmp_path: Path) -> None:
