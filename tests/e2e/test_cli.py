@@ -446,6 +446,13 @@ def test_native_run_drives_scheduler_to_ready_for_review_and_opens_pr(
     assert "READY_FOR_REVIEW" in status.output
     assert "PR #7" in status.output
 
+    # #139: the configured verification.commands ('true') must actually reach the native
+    # worker's prompt, not just the Scheduler's post-worker gate. (Regression test for a
+    # merge defect: this assertion had been silently misplaced onto an unrelated test by
+    # an earlier merge, where `captured_prompts` didn't even exist -- restored here.)
+    assert captured_prompts
+    assert any("- true" in prompt for prompt in captured_prompts)
+
 
 def test_ci_monitoring_promotes_ready_for_review_to_complete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -667,11 +674,6 @@ def test_dry_run_overrides_create_pr_true_and_skips_all_github_writes(
     assert "Effective write policy:" in result.output
     assert "push=False" in result.output
     assert "create_pr=True" in result.output
-
-    # #139: the configured verification.commands ('true') must actually reach the native
-    # worker's prompt, not just the Scheduler's post-worker gate.
-    assert captured_prompts
-    assert any("- true" in prompt for prompt in captured_prompts)
 
 
 def test_queue_priority_label_scores_changes_dispatch_order(

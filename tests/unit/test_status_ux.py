@@ -54,3 +54,26 @@ def test_status_verbose_shows_needs_human_reason(tmp_path: Path) -> None:
     assert res.exit_code == 0
     assert "#103" in res.output
     assert "push failed (PERMISSION_DENIED): denied" in res.output
+
+
+def test_status_verbose_shows_task_runtime_start(tmp_path: Path) -> None:
+    """Regression test for #137: the durable Task-level runtime start (distinct from
+    execution.agent_timeout_seconds, a per-invocation config value) must be visible in
+    `subsched status --verbose`."""
+    from dataclasses import replace
+    from datetime import UTC, datetime
+
+    store = JsonStateStore(tmp_path)
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    task = replace(
+        Task.from_issue(Issue(number=104, title="Long running task")),
+        status=TaskState.READY,
+        run_started_at=started,
+    )
+    store.save_tasks((task,))
+
+    res = runner.invoke(app, ["--repository", str(tmp_path), "status", "--verbose"])
+    assert res.exit_code == 0
+    assert "#104" in res.output
+    assert "task runtime since" in res.output
+    assert started.isoformat() in res.output
