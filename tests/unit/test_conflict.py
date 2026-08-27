@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from subsched.gitenv import GIT_LOCATION_OVERRIDE_VARS
 from subsched.github.conflict import (
     RebaseResult,
     RebaseStatus,
@@ -88,6 +89,31 @@ def test_rebase_conflict_detects_and_aborts(git_repo_with_branch: tuple[Path, Pa
         check=True,
     )
     assert "rebase in progress" not in status_proc.stdout.casefold()
+
+
+def test_rebase_onto_base_strips_git_location_override_env_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leaked GIT_DIR/GIT_WORK_TREE must never redirect rebase/diff/abort calls away from
+    `worktree_dir` (issue #147)."""
+    monkeypatch.setenv("GIT_DIR", "/leaked/.git")
+    calls: list[dict[str, object]] = []
+    real_run = subprocess.run
+
+    def spying_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(kwargs)
+        return real_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(subprocess, "run", spying_run)
+
+    rebase_onto_base(tmp_path, base_branch="non-existent")
+
+    assert calls, "expected at least one git invocation"
+    for kwargs in calls:
+        env = kwargs.get("env")
+        assert isinstance(env, dict), "every git call must pass an explicit env"
+        for name in GIT_LOCATION_OVERRIDE_VARS:
+            assert name not in env
 
 
 def test_rebase_invalid_branch(tmp_path: Path) -> None:

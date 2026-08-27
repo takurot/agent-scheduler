@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from subsched.gitenv import GIT_LOCATION_OVERRIDE_VARS
 from subsched.tasks.worktree import (
     GitWorktreeAdapter,
     InvalidRepositoryError,
@@ -74,3 +75,34 @@ def test_rejects_unregistered_existing_directory(tmp_path: Path) -> None:
 
     with pytest.raises(WorktreeConflictError, match="not registered as a git worktree"):
         adapter.prepare_worktree(1)
+
+
+def test_all_git_invocations_strip_location_override_env_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every `git` subprocess call must pass an env stripped of GIT_DIR & co. (issue #147):
+    otherwise a leaked GIT_DIR/GIT_WORK_TREE silently redirects `-C <repo_root>` operations
+    onto an unrelated repository."""
+    monkeypatch.setenv("GIT_DIR", "/leaked/.git")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((cmd, kwargs))
+        if "rev-parse" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
+        if "worktree" in cmd and "list" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if "show-ref" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    worktree_root = tmp_path / "worktrees"
+    adapter = GitWorktreeAdapter(tmp_path, worktree_root, run=fake_run)
+    adapter.prepare_worktree(1)
+
+    assert calls, "expected at least one git invocation"
+    for _cmd, kwargs in calls:
+        env = kwargs.get("env")
+        assert isinstance(env, dict), "every git call must pass an explicit env"
+        for name in GIT_LOCATION_OVERRIDE_VARS:
+            assert name not in env

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from subsched.gitenv import git_safe_env
+
 
 class WorktreeError(RuntimeError):
     pass
@@ -65,6 +67,7 @@ class GitWorktreeAdapter:
                 capture_output=True,
                 text=True,
                 check=False,
+                env=git_safe_env(),
             )
         except OSError as error:
             raise InvalidRepositoryError(
@@ -107,6 +110,7 @@ class GitWorktreeAdapter:
             capture_output=True,
             text=True,
             check=False,
+            env=git_safe_env(),
         )
         if result.returncode != 0:
             return False
@@ -131,6 +135,7 @@ class GitWorktreeAdapter:
             capture_output=True,
             text=True,
             check=False,
+            env=git_safe_env(),
         )
         return result.returncode == 0
 
@@ -182,7 +187,7 @@ class GitWorktreeAdapter:
                 "HEAD",
             ]
 
-        result = self.run(cmd, capture_output=True, text=True, check=False)
+        result = self.run(cmd, capture_output=True, text=True, check=False, env=git_safe_env())
         if result.returncode != 0:
             raise WorktreeConflictError(
                 f"failed to create git worktree at {target_path}: {result.stderr.strip()}"

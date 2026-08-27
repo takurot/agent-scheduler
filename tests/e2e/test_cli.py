@@ -7,6 +7,7 @@ from typer.testing import CliRunner, Result
 
 from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
 from subsched.cli import app
+from subsched.gitenv import git_safe_env
 from subsched.github.issues import GitHubIssueSource
 from subsched.github.pull_requests import PullRequestInfo, PullRequestResult, PullRequestResultKind
 from subsched.models import Issue, Task, TaskState
@@ -16,12 +17,28 @@ runner = CliRunner()
 
 
 def _git(path: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(path), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=git_safe_env(),
+    )
 
 
 def _init_git_repo(path: Path) -> None:
-    """Create a minimal real local git repository with one commit on `main`."""
-    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True, capture_output=True)
+    """Create a minimal real local git repository with one commit on `main`.
+
+    `path` must be under pytest's `tmp_path` -- never a real developer checkout -- because this
+    helper reassigns `user.*` identity and creates commits (see issue #147).
+    """
+    assert "pytest" in str(path), f"refusing to git-init outside a pytest tmp_path: {path}"
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main", str(path)],
+        check=True,
+        capture_output=True,
+        env=git_safe_env(),
+    )
     _git(path, "config", "user.email", "test@example.invalid")
     _git(path, "config", "user.name", "Test")
     _git(path, "commit", "--allow-empty", "-q", "-m", "init")
@@ -370,7 +387,10 @@ def test_native_run_drives_scheduler_to_complete_and_opens_pr(
     _init_git_repo(repo_dir)
     remote_dir = tmp_path / "origin.git"
     subprocess.run(
-        ["git", "init", "-q", "--bare", str(remote_dir)], check=True, capture_output=True
+        ["git", "init", "-q", "--bare", str(remote_dir)],
+        check=True,
+        capture_output=True,
+        env=git_safe_env(),
     )
     _git(repo_dir, "remote", "add", "origin", str(remote_dir))
     _git(repo_dir, "push", "-q", "-u", "origin", "main")
