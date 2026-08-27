@@ -1092,6 +1092,12 @@ execution:
 `NativeWorker`が`claude`/`codex`を1回起動する際の`ProcessExecutionRequest.timeout_seconds`に渡される。これは
 `max_task_runtime`（Task全体に対するガード）とは別の、単一のagent process呼び出しに対するタイムアウトである。
 
+`execution.max_task_runtime`はTaskの初回dispatch時刻（`Task.run_started_at`、failover/retry/restartをまたいで保持され、
+リトライのたびにリセットされない）からの経過時間に対する予算として`Scheduler`が毎`tick()`の先頭で強制する。予算超過時は
+黙って打ち切る／再dispatchするのではなく、`NEEDS_HUMAN`へfail-closedでエスカレーションする（理由は
+`Task.needs_human_reason`に`"execution.max_task_runtime exceeded (...)"`として記録され、`subsched status --verbose`の
+`task runtime since:`行でdispatch起点も確認できる）。`max_task_runtime`が未設定（`None`）の場合はこのガードは無効。
+
 ---
 
 # 34. Billing Safety
@@ -1955,7 +1961,16 @@ subsched pause
 new issue dispatchを停止
 ```
 
-現在実行中Taskは設定次第。
+現在実行中Taskは`execution.pause_running_policy`設定次第。3値の意味と実装状態：
+
+| 値 | 意味 | 実装状態 |
+|---|---|---|
+| `continue` | 実行中Taskはそのまま継続させ、`pause`は新規dispatchのみ止める | 実装済み・既定値 |
+| `abort` | 実行中Taskのprocess groupを強制終了する | **未実装**。process group制御・Task状態遷移が存在しないため、config読み込み時に`ConfigError`でfail-fast拒否される |
+| `cancel` | 実行中Taskを`CANCELLED`へ遷移させつつ穏当に停止させる | **未実装**。同上の理由でfail-fast拒否される |
+
+`abort`/`cancel`を黙って受理して実際には何もしない（fail-open）動作は許容しない。実装されるまでは
+`continue`のみをconfigとして受理する。
 
 ```bash
 subsched resume

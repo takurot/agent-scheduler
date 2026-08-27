@@ -302,7 +302,13 @@ def _parse_execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
     runtime = raw.get("max_task_runtime", "6h")
     parse_duration(runtime)
     policy = str(raw.get("pause_running_policy", "continue"))
-    if policy not in {"continue", "abort", "cancel"}:
+    if policy in {"abort", "cancel"}:
+        raise ConfigError(
+            f"execution.pause_running_policy: '{policy}' is not supported yet -- no "
+            "runtime implementation exists (process-group control, Task state "
+            "transition). Only 'continue' is currently accepted."
+        )
+    if policy != "continue":
         raise ConfigError(f"invalid execution.pause_running_policy: {policy}")
     agent_timeout_seconds = _strict_pos_int(
         raw.get("agent_timeout_seconds", 300), "execution.agent_timeout_seconds"
