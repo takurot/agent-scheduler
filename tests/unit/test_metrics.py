@@ -60,6 +60,10 @@ def test_calculate_metrics_comprehensive() -> None:
     assert metrics.productivity.issues_implemented == 2  # t1 (COMPLETE), t2 (READY_FOR_REVIEW)
     assert metrics.productivity.prs_created == 2
     assert metrics.productivity.autonomous_completion_rate == round(2 / 3, 4)
+    # Regression test for #142: implemented, ready-for-review, and complete must be
+    # separately observable -- previously PR creation jumped straight to COMPLETE, so
+    # ready_for_review was always 0 and indistinguishable from completed.
+    assert metrics.productivity.issues_ready_for_review == 1  # t2 only
 
     # Reliability
     assert metrics.reliability.task_completion_rate == round(1 / 3, 4)

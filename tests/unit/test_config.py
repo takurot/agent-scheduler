@@ -139,6 +139,18 @@ def test_agent_timeout_seconds_default_and_override(tmp_path: Path) -> None:
     assert load_config(override_path).execution.agent_timeout_seconds == 900
 
 
+def test_ci_monitoring_defaults_to_disabled(tmp_path: Path) -> None:
+    default_path = tmp_path / "default.yaml"
+    default_path.write_text("github:\n  repo: o/r\n", encoding="utf-8")
+    assert load_config(default_path).execution.ci_monitoring is False
+
+    enabled_path = tmp_path / "enabled.yaml"
+    enabled_path.write_text(
+        "github:\n  repo: o/r\nexecution:\n  ci_monitoring: true\n", encoding="utf-8"
+    )
+    assert load_config(enabled_path).execution.ci_monitoring is True
+
+
 def test_agent_timeout_seconds_rejects_non_positive(tmp_path: Path) -> None:
     path = tmp_path / "scheduler.yaml"
     path.write_text(
@@ -165,6 +177,19 @@ def test_config_rejects_unsafe_billing(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_config_rejects_close_issue_true(tmp_path: Path) -> None:
+    """Regression test for #136: close_issue: true has no implemented runtime path (it
+    would require a separate write-permission tier per SPEC), so accepting it silently
+    would be misleading -- config must fail closed instead of just ignoring it."""
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\n  completion:\n    close_issue: true\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError, match="close_issue"):
+        load_config(path)
+
+
 def test_config_rejects_unknown_keys(tmp_path: Path) -> None:
     path = tmp_path / "scheduler.yaml"
     path.write_text("github:\n  repo: o/r\nunknown_key: true\n", encoding="utf-8")
@@ -182,6 +207,60 @@ def test_config_strict_validation(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="positive integer"):
         load_config(path)
+
+
+def test_config_rejects_unimplemented_routing_strategy(tmp_path: Path) -> None:
+    """Regression test for #138: routing.strategy had no runtime consumer besides the
+    fixed capacity-aware Router implementation -- accepting an arbitrary string here
+    would silently pretend a different strategy took effect when it never does."""
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\nrouting:\n  strategy: round-robin\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError, match=r"routing\.strategy"):
+        load_config(path)
+
+
+def test_config_rejects_unimplemented_provider_capacity_preferred_false(
+    tmp_path: Path,
+) -> None:
+    """Router.select() always prefers fresh provider capacity data unconditionally --
+    there is no runtime code path that honors preferred=False, so it must be rejected
+    rather than silently ignored."""
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\nrouting:\n  provider_capacity:\n    preferred: false\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match=r"routing\.provider_capacity\.preferred"):
+        load_config(path)
+
+
+def test_config_rejects_unimplemented_local_estimate_proactive_switch(
+    tmp_path: Path,
+) -> None:
+    """No runtime code implements local-usage-estimate-driven proactive agent
+    switching -- proactive_switch=true must fail-fast, not silently no-op."""
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\nrouting:\n  local_estimate:\n    proactive_switch: true\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match=r"routing\.local_estimate\.proactive_switch"):
+        load_config(path)
+
+
+def test_config_default_routing_values_are_accepted(tmp_path: Path) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text("github:\n  repo: o/r\n", encoding="utf-8")
+
+    config = load_config(path)
+    assert config.routing.strategy == "capacity-aware"
+    assert config.routing.provider_capacity.preferred is True
+    assert config.routing.local_estimate.proactive_switch is False
 
 
 def test_parse_duration() -> None:

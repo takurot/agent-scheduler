@@ -109,6 +109,7 @@ class ExecutionConfig:
     max_tasks_per_run: int = 50
     pause_running_policy: str = "continue"
     agent_timeout_seconds: int = 300
+    ci_monitoring: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +177,7 @@ SECTION_KEYS: dict[str, frozenset[str]] = {
             "max_tasks_per_run",
             "pause_running_policy",
             "agent_timeout_seconds",
+            "ci_monitoring",
         }
     ),
     "queue": frozenset({"priority"}),
@@ -192,13 +194,20 @@ def _parse_github_config(raw: Mapping[str, Any]) -> GitHubConfig:
     if completion_extras:
         raise ConfigError(f"unknown github.completion keys: {join_keys(completion_extras)}")
 
+    close_issue = _strict_bool(
+        completion_raw.get("close_issue", False), "github.completion.close_issue"
+    )
+    if close_issue:
+        raise ConfigError(
+            "github.completion.close_issue: true is not supported yet; issue auto-close "
+            "requires a separate write-permission tier that is not implemented (SPEC "
+            "§34/§41). Leave close_issue unset or false."
+        )
     completion = GitHubCompletionConfig(
         create_pr=_strict_bool(
             completion_raw.get("create_pr", True), "github.completion.create_pr"
         ),
-        close_issue=_strict_bool(
-            completion_raw.get("close_issue", False), "github.completion.close_issue"
-        ),
+        close_issue=close_issue,
     )
 
     repo_val = raw.get("repo")
@@ -244,18 +253,35 @@ def _parse_agents_config(raw: Any) -> dict[str, AgentSettings]:
 
 
 def _parse_routing_config(raw: Mapping[str, Any]) -> RoutingConfig:
+    # #138: Router only ever implements a single fixed capacity-aware strategy that
+    # always prefers fresh provider capacity data -- there is no runtime consumer for a
+    # different strategy, for disabling that provider-capacity preference, or for
+    # local-usage-estimate-driven proactive switching. Accepting a non-default value here
+    # would let operators believe it took effect when Scheduler/Router behavior never
+    # actually changes, so every non-default value fails closed at config load time
+    # instead of silently no-op'ing.
     strategy = str(raw.get("strategy", "capacity-aware"))
+    if strategy != "capacity-aware":
+        raise ConfigError(
+            f"unsupported routing.strategy: {strategy!r} -- only 'capacity-aware' has a "
+            "runtime implementation"
+        )
     pc_raw = raw.get("provider_capacity", {})
     if not isinstance(pc_raw, dict):
         raise ConfigError("routing.provider_capacity must be a mapping")
     pc_extras = set(pc_raw) - {"preferred"}
     if pc_extras:
         raise ConfigError(f"unknown routing.provider_capacity keys: {join_keys(pc_extras)}")
-    provider_capacity = ProviderCapacityConfig(
-        preferred=_strict_bool(
-            pc_raw.get("preferred", True), "routing.provider_capacity.preferred"
-        )
+    preferred = _strict_bool(
+        pc_raw.get("preferred", True), "routing.provider_capacity.preferred"
     )
+    if not preferred:
+        raise ConfigError(
+            "routing.provider_capacity.preferred: false is not supported yet -- Router "
+            "always prefers fresh provider capacity data; there is no runtime "
+            "implementation for disabling that preference"
+        )
+    provider_capacity = ProviderCapacityConfig(preferred=preferred)
 
     le_raw = raw.get("local_estimate", {})
     if not isinstance(le_raw, dict):
@@ -263,11 +289,16 @@ def _parse_routing_config(raw: Mapping[str, Any]) -> RoutingConfig:
     le_extras = set(le_raw) - {"proactive_switch"}
     if le_extras:
         raise ConfigError(f"unknown routing.local_estimate keys: {join_keys(le_extras)}")
-    local_estimate = LocalEstimateConfig(
-        proactive_switch=_strict_bool(
-            le_raw.get("proactive_switch", False), "routing.local_estimate.proactive_switch"
-        )
+    proactive_switch = _strict_bool(
+        le_raw.get("proactive_switch", False), "routing.local_estimate.proactive_switch"
     )
+    if proactive_switch:
+        raise ConfigError(
+            "routing.local_estimate.proactive_switch: true is not supported yet -- no "
+            "runtime implementation exists for local-usage-estimate-driven proactive "
+            "agent switching"
+        )
+    local_estimate = LocalEstimateConfig(proactive_switch=proactive_switch)
     return RoutingConfig(
         strategy=strategy,
         provider_capacity=provider_capacity,
@@ -307,6 +338,9 @@ def _parse_execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
     agent_timeout_seconds = _strict_pos_int(
         raw.get("agent_timeout_seconds", 300), "execution.agent_timeout_seconds"
     )
+    ci_monitoring = _strict_bool(
+        raw.get("ci_monitoring", False), "execution.ci_monitoring"
+    )
     return ExecutionConfig(
         concurrency=concurrency,
         max_agent_switches=max_switches,
@@ -315,6 +349,7 @@ def _parse_execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
         max_tasks_per_run=max_tasks,
         pause_running_policy=policy,
         agent_timeout_seconds=agent_timeout_seconds,
+        ci_monitoring=ci_monitoring,
     )
 
 
