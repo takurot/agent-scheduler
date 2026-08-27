@@ -6,11 +6,22 @@ from pathlib import Path
 from subsched.contract import (
     CONTRACT_BEGIN,
     CONTRACT_END,
+    MANAGED_CONTRACT,
     bootstrap_task_files,
     ensure_contract_block,
     validate_contract_in_file,
 )
 from subsched.models import Issue, Task
+
+
+def test_managed_contract_forbids_close_keywords_in_commit_messages() -> None:
+    """Regression test for #140: the managed AGENTS.md/CLAUDE.md contract block must
+    explicitly warn against GitHub auto-close keywords in commit messages, not just
+    against pushing/merging/closing the issue directly."""
+    assert "Closes" in MANAGED_CONTRACT
+    assert "Fixes" in MANAGED_CONTRACT
+    assert "Resolves" in MANAGED_CONTRACT
+    assert "commit message" in MANAGED_CONTRACT
 
 
 def test_ensure_contract_block_creates_new_file(tmp_path: Path) -> None:

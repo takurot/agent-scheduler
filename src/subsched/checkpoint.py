@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from subsched.models import AgentResult
+from subsched.storage import atomic_write_secure_bytes, secure_directory
 
 MAX_CHECKPOINT_OUTPUT_BYTES = 65536
 
@@ -83,14 +84,20 @@ def capture_mechanical_checkpoint(
 
 
 def save_checkpoint(worktree_dir: Path, checkpoint: MechanicalCheckpoint) -> Path:
-    """Persist mechanical checkpoint under .ai/checkpoints/<issue>.json."""
+    """Persist mechanical checkpoint under .ai/checkpoints/<issue>.json.
+
+    #143: checkpoints can contain changed-file lists, test output, and agent output
+    summaries -- runtime metadata other users on the same machine should not be able to
+    read. The directory and file are hardened to 0700/0600 (matching JsonStateStore's
+    backup handling) via atomic_write_secure_bytes/secure_directory, which also refuse a
+    symlinked target and repair permissions on any pre-existing checkpoint left behind
+    by an older subsched version, without deleting it.
+    """
     checkpoints_dir = worktree_dir / ".ai" / "checkpoints"
-    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    secure_directory(checkpoints_dir)
     target = checkpoints_dir / f"{checkpoint.issue_number}.json"
-    temp_target = checkpoints_dir / f"{checkpoint.issue_number}.json.tmp"
     data = json.dumps(checkpoint.to_dict(), indent=2)
-    temp_target.write_text(data, encoding="utf-8")
-    temp_target.replace(target)
+    atomic_write_secure_bytes(target, data.encode("utf-8"))
     return target
 
 
