@@ -389,7 +389,11 @@ def test_native_run_drives_scheduler_to_complete_and_opens_pr(
         encoding="utf-8",
     )
 
+    captured_prompts: list[str] = []
+
     def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        if request.stdin_payload:
+            captured_prompts.append(request.stdin_payload.decode("utf-8"))
         return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
 
     monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
@@ -420,4 +424,9 @@ def test_native_run_drives_scheduler_to_complete_and_opens_pr(
     status = invoke(repo_dir, "status", "--verbose")
     assert "COMPLETE" in status.output
     assert "PR #7" in status.output
+
+    # #139: the configured verification.commands ('true') must actually reach the native
+    # worker's prompt, not just the Scheduler's post-worker gate.
+    assert captured_prompts
+    assert any("- true" in prompt for prompt in captured_prompts)
 
