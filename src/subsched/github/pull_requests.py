@@ -179,6 +179,125 @@ def lookup_existing_pr(
         return None
 
 
+class MergedPrCheckKind(StrEnum):
+    NONE = "NONE"
+    CONFIRMED = "CONFIRMED"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+@dataclass(frozen=True, slots=True)
+class MergedPrCheckResult:
+    kind: MergedPrCheckKind
+    pr_number: int | None = None
+    reason: str = ""
+
+
+def check_merged_pr_for_issue(
+    repo: str,
+    issue_number: int,
+    env: dict[str, str] | None = None,
+    timeout_seconds: float = 30.0,
+) -> MergedPrCheckResult:
+    """Look for a merged PR that already implements this issue (#146: without this,
+    discovery re-adds a merged-but-still-open issue as READY and duplicates work).
+
+    Untrusted-schema handling: PR body/branch-name content from GitHub is never trusted
+    blindly. Only a merged PR whose body starts with the exact Scheduler-generated
+    "Implements work for #N." prefix (see build_pr_body) *and* whose branch matches the
+    Scheduler's own naming convention (subsched/issue-N) is treated as CONFIRMED -- a
+    strong, structural signal that the Scheduler itself created and merged this PR.
+    Anything weaker (a merged PR that merely mentions the issue number, multiple
+    candidates, or a gh failure) is AMBIGUOUS and must not be silently treated as
+    confirmed-safe; callers fail closed on AMBIGUOUS by excluding the issue from READY
+    and escalating it to NEEDS_HUMAN for manual review, matching the SPEC principle that
+    the Scheduler never auto-closes or auto-completes ambiguous GitHub state.
+    """
+    argv = [
+        "gh",
+        "pr",
+        "list",
+        "--repo",
+        repo,
+        "--search",
+        f"#{issue_number} in:body",
+        "--state",
+        "merged",
+        "--json",
+        "number,headRefName,body",
+        "--limit",
+        "10",
+    ]
+    try:
+        res = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_seconds,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return MergedPrCheckResult(
+            kind=MergedPrCheckKind.AMBIGUOUS,
+            reason=(
+                f"could not verify whether issue #{issue_number} already has a merged "
+                "PR (gh invocation failed); review manually before treating it as READY"
+            ),
+        )
+    if res.returncode != 0:
+        return MergedPrCheckResult(
+            kind=MergedPrCheckKind.AMBIGUOUS,
+            reason=(
+                f"could not verify whether issue #{issue_number} already has a merged "
+                f"PR (gh exited {res.returncode}); review manually before treating it as READY"
+            ),
+        )
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return MergedPrCheckResult(
+            kind=MergedPrCheckKind.AMBIGUOUS,
+            reason=(
+                f"could not verify whether issue #{issue_number} already has a merged "
+                "PR (unparseable gh output); review manually before treating it as READY"
+            ),
+        )
+    if not isinstance(data, list) or not data:
+        return MergedPrCheckResult(kind=MergedPrCheckKind.NONE)
+
+    expected_prefix = f"Implements work for #{issue_number}."
+    expected_branch = f"subsched/issue-{issue_number}"
+    confirmed: list[int] = []
+    numbers: list[str] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        try:
+            number = int(item["number"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        numbers.append(str(number))
+        head_ref = str(item.get("headRefName", ""))
+        body = str(item.get("body", ""))
+        if body.startswith(expected_prefix) and head_ref == expected_branch:
+            confirmed.append(number)
+
+    if len(data) == 1 and len(confirmed) == 1:
+        return MergedPrCheckResult(kind=MergedPrCheckKind.CONFIRMED, pr_number=confirmed[0])
+
+    return MergedPrCheckResult(
+        kind=MergedPrCheckKind.AMBIGUOUS,
+        reason=(
+            f"issue #{issue_number} is referenced by merged PR(s) "
+            f"{', '.join(numbers) or '(unparseable)'} but the match could not be "
+            "confirmed automatically (unexpected body/branch format); review manually "
+            "before treating this issue as READY"
+        ),
+    )
+
+
 def create_or_get_pull_request(
     task: Task,
     branch_name: str,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -9,6 +9,7 @@ from typing import Protocol
 
 from subsched.contract import bootstrap_task_files
 from subsched.events import Clock, EventSource, EventType, SystemClock
+from subsched.github.pull_requests import MergedPrCheckKind, MergedPrCheckResult
 from subsched.models import (
     AgentResult,
     AgentResultKind,
@@ -70,6 +71,7 @@ class Scheduler:
         repo: str | None = None,
         base_branch: str = "main",
         structured_logger: StructuredLogger | None = None,
+        merged_pr_checker: Callable[[int], MergedPrCheckResult] | None = None,
     ) -> None:
         self.store = store
         self.router = router
@@ -79,6 +81,8 @@ class Scheduler:
         self.clock = clock or SystemClock()
         self.event_sources = event_sources
         self.structured_logger = structured_logger
+        self.merged_pr_checker = merged_pr_checker
+        self.discovery_notes: tuple[tuple[int, str], ...] = ()
         self.verification_commands = verification_commands
         if verification_timeout_seconds <= 0:
             raise ValueError("verification_timeout_seconds must be positive")
@@ -124,11 +128,42 @@ class Scheduler:
     ) -> None:
         effective_exclude = frozenset({"security-sensitive"}).union(exclude_labels)
         existing = {task.issue_number for task in self.tasks}
-        additions = tuple(
-            Task.from_issue(issue)
+        candidates = [
+            issue
             for issue in issues
             if issue.number not in existing and not effective_exclude.intersection(issue.labels)
-        )
+        ]
+
+        additions: list[Task] = []
+        notes: list[tuple[int, str]] = []
+        for issue in candidates:
+            # #146: an open Issue whose implementation PR is already merged must not be
+            # rediscovered as READY (duplicate work). A CONFIRMED match (the Scheduler's
+            # own PR body/branch convention) is excluded entirely; anything weaker
+            # (AMBIGUOUS) fails closed to NEEDS_HUMAN instead of silently proceeding.
+            if self.merged_pr_checker is not None:
+                check = self.merged_pr_checker(issue.number)
+                if check.kind is MergedPrCheckKind.CONFIRMED:
+                    notes.append(
+                        (
+                            issue.number,
+                            f"excluded: merged PR #{check.pr_number} already implements "
+                            "this issue",
+                        )
+                    )
+                    continue
+                if check.kind is MergedPrCheckKind.AMBIGUOUS:
+                    flagged = replace(
+                        Task.from_issue(issue),
+                        status=TaskState.NEEDS_HUMAN,
+                        needs_human_reason=check.reason,
+                    )
+                    additions.append(flagged)
+                    notes.append((issue.number, check.reason))
+                    continue
+            additions.append(Task.from_issue(issue))
+
+        self.discovery_notes = tuple(notes)
         if len(self.tasks) + len(additions) > self.max_tasks:
             raise ValueError(f"task limit exceeded ({self.max_tasks})")
         new_queue = self.queue.append(additions)

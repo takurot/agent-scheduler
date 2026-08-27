@@ -404,7 +404,22 @@ AND
 not blocked
 AND
 not associated with active scheduler task
+AND
+not confirmed already implemented by a merged PR
 ```
+
+最後の条件（#146）：discovery時に、対象Issueを実装した既存のmerged PRが無いかを`gh pr list
+--search`で確認する。GitHub上のPR body/branch名はuntrusted schemaとして扱い、Schedulerが
+自身の`create_or_get_pull_request()`で生成した規約（PR bodyが`Implements work for #N.`で
+始まり、branchが`subsched/issue-N`）に厳密一致する場合のみ`CONFIRMED`とし、その場合は
+Issueを新規READY taskとして一切discoveryに追加しない（重複実装を防ぐ）。issue番号への
+言及はあるがこの規約に厳密一致しない場合（手動で作成したPRなど）や`gh`呼び出し自体が
+失敗した場合は`AMBIGUOUS`としてfail closedにする：Issueはdiscoveryされるが`READY`では
+なく`NEEDS_HUMAN`から開始し、理由を`Task.needs_human_reason`に記録する。
+
+この確認は`subsched run --allow-rediscovery`で明示的に無効化できる（既定では無効化しない
+= fail closedがdefault）。`--dry-run`でも同じ確認を行い、結果を discovery note として
+出力する。
 
 設定例：
 
