@@ -64,6 +64,134 @@ def test_explicit_issue_dry_run_persists_queue_and_status(tmp_path: Path) -> Non
     assert "2" in status.output
 
 
+def test_run_prints_effective_config_summary_before_discovery(tmp_path: Path) -> None:
+    """Regression test for #144: repo, selection mode/target, native/write policy, and
+    verification commands must be visible before any discovery or state mutation."""
+    result = invoke(tmp_path, "run", "--repo", "owner/project", "--issues", "101", "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "Effective configuration:" in result.output
+    assert "repo: owner/project" in result.output
+    assert "selection: issues=101" in result.output
+    assert "execution: dry-run" in result.output
+    assert "write policy:" in result.output
+    assert "verification commands:" in result.output
+
+
+def test_run_with_list_mode_config_needs_no_cli_issues_override(
+    tmp_path: Path,
+) -> None:
+    """Regression test for #144: github.mode: list plus github.issues must be enough for
+    a config file alone to define a reproducible explicit-Issue run, with no --issues
+    CLI argument required."""
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\n  mode: list\n  issues:\n    - 101\n    - 7\n",
+        encoding="utf-8",
+    )
+
+    result = invoke(tmp_path, "run", "--config", str(config_file), "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "2 issue(s) discovered" in result.output
+    assert "selection: issues=101,7" in result.output
+
+    status = invoke(tmp_path, "status", "--verbose")
+    assert "#101" in status.output
+    assert "#7" in status.output
+    assert "#103" not in status.output
+
+
+def test_cli_issues_override_takes_precedence_over_config_list_mode(
+    tmp_path: Path,
+) -> None:
+    """Regression test for #144: CLI --issues must override config.github.mode: list's
+    issue set, not merge with or be overridden by it -- locking down the documented
+    CLI-override > config > safe-default precedence."""
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\n  mode: list\n  issues:\n    - 101\n",
+        encoding="utf-8",
+    )
+
+    result = invoke(
+        tmp_path, "run", "--config", str(config_file), "--issues", "103", "--dry-run"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 issue(s) discovered" in result.output
+    assert "selection: issues=103" in result.output
+
+    status = invoke(tmp_path, "status", "--verbose")
+    assert "#103" in status.output
+    assert "#101" not in status.output
+
+
+def test_config_validate_prints_summary_with_no_state_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#144: `subsched config validate` must resolve and print the same effective
+    configuration `run` would use, without ever contacting GitHub or touching scheduler
+    state."""
+    list_open_calls: list[str] = []
+
+    def list_open(
+        self: GitHubIssueSource, repo: str, *, label: str | None = None
+    ) -> tuple[Issue, ...]:
+        list_open_calls.append(repo)
+        return ()
+
+    monkeypatch.setattr(GitHubIssueSource, "list_open", list_open)
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\n  mode: list\n  issues:\n    - 101\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["--repository", str(tmp_path), "config", "validate", "--config", str(config_file)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Effective configuration:" in result.output
+    assert "repo: owner/project" in result.output
+    assert "selection: issues=101" in result.output
+    assert "Configuration is valid." in result.output
+    assert list_open_calls == []
+    assert not (tmp_path / ".ai" / "scheduler.json").exists()
+
+
+def test_config_validate_rejects_malformed_issues_like_run_would(tmp_path: Path) -> None:
+    """Regression test for #144 code review: config validate previously stored the raw
+    --issues string without ever calling the same parser run() uses, so it reported
+    'Configuration is valid.' for a value run() would reject with exit code 2."""
+    validate_result = runner.invoke(
+        app,
+        [
+            "--repository",
+            str(tmp_path),
+            "config",
+            "validate",
+            "--repo",
+            "owner/project",
+            "--issues",
+            "abc,xyz",
+            "--dry-run",
+        ],
+    )
+    assert validate_result.exit_code != 0
+    assert "Configuration is valid." not in validate_result.output
+
+    run_result = invoke(
+        tmp_path, "run", "--repo", "owner/project", "--issues", "abc,xyz", "--dry-run"
+    )
+    assert run_result.exit_code != 0
+    # Both commands must reject the same malformed input the same way.
+    assert validate_result.exit_code == run_result.exit_code
+
+
 def test_run_without_repository_option_uses_git_repository_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

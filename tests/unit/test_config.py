@@ -184,6 +184,66 @@ def test_config_strict_validation(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_config_list_mode_carries_issue_numbers(tmp_path: Path) -> None:
+    """Regression test for #144: github.mode: list previously had no field to actually
+    carry the Issue numbers, so a config file alone could never define a reproducible
+    explicit-Issue run."""
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\n  mode: list\n  issues:\n    - 103\n    - 101\n",
+        encoding="utf-8",
+    )
+    config = load_config(path)
+    assert config.github.mode == "list"
+    assert config.github.issues == (103, 101)
+
+
+def test_config_list_mode_requires_non_empty_issues(tmp_path: Path) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text("github:\n  repo: o/r\n  mode: list\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match=r"non-empty github\.issues"):
+        load_config(path)
+
+
+def test_config_list_mode_rejects_empty_issues_list(tmp_path: Path) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\n  mode: list\n  issues: []\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match=r"non-empty github\.issues"):
+        load_config(path)
+
+
+def test_config_rejects_duplicate_issue_numbers(tmp_path: Path) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\n  mode: list\n  issues:\n    - 101\n    - 101\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="duplicate issue numbers"):
+        load_config(path)
+
+
+def test_config_rejects_non_positive_issue_numbers(tmp_path: Path) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\n  mode: list\n  issues:\n    - 0\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="positive integer"):
+        load_config(path)
+
+
+def test_config_rejects_issues_list_with_non_list_mode(tmp_path: Path) -> None:
+    """Fail-fast on mismatched intent: github.issues set but mode isn't 'list' would
+    otherwise be silently ignored, masking an operator's actual intent."""
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\n  mode: label\n  issues:\n    - 101\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match=r"only used when github\.mode is 'list'"):
+        load_config(path)
+
+
 def test_parse_duration() -> None:
     assert parse_duration("6h") == 21600
     assert parse_duration("30m") == 1800

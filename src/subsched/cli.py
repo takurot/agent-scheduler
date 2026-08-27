@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -33,6 +34,8 @@ from subsched.structured_logger import StructuredLogger
 from subsched.tasks.worktree import GitWorktreeAdapter, WorktreeAdapter, WorktreeError
 
 app = typer.Typer(no_args_is_help=True, help="Subscription-aware coding agent scheduler")
+config_app = typer.Typer(no_args_is_help=True, help="Config inspection and validation")
+app.add_typer(config_app, name="config")
 RepositoryOption = Annotated[
     Path | None,
     typer.Option("--repository", hidden=True, file_okay=False, resolve_path=True),
@@ -65,33 +68,30 @@ def _parse_issue_numbers(value: str) -> tuple[int, ...]:
     return numbers
 
 
-@app.command()
-def run(
-    ctx: typer.Context,
-    query: Annotated[
-        str | None,
-        typer.Argument(help="Natural language instruction (e.g. 'GitHubのopen issueをすべて実行')"),
-    ] = None,
-    repo: Annotated[str | None, typer.Option("--repo", help="GitHub owner/repository")] = None,
-    label: Annotated[str | None, typer.Option("--label")] = None,
-    issues: Annotated[str | None, typer.Option("--issues")] = None,
-    config: Annotated[
-        Path | None, typer.Option("--config", help="Path to YAML configuration file")
-    ] = None,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Discover and persist only; do not invoke workers")
-    ] = False,
-    allow_native: Annotated[
-        bool, typer.Option("--allow-native", help="Explicitly enable native worker execution")
-    ] = False,
-) -> None:
-    """Discover issues and initialize the durable queue."""
-    context: Context = ctx.obj
-    try:
-        cfg = load_config(config) if config is not None else SchedulerConfig()
-    except ConfigError as error:
-        raise typer.BadParameter(str(error), param_hint="--config") from error
+@dataclass(frozen=True)
+class ResolvedIntent:
+    """The final repo/selection-mode decision after applying CLI override > natural
+    language query > config > safe default precedence (#144). Shared by `run` and
+    `config validate` so the two commands can never disagree about what a given
+    combination of flags/config actually means -- and so #98's future natural-language
+    intent echo has a single representation to build on instead of a second one.
+    """
 
+    cfg: SchedulerConfig
+    repo: str
+    label: str | None
+    # "all-open", a comma-separated issue-number string, or None (only when label is set).
+    issues: str | None
+
+
+def _resolve_intent(
+    *,
+    cfg: SchedulerConfig,
+    query: str | None,
+    repo: str | None,
+    label: str | None,
+    issues: str | None,
+) -> ResolvedIntent:
     resolved_repo = repo
     resolved_label = label
     resolved_issues = issues
@@ -125,12 +125,106 @@ def run(
         raise typer.BadParameter("select exactly one of --label or --issues")
 
     if resolved_label is None and resolved_issues is None:
+        # CLI --label/--issues (and natural-language query) are already applied above and
+        # take precedence over config -- this branch only runs when neither was given, so
+        # config.github.mode is consulted as the fallback, and a safe default error last.
         if cfg.github.mode == "all-open":
             resolved_issues = "all-open"
+        elif cfg.github.mode == "list" and cfg.github.issues:
+            resolved_issues = ",".join(str(n) for n in cfg.github.issues)
         elif cfg.github.mode == "label" and cfg.github.include_labels:
             resolved_label = cfg.github.include_labels[0]
         else:
             raise typer.BadParameter("select exactly one of --label or --issues")
+
+    # #144 code review: validate --issues syntax here (not only inside run(), after its
+    # native-opt-in gate) so config validate actually validates it too, instead of
+    # reporting "Configuration is valid." for a value run() would reject.
+    if resolved_issues is not None and resolved_issues != "all-open":
+        _parse_issue_numbers(resolved_issues)
+
+    return ResolvedIntent(cfg=cfg, repo=resolved_repo, label=resolved_label, issues=resolved_issues)
+
+
+def _format_effective_config_summary(
+    intent: ResolvedIntent, *, dry_run: bool, allow_native: bool
+) -> list[str]:
+    """One shared, redaction-safe summary of what a `run` (or `config validate`) call
+    would actually do -- repo, selection target, native/write policy, and verification
+    commands -- so an operator can confirm the effective configuration before any
+    discovery or state mutation happens (#144). Never includes Issue body, agent output,
+    or credentials; every value here is already validated config/CLI input.
+    """
+    if intent.label is not None:
+        selection = f"label={intent.label}"
+    elif intent.issues == "all-open":
+        selection = "all-open"
+    else:
+        selection = f"issues={intent.issues}"
+
+    if dry_run:
+        execution = "dry-run (discover and persist only; no worker/git/GitHub writes)"
+    elif allow_native:
+        execution = "native (workers will run; write policy below applies)"
+    else:
+        execution = "blocked (native not opted in; pass --allow-native or --dry-run)"
+
+    completion = intent.cfg.github.completion
+    push = not dry_run and completion.create_pr
+    commands = ", ".join(intent.cfg.verification.commands) or "(none configured)"
+
+    return [
+        "Effective configuration:",
+        f"  repo: {intent.repo}",
+        f"  selection: {selection}",
+        f"  execution: {execution}",
+        (
+            f"  write policy: push={push}, create_pr={completion.create_pr}, "
+            f"close_issue={completion.close_issue}"
+        ),
+        f"  verification commands: {commands}",
+    ]
+
+
+@app.command()
+def run(
+    ctx: typer.Context,
+    query: Annotated[
+        str | None,
+        typer.Argument(help="Natural language instruction (e.g. 'GitHubのopen issueをすべて実行')"),
+    ] = None,
+    repo: Annotated[str | None, typer.Option("--repo", help="GitHub owner/repository")] = None,
+    label: Annotated[str | None, typer.Option("--label")] = None,
+    issues: Annotated[str | None, typer.Option("--issues")] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", help="Path to YAML configuration file")
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Discover and persist only; do not invoke workers")
+    ] = False,
+    allow_native: Annotated[
+        bool, typer.Option("--allow-native", help="Explicitly enable native worker execution")
+    ] = False,
+) -> None:
+    """Discover issues and initialize the durable queue."""
+    context: Context = ctx.obj
+    try:
+        cfg = load_config(config) if config is not None else SchedulerConfig()
+    except ConfigError as error:
+        raise typer.BadParameter(str(error), param_hint="--config") from error
+
+    intent = _resolve_intent(cfg=cfg, query=query, repo=repo, label=label, issues=issues)
+    resolved_repo = intent.repo
+    resolved_label = intent.label
+    resolved_issues = intent.issues
+
+    # #144: shown before any GitHub discovery call or state mutation, so an operator can
+    # confirm repo/selection/native/write-policy/verification before anything happens --
+    # the same summary `config validate` prints with no discovery/mutation at all.
+    summary_lines = _format_effective_config_summary(
+        intent, dry_run=dry_run, allow_native=allow_native
+    )
+    typer.echo("\n".join(summary_lines))
 
     if not dry_run and not allow_native:
         typer.echo(
@@ -244,6 +338,40 @@ def run(
     counts = Counter(task.status.value for task in scheduler.tasks)
     for name in sorted(counts):
         typer.echo(f"{name:<22} {counts[name]}")
+
+
+@config_app.command("validate")
+def config_validate(
+    query: Annotated[
+        str | None,
+        typer.Argument(help="Natural language instruction (e.g. 'GitHubのopen issueをすべて実行')"),
+    ] = None,
+    repo: Annotated[str | None, typer.Option("--repo", help="GitHub owner/repository")] = None,
+    label: Annotated[str | None, typer.Option("--label")] = None,
+    issues: Annotated[str | None, typer.Option("--issues")] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", help="Path to YAML configuration file")
+    ] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    allow_native: Annotated[bool, typer.Option("--allow-native")] = False,
+) -> None:
+    """Resolve and print the effective configuration `run` would use, with the exact
+    same --repo/--label/--issues/--config/--dry-run/--allow-native overrides -- without
+    contacting GitHub, touching scheduler state, or invoking any worker. Use this to
+    confirm a config file (or a set of CLI overrides) resolves to what you expect before
+    actually running it (#144).
+    """
+    try:
+        cfg = load_config(config) if config is not None else SchedulerConfig()
+    except ConfigError as error:
+        raise typer.BadParameter(str(error), param_hint="--config") from error
+
+    intent = _resolve_intent(cfg=cfg, query=query, repo=repo, label=label, issues=issues)
+    summary_lines = _format_effective_config_summary(
+        intent, dry_run=dry_run, allow_native=allow_native
+    )
+    typer.echo("\n".join(summary_lines))
+    typer.echo("Configuration is valid.")
 
 
 @app.command()
