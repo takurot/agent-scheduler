@@ -537,6 +537,10 @@ def test_ci_monitoring_promotes_ready_for_review_to_complete(
     )
 
     def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        # #145: handoff.continuous defaults to true, so a compliant Agent must update
+        # the handoff before finishing or this otherwise-successful run gets escalated
+        # to NEEDS_HUMAN instead of exercising the CI-monitoring path under test here.
+        _update_handoff(request.cwd, issue_number=1, title="Task 1")
         return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
 
     monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
@@ -712,6 +716,10 @@ def test_native_run_honors_create_pr_false(
     )
 
     def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        # #145: handoff.continuous defaults to true, so a compliant Agent must update
+        # the handoff before finishing or this otherwise-successful run gets escalated
+        # to NEEDS_HUMAN instead of exercising the create_pr=false path under test here.
+        _update_handoff(request.cwd, issue_number=1, title="Task 1")
         return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
 
     monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
