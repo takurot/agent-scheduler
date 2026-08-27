@@ -253,18 +253,35 @@ def _parse_agents_config(raw: Any) -> dict[str, AgentSettings]:
 
 
 def _parse_routing_config(raw: Mapping[str, Any]) -> RoutingConfig:
+    # #138: Router only ever implements a single fixed capacity-aware strategy that
+    # always prefers fresh provider capacity data -- there is no runtime consumer for a
+    # different strategy, for disabling that provider-capacity preference, or for
+    # local-usage-estimate-driven proactive switching. Accepting a non-default value here
+    # would let operators believe it took effect when Scheduler/Router behavior never
+    # actually changes, so every non-default value fails closed at config load time
+    # instead of silently no-op'ing.
     strategy = str(raw.get("strategy", "capacity-aware"))
+    if strategy != "capacity-aware":
+        raise ConfigError(
+            f"unsupported routing.strategy: {strategy!r} -- only 'capacity-aware' has a "
+            "runtime implementation"
+        )
     pc_raw = raw.get("provider_capacity", {})
     if not isinstance(pc_raw, dict):
         raise ConfigError("routing.provider_capacity must be a mapping")
     pc_extras = set(pc_raw) - {"preferred"}
     if pc_extras:
         raise ConfigError(f"unknown routing.provider_capacity keys: {join_keys(pc_extras)}")
-    provider_capacity = ProviderCapacityConfig(
-        preferred=_strict_bool(
-            pc_raw.get("preferred", True), "routing.provider_capacity.preferred"
-        )
+    preferred = _strict_bool(
+        pc_raw.get("preferred", True), "routing.provider_capacity.preferred"
     )
+    if not preferred:
+        raise ConfigError(
+            "routing.provider_capacity.preferred: false is not supported yet -- Router "
+            "always prefers fresh provider capacity data; there is no runtime "
+            "implementation for disabling that preference"
+        )
+    provider_capacity = ProviderCapacityConfig(preferred=preferred)
 
     le_raw = raw.get("local_estimate", {})
     if not isinstance(le_raw, dict):
@@ -272,11 +289,16 @@ def _parse_routing_config(raw: Mapping[str, Any]) -> RoutingConfig:
     le_extras = set(le_raw) - {"proactive_switch"}
     if le_extras:
         raise ConfigError(f"unknown routing.local_estimate keys: {join_keys(le_extras)}")
-    local_estimate = LocalEstimateConfig(
-        proactive_switch=_strict_bool(
-            le_raw.get("proactive_switch", False), "routing.local_estimate.proactive_switch"
-        )
+    proactive_switch = _strict_bool(
+        le_raw.get("proactive_switch", False), "routing.local_estimate.proactive_switch"
     )
+    if proactive_switch:
+        raise ConfigError(
+            "routing.local_estimate.proactive_switch: true is not supported yet -- no "
+            "runtime implementation exists for local-usage-estimate-driven proactive "
+            "agent switching"
+        )
+    local_estimate = LocalEstimateConfig(proactive_switch=proactive_switch)
     return RoutingConfig(
         strategy=strategy,
         provider_capacity=provider_capacity,
