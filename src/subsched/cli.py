@@ -190,6 +190,10 @@ def run(
             worker=NativeWorker(agent_timeout_seconds=float(cfg.execution.agent_timeout_seconds)),
             worktree_root=worktree_root,
             worktree_adapter=worktree_adapter,
+            # #138: was defined in config but never reached TaskQueue's dispatch-order
+            # sort key, so label_scores appeared to be honored (config loaded without
+            # error) but dispatch order stayed plain issue-number order regardless.
+            label_scores=dict(cfg.queue.priority.label_scores),
             verification_commands=cfg.verification.commands,
             verification_timeout_seconds=float(cfg.verification.timeout_seconds),
             concurrency=cfg.execution.concurrency,

@@ -421,3 +421,83 @@ def test_native_run_drives_scheduler_to_complete_and_opens_pr(
     assert "COMPLETE" in status.output
     assert "PR #7" in status.output
 
+
+def test_queue_priority_label_scores_changes_dispatch_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #138: queue.priority.label_scores was defined in config and
+    fully implemented by TaskQueue._sort_key(), but cli.py never passed it into the
+    Scheduler(...) construction -- so the config loaded without error (looked effective
+    to an operator) while dispatch order silently stayed plain issue-number order. This
+    drives a real --allow-native run over three issues and asserts the labeled,
+    higher-score issue dispatches before lower/no-score issues, and that a tie (equal or
+    absent score) falls back to ascending issue number."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    def list_open(
+        self: GitHubIssueSource, repo: str, *, label: str | None = None
+    ) -> tuple[Issue, ...]:
+        return (
+            Issue(number=101, title="no label"),
+            Issue(number=1, title="no label, lowest issue number"),
+            Issue(number=103, title="high priority", labels=("priority-high",)),
+        )
+
+    monkeypatch.setattr(GitHubIssueSource, "list_open", list_open)
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+    remote_dir = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(remote_dir)], check=True, capture_output=True
+    )
+    _git(repo_dir, "remote", "add", "origin", str(remote_dir))
+    _git(repo_dir, "push", "-q", "-u", "origin", "main")
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\n"
+        "verification:\n  commands:\n    - 'true'\n"
+        "queue:\n  priority:\n    label_scores:\n      priority-high: 100\n",
+        encoding="utf-8",
+    )
+
+    dispatch_order: list[int] = []
+
+    def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        # NativeWorker sets cwd=worktree_root/f"issue-{issue_number}".
+        issue_number = int(request.cwd.name.removeprefix("issue-"))
+        dispatch_order.append(issue_number)
+        return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
+
+    monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
+    pr_number = iter(range(1, 100))
+    monkeypatch.setattr(
+        "subsched.github.pull_requests.create_or_get_pull_request",
+        lambda *a, **k: PullRequestResult(
+            kind=PullRequestResultKind.SUCCESS,
+            info=PullRequestInfo(
+                number=next(pr_number), url="https://example.invalid/pull/x", title="t", body="b"
+            ),
+        ),
+    )
+
+    result = invoke(
+        repo_dir,
+        "run",
+        "--config",
+        str(config_file),
+        "--issues",
+        "1,101,103",
+        "--allow-native",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "3 issue(s) discovered and persisted" in result.output
+
+    # 103 has a configured label score and must dispatch first; 1 and 101 are tied
+    # (no matching label) and must fall back to ascending issue number.
+    assert dispatch_order == [103, 1, 101]
