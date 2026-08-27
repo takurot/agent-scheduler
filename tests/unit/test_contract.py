@@ -24,6 +24,19 @@ def test_managed_contract_forbids_close_keywords_in_commit_messages() -> None:
     assert "commit message" in MANAGED_CONTRACT
 
 
+def test_repository_agents_and_claude_md_carry_a_valid_contract_block() -> None:
+    """Regression test: the actual repository-root AGENTS.md/CLAUDE.md must carry a
+    byte-identical MANAGED_CONTRACT block, or every native dispatch fails closed with
+    AgentContractError via validate_dispatch_preconditions() -- silently, since nothing
+    else exercises the *real* files (only synthetic tmp_path fixtures did before this
+    test). This caught a real drift: MANAGED_CONTRACT gained a paragraph for #140 that
+    was never propagated into the actual AGENTS.md/CLAUDE.md on disk."""
+    repo_root = Path(__file__).resolve().parents[2]
+
+    assert validate_contract_in_file(repo_root / "AGENTS.md") is True
+    assert validate_contract_in_file(repo_root / "CLAUDE.md") is True
+
+
 def test_ensure_contract_block_creates_new_file(tmp_path: Path) -> None:
     path = tmp_path / "AGENTS.md"
     ensure_contract_block(path)
