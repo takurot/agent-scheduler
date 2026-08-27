@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
+from subsched.gitenv import git_safe_env
 from subsched.models import Capacity, Task
 
 SCHEMA_VERSION = 1
@@ -91,6 +92,7 @@ def find_repository_root(start: Path, *, run: RunCommand | None = None) -> Path:
             text=True,
             timeout=10,
             check=False,
+            env=git_safe_env(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return start
