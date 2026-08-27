@@ -513,9 +513,12 @@ def test_find_repository_root_falls_back_on_nonzero_exit(tmp_path: Path) -> None
     assert root == tmp_path
 
 
-def test_find_repository_root_strips_git_location_override_env_vars(tmp_path: Path) -> None:
+def test_find_repository_root_strips_git_location_override_env_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A leaked GIT_DIR/GIT_WORK_TREE must never redirect the probe away from `start`
     (issue #147)."""
+    monkeypatch.setenv("GIT_DIR", "/leaked/.git")
     captured: dict[str, object] = {}
 
     def spying_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:

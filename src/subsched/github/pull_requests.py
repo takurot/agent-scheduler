@@ -8,6 +8,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from subsched.agents.process import redact_sensitive_command_audit
+from subsched.gitenv import git_safe_env
 from subsched.models import Task
 
 # Shared between the PR body sanitizer (_strip_close_keywords) and the commit-message
@@ -90,7 +91,7 @@ def find_close_keyword_commits(
             text=True,
             errors="replace",
             timeout=timeout_seconds,
-            env=env,
+            env=git_safe_env(env),
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
