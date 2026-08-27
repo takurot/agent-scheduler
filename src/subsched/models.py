@@ -92,6 +92,12 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
             TaskState.WAITING_CAPACITY,
             TaskState.FAILED,
             TaskState.CANCELLED,
+            # #145: a stale/invalid handoff detected by readback right after the worker
+            # returns (before any other outcome-specific transition runs) is escalated
+            # directly from IN_PROGRESS, not routed through the normal retry/capacity
+            # logic -- handoff integrity is a distinct safety property from whether the
+            # Agent itself reported success or failure.
+            TaskState.NEEDS_HUMAN,
         }
     ),
     TaskState.VERIFYING: frozenset(

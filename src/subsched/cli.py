@@ -199,6 +199,10 @@ def run(
             push_enabled=not dry_run,
             repo=resolved_repo,
             structured_logger=StructuredLogger(context.store.runtime_dir / "scheduler.jsonl"),
+            # #145: gives handoff.continuous an actual runtime meaning (readback
+            # validation at every worker-end boundary) instead of remaining a
+            # best-effort natural-language instruction with no observable effect.
+            handoff_continuous=cfg.handoff.continuous,
         )
     except (ValueError, StateCorruptionError) as error:
         typer.echo(f"State error: {error}", err=True)

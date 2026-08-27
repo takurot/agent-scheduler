@@ -78,6 +78,86 @@ def parse_semantic_handoff(content: str) -> SemanticHandoff | None:
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class HandoffReadbackResult:
+    """Outcome of validating a handoff file at a worker-end boundary (#145): schema,
+    Issue identity, and timestamp advancement since dispatch. `reason` is populated
+    (and safe to persist/log -- no raw agent output, no Issue body) whenever `ok` is
+    False.
+    """
+
+    ok: bool
+    reason: str = ""
+
+
+def _parse_handoff_timestamp(raw_timestamp: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(raw_timestamp.strip())
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def readback_handoff(
+    worktree_dir: Path, task: Task, *, dispatched_at: datetime
+) -> HandoffReadbackResult:
+    """Validate the handoff file after a worker invocation ends (#145): schema, Issue
+    identity, and timestamp advancement since dispatch. Meant to be called at every
+    worker-end boundary (normal completion, capacity event, timeout, failure) so
+    `handoff.continuous` has an actual runtime-observable meaning instead of being a
+    best-effort natural-language instruction the Agent may or may not follow.
+    """
+    handoff_file = worktree_dir / ".ai" / "handoffs" / f"{task.issue_number}.md"
+    if not handoff_file.is_file():
+        return HandoffReadbackResult(False, "handoff file missing after worker invocation")
+    try:
+        content = handoff_file.read_text(encoding="utf-8")
+    except OSError as error:
+        return HandoffReadbackResult(False, f"handoff file unreadable: {error}")
+
+    parsed = parse_semantic_handoff(content)
+    if parsed is None:
+        return HandoffReadbackResult(
+            False, "handoff schema invalid or missing required sections"
+        )
+    if parsed.issue_number != task.issue_number:
+        return HandoffReadbackResult(
+            False,
+            f"handoff Issue identity mismatch: expected #{task.issue_number}, "
+            f"found #{parsed.issue_number}",
+        )
+
+    parsed_ts = _parse_handoff_timestamp(parsed.timestamp)
+    if parsed_ts is None:
+        return HandoffReadbackResult(
+            False, f"handoff timestamp is not a valid ISO 8601 value: {parsed.timestamp!r}"
+        )
+    if parsed_ts <= dispatched_at:
+        return HandoffReadbackResult(
+            False,
+            f"handoff timestamp ({parsed_ts.isoformat()}) did not advance past dispatch "
+            f"time ({dispatched_at.isoformat()})",
+        )
+    return HandoffReadbackResult(True)
+
+
+def can_recover_from_checkpoint(
+    worktree_dir: Path, task: Task, *, dispatched_at: datetime
+) -> bool:
+    """A stale/invalid handoff can still be safely continued (#145) if a mechanical
+    checkpoint (#23) -- which is captured mechanically by the Scheduler itself, not
+    self-reported by the Agent -- proves the same or newer progress happened, so the
+    Scheduler is not relying solely on the Agent's own semantic narration.
+    """
+    from subsched.checkpoint import load_checkpoint
+
+    checkpoint = load_checkpoint(worktree_dir, task.issue_number)
+    if checkpoint is None or checkpoint.issue_number != task.issue_number:
+        return False
+    checkpoint_ts = _parse_handoff_timestamp(checkpoint.timestamp)
+    return checkpoint_ts is not None and checkpoint_ts > dispatched_at
+
+
 def quarantine_corrupt_handoff(handoff_path: Path) -> Path:
     """Move a corrupted handoff file to quarantine with a timestamp."""
     quarantine_dir = handoff_path.parent / "quarantine"

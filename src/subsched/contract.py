@@ -81,7 +81,9 @@ def validate_contract_in_file(path: Path) -> bool:
     return CONTRACT_BEGIN in content and CONTRACT_END in content and MANAGED_CONTRACT in content
 
 
-def bootstrap_task_files(worktree_dir: Path, task: Task, issue: Issue | None = None) -> None:
+def bootstrap_task_files(
+    worktree_dir: Path, task: Task, issue: Issue | None = None, *, now: datetime | None = None
+) -> None:
     ai_dir = worktree_dir / ".ai"
     tasks_dir = ai_dir / "tasks"
     handoffs_dir = ai_dir / "handoffs"
@@ -104,7 +106,11 @@ def bootstrap_task_files(worktree_dir: Path, task: Task, issue: Issue | None = N
 
     handoff_file = handoffs_dir / f"{task.issue_number}.md"
     if not handoff_file.exists():
-        timestamp = datetime.now(UTC).isoformat()
+        # #145: stamped with the caller's logical `now` (the Scheduler's own dispatch
+        # clock) when supplied, not always real wall-clock time -- so a subsequent
+        # handoff-freshness readback comparing against that same `now` reference isn't
+        # thrown off by the real-time gap between capturing `now` and this write.
+        timestamp = (now or datetime.now(UTC)).isoformat()
         handoff_content = f"""# Issue
 
 #{task.issue_number} {task.title}
