@@ -410,7 +410,11 @@ def test_native_run_drives_scheduler_to_ready_for_review_and_opens_pr(
         encoding="utf-8",
     )
 
+    captured_prompts: list[str] = []
+
     def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        if request.stdin_payload:
+            captured_prompts.append(request.stdin_payload.decode("utf-8"))
         return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
 
     monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
@@ -663,4 +667,9 @@ def test_dry_run_overrides_create_pr_true_and_skips_all_github_writes(
     assert "Effective write policy:" in result.output
     assert "push=False" in result.output
     assert "create_pr=True" in result.output
+
+    # #139: the configured verification.commands ('true') must actually reach the native
+    # worker's prompt, not just the Scheduler's post-worker gate.
+    assert captured_prompts
+    assert any("- true" in prompt for prompt in captured_prompts)
 

@@ -222,7 +222,12 @@ def run(
                 AgentConfig(name, priority=settings.priority, enabled=settings.enabled)
                 for name, settings in cfg.agents.items()
             ),
-            worker=NativeWorker(agent_timeout_seconds=float(cfg.execution.agent_timeout_seconds)),
+            worker=NativeWorker(
+                agent_timeout_seconds=float(cfg.execution.agent_timeout_seconds),
+                # #139: same tuple passed to the Scheduler's verification_commands=
+                # below, so the worker prompt and the post-worker gate never diverge.
+                verification_commands=cfg.verification.commands,
+            ),
             worktree_root=worktree_root,
             worktree_adapter=worktree_adapter,
             verification_commands=cfg.verification.commands,
