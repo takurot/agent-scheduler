@@ -374,3 +374,29 @@ def test_parse_natural_language_instruction() -> None:
 
     intent3 = parse_natural_language_instruction("issue #101, #103を実行")
     assert intent3.issues == "101,103"
+
+
+@pytest.mark.parametrize("policy", ["abort", "cancel"])
+def test_pause_running_policy_rejects_unimplemented_values(
+    tmp_path: Path, policy: str
+) -> None:
+    """Regression test for #137: abort/cancel currently have no runtime implementation
+    (no process-group control, no Task state transition). Accepting them and silently
+    doing nothing would be a fail-open safety config -- config load must reject them
+    until they are actually implemented."""
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        f"github:\n  repo: o/r\nexecution:\n  pause_running_policy: {policy}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="not supported"):
+        load_config(path)
+
+
+def test_pause_running_policy_continue_is_accepted(tmp_path: Path) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\nexecution:\n  pause_running_policy: continue\n",
+        encoding="utf-8",
+    )
+    assert load_config(path).execution.pause_running_policy == "continue"
