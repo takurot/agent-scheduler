@@ -18,6 +18,7 @@ class ProductivityMetrics:
     issues_implemented: int
     prs_created: int
     autonomous_completion_rate: float | None
+    issues_ready_for_review: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -62,6 +63,7 @@ def calculate_metrics(tasks: Iterable[Task]) -> SchedulerMetrics:
         if t.status in {TaskState.READY_FOR_REVIEW, TaskState.COMPLETE, TaskState.PR_READY}
     ]
     num_implemented = len(implemented)
+    num_ready_for_review = sum(1 for t in attempted if t.status is TaskState.READY_FOR_REVIEW)
 
     num_prs = sum(1 for t in task_list if t.pr is not None)
     auto_rate = (
@@ -91,6 +93,7 @@ def calculate_metrics(tasks: Iterable[Task]) -> SchedulerMetrics:
         issues_implemented=num_implemented,
         prs_created=num_prs,
         autonomous_completion_rate=auto_rate,
+        issues_ready_for_review=num_ready_for_review,
     )
 
     reliability = ReliabilityMetrics(
@@ -120,6 +123,7 @@ def format_run_report(metrics: SchedulerMetrics) -> str:
         "--- Productivity Metrics ---",
         f"Issues Attempted: {prod.issues_attempted}",
         f"Issues Implemented: {prod.issues_implemented}",
+        f"Issues Ready For Review: {prod.issues_ready_for_review}",
         f"PRs Created: {prod.prs_created}",
     ]
     if prod.autonomous_completion_rate is not None:
@@ -170,6 +174,7 @@ def format_run_report_markdown(metrics: SchedulerMetrics) -> str:
         "| --- | --- |",
         f"| Issues Attempted | {prod.issues_attempted} |",
         f"| Issues Implemented | {prod.issues_implemented} |",
+        f"| Issues Ready For Review | {prod.issues_ready_for_review} |",
         f"| PRs Created | {prod.prs_created} |",
     ]
     if prod.autonomous_completion_rate is not None:
