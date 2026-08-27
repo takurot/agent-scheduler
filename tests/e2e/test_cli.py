@@ -755,3 +755,87 @@ def test_queue_priority_label_scores_changes_dispatch_order(
     # 103 has a configured label score and must dispatch first; 1 and 101 are tied
     # (no matching label) and must fall back to ascending issue number.
     assert dispatch_order == [103, 1, 101]
+
+
+def test_native_run_produces_jsonl_lifecycle_timeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #141: a successful native run previously produced zero
+    structured lifecycle events (only a worker exception path was wired to the logger) --
+    .ai/runtime/scheduler.jsonl did not even exist after a normal COMPLETE run. This
+    asserts the full expected event timeline is present and the file is permission-
+    hardened, matching #143's runtime-state hardening."""
+    import shutil
+    import stat
+    import sys
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+    remote_dir = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(remote_dir)], check=True, capture_output=True
+    )
+    _git(repo_dir, "remote", "add", "origin", str(remote_dir))
+    _git(repo_dir, "push", "-q", "-u", "origin", "main")
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\nverification:\n  commands:\n    - 'true'\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
+
+    monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
+    monkeypatch.setattr(
+        "subsched.github.pull_requests.create_or_get_pull_request",
+        lambda *a, **k: PullRequestResult(
+            kind=PullRequestResultKind.SUCCESS,
+            info=PullRequestInfo(
+                number=9, url="https://example.invalid/pull/9", title="t", body="b"
+            ),
+        ),
+    )
+
+    result = invoke(
+        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+    )
+    assert result.exit_code == 0, result.output
+    assert "READY_FOR_REVIEW" in result.output
+
+    log_path = repo_dir / ".ai" / "runtime" / "scheduler.jsonl"
+    assert log_path.exists()
+    lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    events = [entry["event"] for entry in lines]
+
+    for expected in (
+        "run_start",
+        "discovery",
+        "dispatch",
+        "agent_finish",
+        "verification_start",
+        "gate_result",
+        "checkpoint",
+        "rebase",
+        "push",
+        "pr_created",
+        "task_transition",
+        "run_end",
+    ):
+        assert expected in events, f"missing {expected} in {events}"
+
+    # Every event must carry the same run_id so a JSONL consumer can reconstruct this
+    # one run's timeline even if other runs' events are interleaved in the same file.
+    run_ids = {
+        entry["data"]["run_id"] for entry in lines if "data" in entry and "run_id" in entry["data"]
+    }
+    assert len(run_ids) == 1
+
+    if sys.platform != "win32":
+        assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(log_path.parent.stat().st_mode) == 0o700
+

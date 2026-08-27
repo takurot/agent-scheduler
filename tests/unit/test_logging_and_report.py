@@ -65,6 +65,89 @@ def test_structured_logger_jsonl(tmp_path: Path) -> None:
     assert second["level"] == "WARN"
 
 
+def test_structured_logger_hardens_file_and_directory_permissions(tmp_path: Path) -> None:
+    """Regression test for #141: the JSONL log can contain issue numbers, agent names,
+    and (redacted) task detail -- like other runtime state (#143), it must be 0700/0600
+    even under a permissive umask, not left at the default-umask 0644."""
+    import os
+    import stat
+    import sys
+
+    if sys.platform == "win32":
+        return
+
+    old_umask = os.umask(0o022)
+    try:
+        log_file = tmp_path / "runtime" / "scheduler.jsonl"
+        logger = StructuredLogger(log_file)
+        logger.log("run_start", data={"run_id": "abc123"})
+    finally:
+        os.umask(old_umask)
+
+    assert stat.S_IMODE(log_file.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(log_file.stat().st_mode) == 0o600
+
+
+def test_structured_logger_repairs_preexisting_file_permissions(tmp_path: Path) -> None:
+    import os
+    import stat
+    import sys
+
+    if sys.platform == "win32":
+        return
+
+    log_file = tmp_path / "scheduler.jsonl"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_text('{"event": "old"}\n', encoding="utf-8")
+    os.chmod(log_file, 0o644)
+
+    logger = StructuredLogger(log_file)
+    logger.log("run_start")
+
+    assert stat.S_IMODE(log_file.stat().st_mode) == 0o600
+    lines = log_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2  # pre-existing line preserved, new line appended
+
+
+def test_structured_logger_rotates_when_max_bytes_exceeded(tmp_path: Path) -> None:
+    """Regression test for #141 code review: an unbounded JSONL log grows forever across
+    every scheduler run with no cap -- exactly the operational gap #141 was filed to
+    close. A tiny max_bytes forces rotation after only a couple of log() calls, proving
+    the mechanism without needing a real 10MB file."""
+    import stat
+    import sys
+
+    log_file = tmp_path / "scheduler.jsonl"
+    logger = StructuredLogger(log_file, max_bytes=80)
+
+    logger.log("run_start", data={"run_id": "abc"})
+    first_size = log_file.stat().st_size
+    assert first_size > 0
+
+    logger.log("discovery", data={"discovered": 3})
+    # Second write pushed cumulative size past max_bytes -- the first line must have been
+    # rotated out to scheduler.jsonl.1, and the live file must contain only the new line.
+    rotated = tmp_path / "scheduler.jsonl.1"
+    assert rotated.exists()
+    rotated_entry = json.loads(rotated.read_text(encoding="utf-8").strip())
+    assert rotated_entry["event"] == "run_start"
+
+    live_lines = log_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(live_lines) == 1
+    assert json.loads(live_lines[0])["event"] == "discovery"
+
+    if sys.platform != "win32":
+        assert stat.S_IMODE(rotated.stat().st_mode) == 0o600
+        assert stat.S_IMODE(log_file.stat().st_mode) == 0o600
+
+    # A third rotation must overwrite the existing .1 rather than erroring or leaving
+    # stale content mixed in.
+    logger.log("dispatch", data={"attempt": 1})
+    logger.log("agent_finish", data={"result_kind": "PASS"})
+    rotated_entry_2 = json.loads(rotated.read_text(encoding="utf-8").strip())
+    assert rotated_entry_2["event"] == "dispatch"
+
+
 def test_structured_logger_stream() -> None:
     stream = io.StringIO()
     logger = StructuredLogger(stream)

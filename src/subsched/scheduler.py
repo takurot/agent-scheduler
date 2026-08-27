@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import secrets
+import time
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from subsched.contract import bootstrap_task_files
 from subsched.events import Clock, EventSource, EventType, SystemClock
@@ -72,6 +74,11 @@ class Scheduler:
         repo: str | None = None,
         base_branch: str = "main",
         structured_logger: StructuredLogger | None = None,
+        # #141: identifies every event a single Scheduler instance logs across its
+        # lifetime (one CLI `run` invocation, in practice) so a JSONL consumer can
+        # reconstruct one run's timeline even when multiple runs' events are interleaved
+        # in the same log file. Auto-generated when not supplied.
+        run_id: str | None = None,
         max_task_runtime_seconds: float | None = None,
         ci_checker: Callable[[int], PRChecksStatus] | None = None,
         merged_pr_checker: Callable[[int], MergedPrCheckResult] | None = None,
@@ -84,6 +91,7 @@ class Scheduler:
         self.clock = clock or SystemClock()
         self.event_sources = event_sources
         self.structured_logger = structured_logger
+        self.run_id = run_id or secrets.token_hex(6)
         if max_task_runtime_seconds is not None and max_task_runtime_seconds <= 0:
             raise ValueError("max_task_runtime_seconds must be positive")
         self.max_task_runtime_seconds = max_task_runtime_seconds
@@ -129,6 +137,38 @@ class Scheduler:
     @property
     def tasks(self) -> tuple[Task, ...]:
         return self.queue.tasks
+
+    def _log(
+        self,
+        event: str,
+        *,
+        level: str = "INFO",
+        issue_number: int | None = None,
+        agent: str | None = None,
+        task_id: str | None = None,
+        message: str = "",
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        """No-op unless structured_logger is configured. Every event carries run_id (see
+        __init__) so a JSONL consumer can reconstruct a single run's timeline. #141:
+        message/data are never given raw agent output or issue body text -- callers pass
+        only short, structured summaries (counts, states, exit codes, durations); the
+        underlying StructuredLogger additionally redacts secret-shaped substrings.
+        """
+        if self.structured_logger is None:
+            return
+        merged_data: dict[str, Any] = {"run_id": self.run_id}
+        if data:
+            merged_data.update(data)
+        self.structured_logger.log(
+            event,
+            level=level,
+            issue_number=issue_number,
+            agent=agent,
+            task_id=task_id,
+            message=message,
+            data=merged_data,
+        )
 
     def discover(
         self, issues: Iterable[Issue], *, exclude_labels: frozenset[str] = frozenset()
@@ -185,6 +225,13 @@ class Scheduler:
             new_queue = replace(new_queue, tasks=updated_tasks)
         self.queue = new_queue
         self._persist()
+        self._log(
+            "discovery",
+            data={
+                "discovered": len(additions),
+                "issue_numbers": [a.issue_number for a in additions],
+            },
+        )
 
     def tick(
         self,
@@ -274,24 +321,42 @@ class Scheduler:
             running = dispatched.transition(TaskState.IN_PROGRESS, current_agent=agent, now=current)
             self.queue = self.queue.replace(running)
             self._persist()
+            self._log(
+                "dispatch",
+                issue_number=running.issue_number,
+                agent=agent,
+                task_id=running.task_id,
+                data={"attempt": running.attempt},
+            )
 
+            dispatch_started = time.monotonic()
             try:
                 result = self.worker.run(running, agent)
             except Exception as error:
-                if self.structured_logger is not None:
-                    self.structured_logger.log(
-                        "worker_exception",
-                        level="ERROR",
-                        issue_number=running.issue_number,
-                        agent=agent,
-                        task_id=running.task_id,
-                        message=str(error),
-                        data={"exception_type": type(error).__name__},
-                    )
+                self._log(
+                    "worker_exception",
+                    level="ERROR",
+                    issue_number=running.issue_number,
+                    agent=agent,
+                    task_id=running.task_id,
+                    message=str(error),
+                    data={"exception_type": type(error).__name__, "attempt": running.attempt},
+                )
                 # AgentResult.output stays minimal (type name only): it becomes part of
                 # persisted task state, so it must not carry the exception message even
                 # though the structured logger above does (with its own redaction).
                 result = AgentResult(AgentResultKind.FAILURE, output=type(error).__name__)
+            self._log(
+                "agent_finish",
+                issue_number=running.issue_number,
+                agent=agent,
+                task_id=running.task_id,
+                data={
+                    "result_kind": result.kind.value,
+                    "duration_seconds": round(time.monotonic() - dispatch_started, 1),
+                    "attempt": running.attempt,
+                },
+            )
             self._handle_result(running, agent, result, current)
         finally:
             self.lease_manager.release(task.issue_number, nonce=lease.nonce)
@@ -431,6 +496,16 @@ class Scheduler:
 
         rebase_result = rebase_onto_base(worktree_dir, base_branch=self.base_branch)
         after_rebase, _rebase_msg = handle_rebase_outcome(verifying, rebase_result)
+        self._log(
+            "rebase",
+            issue_number=verifying.issue_number,
+            agent=agent,
+            task_id=verifying.task_id,
+            data={
+                "escalated": after_rebase.status is not verifying.status,
+                "attempt": verifying.attempt,
+            },
+        )
         if after_rebase.status is not verifying.status:
             # handle_rebase_outcome escalated (e.g. NEEDS_HUMAN) on conflict/failure; the
             # reason is already attached to after_rebase.needs_human_reason.
@@ -459,6 +534,13 @@ class Scheduler:
             )
 
         push_result = push_task_branch(worktree_dir, branch_name)
+        self._log(
+            "push",
+            issue_number=verifying.issue_number,
+            agent=agent,
+            task_id=verifying.task_id,
+            data={"result_kind": push_result.kind.value, "attempt": verifying.attempt},
+        )
         if push_result.kind is not PushResultKind.SUCCESS:
             reason = f"push failed ({push_result.kind.value}): {push_result.output}"
             return verifying.transition(
@@ -478,6 +560,13 @@ class Scheduler:
                 TaskState.NEEDS_HUMAN, current_agent=agent, now=now, reason=reason
             )
         pr_info = pr_result.info
+        self._log(
+            "pr_created",
+            issue_number=verifying.issue_number,
+            agent=agent,
+            task_id=verifying.task_id,
+            data={"pr_number": pr_info.number, "attempt": verifying.attempt},
+        )
 
         with_pr = replace(verifying, pr=pr_info.number)
         pr_ready = with_pr.transition(TaskState.PR_READY, current_agent=agent, now=now)
@@ -500,6 +589,13 @@ class Scheduler:
                 from subsched.checkpoint import capture_mechanical_checkpoint, save_checkpoint
                 from subsched.verification import run_verification
 
+                self._log(
+                    "verification_start",
+                    issue_number=task.issue_number,
+                    agent=agent,
+                    task_id=task.task_id,
+                    data={"commands": len(self.verification_commands), "attempt": task.attempt},
+                )
                 v_report = run_verification(
                     Path(task.worktree),
                     self.verification_commands,
@@ -507,6 +603,13 @@ class Scheduler:
                 )
                 verification_ok = v_report.passed
                 verification_summary = v_report.summary
+                self._log(
+                    "gate_result",
+                    issue_number=task.issue_number,
+                    agent=agent,
+                    task_id=task.task_id,
+                    data={"passed": verification_ok, "attempt": task.attempt},
+                )
                 cp = capture_mechanical_checkpoint(
                     Path(task.worktree),
                     task.issue_number,
@@ -515,12 +618,30 @@ class Scheduler:
                     test_results=v_report.summary,
                 )
                 save_checkpoint(Path(task.worktree), cp)
+                self._log(
+                    "checkpoint",
+                    issue_number=task.issue_number,
+                    agent=agent,
+                    task_id=task.task_id,
+                    data={"attempt": task.attempt},
+                )
 
             if verification_ok:
                 final_task = self._finalize_verified_task(
                     verifying, agent, now, verification_summary
                 )
                 self.queue = self.queue.replace(final_task)
+                self._log(
+                    "task_transition",
+                    issue_number=final_task.issue_number,
+                    agent=agent,
+                    task_id=final_task.task_id,
+                    data={
+                        "from_state": verifying.status.value,
+                        "to_state": final_task.status.value,
+                        "attempt": final_task.attempt,
+                    },
+                )
             else:
                 retry = verifying.transition(
                     TaskState.RETRY, current_agent=None, increment_attempt=True, now=now
@@ -530,7 +651,19 @@ class Scheduler:
                     if retry.attempt >= self.max_agent_failures
                     else TaskState.READY
                 )
-                self.queue = self.queue.replace(retry.transition(next_state, now=now))
+                final = retry.transition(next_state, now=now)
+                self.queue = self.queue.replace(final)
+                self._log(
+                    "task_transition",
+                    issue_number=final.issue_number,
+                    agent=agent,
+                    task_id=final.task_id,
+                    data={
+                        "from_state": verifying.status.value,
+                        "to_state": final.status.value,
+                        "attempt": final.attempt,
+                    },
+                )
         elif result.kind in {AgentResultKind.CAPACITY_SESSION, AgentResultKind.CAPACITY_WEEKLY}:
             state = (
                 CapacityState.COOLDOWN_SESSION
@@ -557,11 +690,34 @@ class Scheduler:
             self.queue = self.queue.replace(switched)
             if switched.agent_switches >= self.max_agent_switches:
                 waiting = switched.transition(TaskState.WAITING_CAPACITY, current_agent=None)
-                self.queue = self.queue.replace(
-                    waiting.transition(TaskState.NEEDS_HUMAN, current_agent=None)
+                final_capacity_task = waiting.transition(TaskState.NEEDS_HUMAN, current_agent=None)
+                self.queue = self.queue.replace(final_capacity_task)
+                self._log(
+                    "task_transition",
+                    issue_number=final_capacity_task.issue_number,
+                    agent=agent,
+                    task_id=final_capacity_task.task_id,
+                    data={
+                        "from_state": task.status.value,
+                        "to_state": final_capacity_task.status.value,
+                        "capacity_state": state.value,
+                        "attempt": final_capacity_task.attempt,
+                    },
                 )
             else:
                 self.queue = self.queue.requeue_after_capacity_event(task.issue_number)
+                self._log(
+                    "task_transition",
+                    issue_number=task.issue_number,
+                    agent=agent,
+                    task_id=task.task_id,
+                    data={
+                        "from_state": task.status.value,
+                        "to_state": TaskState.READY.value,
+                        "capacity_state": state.value,
+                        "attempt": task.attempt,
+                    },
+                )
         else:
             failures_dict = dict(task.per_agent_failures)
             failures_dict[agent] = failures_dict.get(agent, 0) + 1
@@ -578,7 +734,19 @@ class Scheduler:
                 if retry.attempt >= self.max_agent_failures
                 else TaskState.READY
             )
-            self.queue = self.queue.replace(retry.transition(next_state, now=now))
+            final = retry.transition(next_state, now=now)
+            self.queue = self.queue.replace(final)
+            self._log(
+                "task_transition",
+                issue_number=final.issue_number,
+                agent=agent,
+                task_id=final.task_id,
+                data={
+                    "from_state": task.status.value,
+                    "to_state": final.status.value,
+                    "attempt": final.attempt,
+                },
+            )
         self._persist()
 
     def _effective_capacities(
