@@ -325,7 +325,11 @@ class Scheduler:
             return ready_for_review.transition(TaskState.COMPLETE, current_agent=agent, now=now)
 
         from subsched.github.conflict import handle_rebase_outcome, rebase_onto_base
-        from subsched.github.pull_requests import PullRequestResultKind, create_or_get_pull_request
+        from subsched.github.pull_requests import (
+            PullRequestResultKind,
+            create_or_get_pull_request,
+            find_close_keyword_commits,
+        )
         from subsched.github.push import PushResultKind, push_task_branch
 
         worktree_dir = Path(verifying.worktree)
@@ -337,6 +341,28 @@ class Scheduler:
             # handle_rebase_outcome escalated (e.g. NEEDS_HUMAN) on conflict/failure; the
             # reason is already attached to after_rebase.needs_human_reason.
             return after_rebase
+
+        # #140: never push a commit whose message contains a GitHub auto-close keyword
+        # (Fixes/Closes/Resolves #N) -- that would let a merge auto-close the issue,
+        # bypassing the "issues stay open until manual review" invariant. This never
+        # rewrites history; it only inspects and, on any violation (including an
+        # inconclusive git failure), fails closed to NEEDS_HUMAN instead of pushing.
+        violations = find_close_keyword_commits(worktree_dir, self.base_branch)
+        if violations is None or violations:
+            if violations is None:
+                reason = (
+                    "could not verify commit messages are free of GitHub auto-close "
+                    "keywords (git log failed); failing closed before push"
+                )
+            else:
+                joined = "; ".join(f"{v.commit}: {v.keyword_context}" for v in violations)
+                reason = (
+                    "commit message(s) contain GitHub auto-close keywords "
+                    f"(Fixes/Closes/Resolves #N): {joined}"
+                )
+            return verifying.transition(
+                TaskState.NEEDS_HUMAN, current_agent=agent, now=now, reason=reason
+            )
 
         push_result = push_task_branch(worktree_dir, branch_name)
         if push_result.kind is not PushResultKind.SUCCESS:
