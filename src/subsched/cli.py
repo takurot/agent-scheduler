@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import re
 import shutil
 from collections import Counter
@@ -20,6 +21,7 @@ from subsched.config import (
     validate_repo,
 )
 from subsched.github.issues import GitHubCliError, GitHubIssueSource, diagnose_token
+from subsched.github.pull_requests import check_merged_pr_for_issue
 from subsched.models import TaskState
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler
@@ -83,6 +85,18 @@ def run(
     ] = False,
     allow_native: Annotated[
         bool, typer.Option("--allow-native", help="Explicitly enable native worker execution")
+    ] = False,
+    allow_rediscovery: Annotated[
+        bool,
+        typer.Option(
+            "--allow-rediscovery",
+            help=(
+                "Skip the merged-PR check and treat every eligible open issue as READY "
+                "even if it may already have a merged implementation PR (#146). Off by "
+                "default: without this explicit override, a merged-but-still-open issue "
+                "is excluded or escalated to NEEDS_HUMAN instead of being rediscovered."
+            ),
+        ),
     ] = False,
 ) -> None:
     """Discover issues and initialize the durable queue."""
@@ -180,6 +194,10 @@ def run(
             typer.echo(f"Worktree setup failed: {error}", err=True)
             raise typer.Exit(1) from error
 
+    merged_pr_checker = None
+    if not allow_rediscovery:
+        merged_pr_checker = functools.partial(check_merged_pr_for_issue, resolved_repo)
+
     try:
         scheduler = Scheduler(
             store=context.store,
@@ -199,6 +217,7 @@ def run(
             push_enabled=not dry_run,
             repo=resolved_repo,
             structured_logger=StructuredLogger(context.store.runtime_dir / "scheduler.jsonl"),
+            merged_pr_checker=merged_pr_checker,
         )
     except (ValueError, StateCorruptionError) as error:
         typer.echo(f"State error: {error}", err=True)
@@ -217,6 +236,8 @@ def run(
     additions_count = len(scheduler.tasks) - before_count
     mode_suffix = " (dry-run)" if dry_run else ""
     typer.echo(f"{additions_count} issue(s) discovered and persisted{mode_suffix}")
+    for note_issue, note_message in scheduler.discovery_notes:
+        typer.echo(f"  #{note_issue}: {note_message}")
 
     if dry_run:
         return

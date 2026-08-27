@@ -6,8 +6,10 @@ import subprocess
 import pytest
 
 from subsched.github.pull_requests import (
+    MergedPrCheckKind,
     PullRequestResultKind,
     build_pr_body,
+    check_merged_pr_for_issue,
     create_or_get_pull_request,
     lookup_existing_pr,
 )
@@ -80,3 +82,112 @@ def test_create_or_get_pull_request_returns_failure_with_output_on_failure(
     assert result.kind is PullRequestResultKind.FAILURE
     assert result.info is None
     assert "gh: command not found" in result.output
+
+
+def test_check_merged_pr_for_issue_confirmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test for #146: a merged PR created by the Scheduler's own
+    create_or_get_pull_request (exact body prefix + subsched/issue-N branch) must be
+    recognized as CONFIRMED so the issue isn't rediscovered as READY."""
+    payload = json.dumps(
+        [
+            {
+                "number": 131,
+                "headRefName": "subsched/issue-129",
+                "body": "Implements work for #129.\n\n## Summary\n\n...",
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(["gh"], 0, stdout=payload, stderr=""),
+    )
+    result = check_merged_pr_for_issue("owner/repo", 129)
+    assert result.kind is MergedPrCheckKind.CONFIRMED
+    assert result.pr_number == 131
+
+
+def test_check_merged_pr_for_issue_none_when_no_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(["gh"], 0, stdout="[]", stderr=""),
+    )
+    result = check_merged_pr_for_issue("owner/repo", 129)
+    assert result.kind is MergedPrCheckKind.NONE
+
+
+def test_check_merged_pr_for_issue_ambiguous_on_wrong_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for #146: this is the *real* observed case (PR #131 for issue
+    #129 was actually created manually via `gh pr create`, with branch
+    `issue/129-verification-uv-defaults`, not the Scheduler's `subsched/issue-129`
+    convention). Untrusted GitHub content must not be trusted into CONFIRMED just
+    because the body text loosely matches -- this must fail closed to AMBIGUOUS."""
+    payload = json.dumps(
+        [
+            {
+                "number": 131,
+                "headRefName": "issue/129-verification-uv-defaults",
+                "body": "## 対応Issue\nImplements work for #129。\n\n...",
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(["gh"], 0, stdout=payload, stderr=""),
+    )
+    result = check_merged_pr_for_issue("owner/repo", 129)
+    assert result.kind is MergedPrCheckKind.AMBIGUOUS
+    assert "129" in result.reason
+
+
+def test_check_merged_pr_for_issue_ambiguous_on_multiple_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = json.dumps(
+        [
+            {
+                "number": 131,
+                "headRefName": "subsched/issue-129",
+                "body": "Implements work for #129.\n",
+            },
+            {
+                "number": 200,
+                "headRefName": "some-other-branch",
+                "body": "unrelated PR that happens to mention #129",
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(["gh"], 0, stdout=payload, stderr=""),
+    )
+    result = check_merged_pr_for_issue("owner/repo", 129)
+    assert result.kind is MergedPrCheckKind.AMBIGUOUS
+
+
+def test_check_merged_pr_for_issue_fails_closed_on_gh_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(["gh"], 1, stdout="", stderr="error"),
+    )
+    result = check_merged_pr_for_issue("owner/repo", 129)
+    assert result.kind is MergedPrCheckKind.AMBIGUOUS
+
+
+def test_check_merged_pr_for_issue_fails_closed_on_subprocess_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*a: object, **k: object) -> object:
+        raise OSError("gh not found")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    result = check_merged_pr_for_issue("owner/repo", 129)
+    assert result.kind is MergedPrCheckKind.AMBIGUOUS
