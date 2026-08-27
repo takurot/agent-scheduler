@@ -82,7 +82,15 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
         }
     ),
     TaskState.READY: frozenset(
-        {TaskState.DISPATCHED, TaskState.WAITING_CAPACITY, TaskState.CANCELLED}
+        {
+            TaskState.DISPATCHED,
+            TaskState.WAITING_CAPACITY,
+            # #137: a READY task whose execution.max_task_runtime budget has already
+            # been exhausted by prior attempts must be expired to NEEDS_HUMAN before
+            # ever being redispatched, not silently dispatched again.
+            TaskState.NEEDS_HUMAN,
+            TaskState.CANCELLED,
+        }
     ),
     TaskState.DISPATCHED: frozenset({TaskState.IN_PROGRESS, TaskState.RETRY, TaskState.CANCELLED}),
     TaskState.IN_PROGRESS: frozenset(
@@ -214,6 +222,10 @@ class Task:
     updated_at: datetime | None = None
     description: str = ""
     needs_human_reason: str | None = None
+    # #137: wall-clock timestamp of the task's first dispatch, preserved across
+    # failover/retry/restart (never reset by .transition()) so execution.max_task_runtime
+    # can be enforced as a durable budget for the whole Task, not just a single attempt.
+    run_started_at: datetime | None = None
 
     @classmethod
     def from_issue(cls, issue: Issue, *, worktree: str | None = None) -> Task:
@@ -278,6 +290,7 @@ class Task:
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "description": self.description,
             "needs_human_reason": self.needs_human_reason,
+            "run_started_at": self.run_started_at.isoformat() if self.run_started_at else None,
         }
 
     @classmethod
@@ -305,6 +318,11 @@ class Task:
                 updated_at=datetime.fromisoformat(updated) if updated else None,
                 description=str(value.get("description", "")),
                 needs_human_reason=value.get("needs_human_reason"),
+                run_started_at=(
+                    datetime.fromisoformat(value["run_started_at"])
+                    if value.get("run_started_at")
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("invalid task state") from error
