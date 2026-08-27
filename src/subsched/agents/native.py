@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 from subsched.agents.base import ProcessExecutionRequest
@@ -8,6 +9,11 @@ from subsched.agents.claude import ClaudeAgent, ClaudeBillingMode, ClaudeExecuti
 from subsched.agents.codex import CodexAgent
 from subsched.contract import build_worker_prompt, validate_dispatch_preconditions
 from subsched.models import AgentResult, AgentResultKind, Task
+from subsched.structured_logger import StructuredLogger
+
+# #141: default heartbeat cadence for a long-running agent invocation. Kept as a module
+# constant (rather than hardcoded inline) so tests can reference the same value.
+HEARTBEAT_INTERVAL_SECONDS = 60.0
 
 
 class NativeWorker:
@@ -18,6 +24,12 @@ class NativeWorker:
         claude_agent: ClaudeAgent | None = None,
         codex_agent: CodexAgent | None = None,
         agent_timeout_seconds: float = 300.0,
+        # #141: optional -- when configured, a "heartbeat" event is logged roughly every
+        # HEARTBEAT_INTERVAL_SECONDS while a claude/codex subprocess is still running, so
+        # `status --verbose`/JSONL observers can tell "still running" from "hung/stalled"
+        # during the long synchronous worker.run() call. None (default) disables it
+        # entirely -- backward compatible with every existing NativeWorker() call site.
+        structured_logger: StructuredLogger | None = None,
     ) -> None:
         self.claude_agent = claude_agent or ClaudeAgent(
             ClaudeExecutionPolicy(
@@ -30,6 +42,23 @@ class NativeWorker:
             subscription_billing_verified=True,
         )
         self.agent_timeout_seconds = agent_timeout_seconds
+        self.structured_logger = structured_logger
+
+    def _heartbeat(self, task: Task, agent: str) -> Callable[[float], None] | None:
+        logger = self.structured_logger
+        if logger is None:
+            return None
+
+        def _emit(elapsed_seconds: float) -> None:
+            logger.log(
+                "heartbeat",
+                issue_number=task.issue_number,
+                agent=agent,
+                task_id=task.task_id,
+                data={"elapsed_seconds": round(elapsed_seconds, 1)},
+            )
+
+        return _emit
 
     def run(self, task: Task, agent: str) -> AgentResult:
         if task.worktree is None:
@@ -44,6 +73,7 @@ class NativeWorker:
             )
 
         prompt = build_worker_prompt(task)
+        heartbeat = self._heartbeat(task, agent)
         if agent == "claude":
             req = ProcessExecutionRequest(
                 argv=(
@@ -75,6 +105,8 @@ class NativeWorker:
                 env=dict(os.environ),
                 stdin_payload=prompt.encode("utf-8"),
                 timeout_seconds=self.agent_timeout_seconds,
+                heartbeat=heartbeat,
+                heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS,
             )
             return self.claude_agent.execute(req)
         elif agent == "codex":
@@ -104,6 +136,8 @@ class NativeWorker:
                 env=dict(os.environ),
                 stdin_payload=prompt.encode("utf-8"),
                 timeout_seconds=self.agent_timeout_seconds,
+                heartbeat=heartbeat,
+                heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS,
             )
             return self.codex_agent.execute(req)
         return AgentResult(AgentResultKind.FAILURE, output=f"unsupported agent: {agent}")

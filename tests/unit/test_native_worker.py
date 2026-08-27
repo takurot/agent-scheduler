@@ -123,6 +123,58 @@ def test_native_worker_defaults_agent_timeout_to_300_seconds(tmp_path: Path) -> 
     assert mock_codex.execute.call_args[0][0].timeout_seconds == 300.0
 
 
+def test_native_worker_wires_heartbeat_when_structured_logger_configured(
+    tmp_path: Path,
+) -> None:
+    """Regression test for #141: when a structured_logger is configured, NativeWorker
+    must pass a heartbeat callback into the ProcessExecutionRequest so run_process_group
+    can emit progress during a long agent invocation. Without a logger (default), no
+    callback is wired -- backward compatible with every existing call site."""
+    from subsched.structured_logger import StructuredLogger
+
+    mock_claude = MagicMock()
+    mock_claude.execute.return_value = AgentResult(AgentResultKind.PASS)
+    logged: list[dict[str, object]] = []
+
+    class _RecordingLogger(StructuredLogger):
+        def __init__(self) -> None:
+            pass
+
+        def log(self, event: str, **kwargs: object) -> dict[str, object]:
+            entry = {"event": event, **kwargs}
+            logged.append(entry)
+            return entry
+
+    worker = NativeWorker(
+        claude_agent=mock_claude, codex_agent=MagicMock(), structured_logger=_RecordingLogger()
+    )
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "claude")
+    req = mock_claude.execute.call_args[0][0]
+    assert req.heartbeat is not None
+
+    req.heartbeat(12.3)
+    assert logged
+    assert logged[0]["event"] == "heartbeat"
+    assert logged[0]["issue_number"] == 101
+    assert logged[0]["agent"] == "claude"
+
+
+def test_native_worker_no_heartbeat_when_no_structured_logger(tmp_path: Path) -> None:
+    mock_claude = MagicMock()
+    mock_claude.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(claude_agent=mock_claude, codex_agent=MagicMock())
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "claude")
+    req = mock_claude.execute.call_args[0][0]
+    assert req.heartbeat is None
+
+
 def test_native_worker_applies_configured_agent_timeout(tmp_path: Path) -> None:
     """#123: NativeWorker's agent execution timeout must be configurable so it can be
     raised above the 300s default for real issues that take longer to implement."""

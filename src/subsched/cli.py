@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 import shutil
 from collections import Counter
 from pathlib import Path
@@ -180,6 +181,14 @@ def run(
             typer.echo(f"Worktree setup failed: {error}", err=True)
             raise typer.Exit(1) from error
 
+    # #141: one StructuredLogger/run_id per CLI `run` invocation, shared by the Scheduler
+    # (dispatch/verification/rebase/push/pr/task_transition events) and NativeWorker
+    # (heartbeat events) so a JSONL consumer can reconstruct one run's full timeline --
+    # including for a normal, successful run, not just failures.
+    structured_logger = StructuredLogger(context.store.runtime_dir / "scheduler.jsonl")
+    run_id = secrets.token_hex(6)
+    structured_logger.log("run_start", data={"run_id": run_id, "dry_run": dry_run})
+
     try:
         scheduler = Scheduler(
             store=context.store,
@@ -187,7 +196,10 @@ def run(
                 AgentConfig(name, priority=settings.priority, enabled=settings.enabled)
                 for name, settings in cfg.agents.items()
             ),
-            worker=NativeWorker(agent_timeout_seconds=float(cfg.execution.agent_timeout_seconds)),
+            worker=NativeWorker(
+                agent_timeout_seconds=float(cfg.execution.agent_timeout_seconds),
+                structured_logger=structured_logger,
+            ),
             worktree_root=worktree_root,
             worktree_adapter=worktree_adapter,
             verification_commands=cfg.verification.commands,
@@ -198,7 +210,8 @@ def run(
             max_tasks=cfg.execution.max_tasks_per_run,
             push_enabled=not dry_run,
             repo=resolved_repo,
-            structured_logger=StructuredLogger(context.store.runtime_dir / "scheduler.jsonl"),
+            structured_logger=structured_logger,
+            run_id=run_id,
         )
     except (ValueError, StateCorruptionError) as error:
         typer.echo(f"State error: {error}", err=True)
@@ -219,6 +232,7 @@ def run(
     typer.echo(f"{additions_count} issue(s) discovered and persisted{mode_suffix}")
 
     if dry_run:
+        structured_logger.log("run_end", data={"run_id": run_id, "additions": additions_count})
         return
 
     claude_sensor = ClaudeCapacitySensor(
@@ -232,6 +246,9 @@ def run(
     try:
         scheduler.run_until_waiting(capacities)
     except KeyboardInterrupt:
+        structured_logger.log(
+            "run_end", data={"run_id": run_id, "interrupted": True}
+        )
         typer.echo("\nInterrupted; in-progress task state was saved safely.", err=True)
         raise typer.Exit(130) from None
 
@@ -244,6 +261,15 @@ def run(
     counts = Counter(task.status.value for task in scheduler.tasks)
     for name in sorted(counts):
         typer.echo(f"{name:<22} {counts[name]}")
+
+    structured_logger.log(
+        "run_end",
+        data={
+            "run_id": run_id,
+            "waiting_for_capacity": scheduler.is_waiting_for_capacity,
+            "task_counts": dict(counts),
+        },
+    )
 
 
 @app.command()
