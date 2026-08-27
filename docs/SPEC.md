@@ -1321,6 +1321,19 @@ github:
     close_issue: false
 ```
 
+`create_pr: false`は、native実行・検証・ローカルcommitまでは通常通り行うが、rebase・branch
+push・PR作成のいずれもSchedulerが呼ばない（`push_enabled=False`と同じ「GitHubへ一切書き込まない」
+経路を通る）ことを意味する。Taskはローカルでのみ`COMPLETE`へ遷移し、`pr`フィールドは`null`の
+ままとなる。branch pushだけを行いPRを作成しない、という中間状態は提供しない — GitHub上で
+レビューできないpushされたbranchだけが残るのはoperatorにとって価値が無く、復旧困難な状態を
+増やすだけであるため。
+
+`close_issue: true`は現状サポートしない。close権限は独立したwrite permission tier（PR作成用
+credentialとは別）を要求するSPEC変更を先に必要とするため、configロード時にfail closedで拒否
+する。`close_issue: false`（既定）のみを許可する。
+
+`subsched run`は起動時に、native実行・push・create_pr・close_issueの実効policyを1行で表示する。
+
 GitHub CLIにはPR作成機能があり、PR bodyからIssueを関連付けられる。`Fixes #123` のような記述はmerge時にIssueをcloseする動作を持つため、MVPでは意図しない自動closeを避けるため本文テンプレートを制御する。
 
 推奨PR body：

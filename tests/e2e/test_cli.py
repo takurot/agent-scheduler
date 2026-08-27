@@ -520,3 +520,79 @@ def test_run_allow_rediscovery_skips_the_merged_pr_check(
     status = invoke(tmp_path, "status")
     assert "READY" in status.output
 
+
+def test_native_run_honors_create_pr_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #136: github.completion.create_pr=false must actually disable
+    push/PR creation end-to-end via the CLI, not just be parsed and ignored -- the PR
+    adapter must never be called, and the task must still reach COMPLETE locally."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n"
+        "  repo: owner/project\n"
+        "  completion:\n"
+        "    create_pr: false\n"
+        "verification:\n"
+        "  commands:\n"
+        "    - 'true'\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
+
+    monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
+
+    def boom(*_a: object, **_k: object) -> object:
+        raise AssertionError("PR adapter must not be called when create_pr is false")
+
+    monkeypatch.setattr("subsched.github.pull_requests.create_or_get_pull_request", boom)
+
+    result = invoke(
+        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Effective write policy:" in result.output
+    assert "create_pr=False" in result.output
+    # Regression test for the code review on #136: create_pr=false takes the exact same
+    # no-git-writes-at-all path as push_enabled=False, so the startup line must not claim
+    # push=True here -- that would contradict what actually happens.
+    assert "push=False" in result.output
+    assert "COMPLETE" in result.output
+
+    status = invoke(repo_dir, "status", "--verbose")
+    assert "COMPLETE" in status.output
+    assert "PR #" not in status.output
+
+
+def test_dry_run_overrides_create_pr_true_and_skips_all_github_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--dry-run must take precedence over the config's (default-true) create_pr setting:
+    discovery-only, no worker/push/PR calls at all, regardless of config."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text("github:\n  repo: owner/project\n", encoding="utf-8")
+
+    result = invoke(
+        tmp_path, "run", "--config", str(config_file), "--issues", "1", "--dry-run"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Effective write policy:" in result.output
+    assert "push=False" in result.output
+    assert "create_pr=True" in result.output
+
