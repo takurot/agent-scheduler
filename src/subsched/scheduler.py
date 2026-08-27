@@ -9,6 +9,7 @@ from typing import Protocol
 
 from subsched.contract import bootstrap_task_files
 from subsched.events import Clock, EventSource, EventType, SystemClock
+from subsched.github.checks import CICheckState, PRChecksStatus
 from subsched.github.pull_requests import MergedPrCheckKind, MergedPrCheckResult
 from subsched.models import (
     AgentResult,
@@ -71,6 +72,7 @@ class Scheduler:
         repo: str | None = None,
         base_branch: str = "main",
         structured_logger: StructuredLogger | None = None,
+        ci_checker: Callable[[int], PRChecksStatus] | None = None,
         merged_pr_checker: Callable[[int], MergedPrCheckResult] | None = None,
     ) -> None:
         self.store = store
@@ -81,6 +83,7 @@ class Scheduler:
         self.clock = clock or SystemClock()
         self.event_sources = event_sources
         self.structured_logger = structured_logger
+        self.ci_checker = ci_checker
         self.merged_pr_checker = merged_pr_checker
         self.discovery_notes: tuple[tuple[int, str], ...] = ()
         self.verification_commands = verification_commands
@@ -196,6 +199,8 @@ class Scheduler:
 
         if self.store.is_paused():
             return False
+
+        self._poll_ci_checks(current)
 
         supplied = {capacity.agent: capacity for capacity in capacities}
         effective = self._effective_capacities(supplied, current)
@@ -344,6 +349,47 @@ class Scheduler:
         self._backoff_step = 0
         self._persist()
 
+    def _poll_ci_checks(self, now: datetime) -> None:
+        """#142: promote READY_FOR_REVIEW to COMPLETE only once CI actually PASSes (when
+        CI monitoring is configured); FAIL escalates to NEEDS_HUMAN (no auto-requeue, per
+        docs/SPEC.md's "unknown/failed GitHub state is not silently retried" policy, same
+        as push/PR-creation/commit-message failures elsewhere in this class);
+        PENDING/UNKNOWN leave the task exactly as-is -- an unknown CI state must never be
+        promoted to COMPLETE.
+        """
+        if self.ci_checker is None:
+            return
+        for task in self.tasks:
+            if task.status is not TaskState.READY_FOR_REVIEW or task.pr is None:
+                continue
+            status = self.ci_checker(task.pr)
+            if status.overall_state is CICheckState.PASS:
+                updated = task.transition(
+                    TaskState.COMPLETE, current_agent=task.current_agent, now=now
+                )
+                self.queue = self.queue.replace(updated)
+                self._persist()
+            elif status.overall_state is CICheckState.FAIL:
+                from subsched.agents.process import redact_sensitive_command_audit
+
+                failed = ", ".join(
+                    c.name for c in status.checks if c.state is CICheckState.FAIL
+                ) or "unknown check"
+                reason = "\n".join(
+                    redact_sensitive_command_audit(
+                        (f"CI failed for PR #{task.pr}: {failed}",)
+                    )
+                )
+                updated = task.transition(
+                    TaskState.NEEDS_HUMAN,
+                    current_agent=task.current_agent,
+                    now=now,
+                    reason=reason,
+                )
+                self.queue = self.queue.replace(updated)
+                self._persist()
+            # PENDING/UNKNOWN: leave the task in READY_FOR_REVIEW unchanged.
+
     def _finalize_verified_task(
         self, verifying: Task, agent: str, now: datetime, verification_summary: str
     ) -> Task:
@@ -426,10 +472,12 @@ class Scheduler:
 
         with_pr = replace(verifying, pr=pr_info.number)
         pr_ready = with_pr.transition(TaskState.PR_READY, current_agent=agent, now=now)
-        ready_for_review = pr_ready.transition(
-            TaskState.READY_FOR_REVIEW, current_agent=agent, now=now
-        )
-        return ready_for_review.transition(TaskState.COMPLETE, current_agent=agent, now=now)
+        # #142: stop here, not COMPLETE. Opening a PR means the Scheduler's own local
+        # verification passed, nothing more -- CI hasn't been checked (or may not even
+        # exist yet) and no human has reviewed anything. READY_FOR_REVIEW is now the
+        # default terminal state for this path; COMPLETE is only reached via CI
+        # monitoring (see _poll_ci_checks) confirming CI PASS, when enabled.
+        return pr_ready.transition(TaskState.READY_FOR_REVIEW, current_agent=agent, now=now)
 
     def _handle_result(self, task: Task, agent: str, result: AgentResult, now: datetime) -> None:
         if result.kind is AgentResultKind.PASS:

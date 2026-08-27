@@ -20,6 +20,7 @@ from subsched.config import (
     parse_natural_language_instruction,
     validate_repo,
 )
+from subsched.github.checks import fetch_pr_checks
 from subsched.github.issues import GitHubCliError, GitHubIssueSource, diagnose_token
 from subsched.github.pull_requests import check_merged_pr_for_issue
 from subsched.models import TaskState
@@ -206,6 +207,10 @@ def run(
             typer.echo(f"Worktree setup failed: {error}", err=True)
             raise typer.Exit(1) from error
 
+    ci_checker = None
+    if cfg.execution.ci_monitoring:
+        ci_checker = functools.partial(fetch_pr_checks, repo=resolved_repo)
+
     merged_pr_checker = None
     if not allow_rediscovery:
         merged_pr_checker = functools.partial(check_merged_pr_for_issue, resolved_repo)
@@ -230,6 +235,7 @@ def run(
             create_pr_enabled=cfg.github.completion.create_pr,
             repo=resolved_repo,
             structured_logger=StructuredLogger(context.store.runtime_dir / "scheduler.jsonl"),
+            ci_checker=ci_checker,
             merged_pr_checker=merged_pr_checker,
         )
     except (ValueError, StateCorruptionError) as error:

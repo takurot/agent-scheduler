@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -8,7 +9,15 @@ import pytest
 from subsched.github import conflict as conflict_mod
 from subsched.github import pull_requests as pr_mod
 from subsched.github import push as push_mod
-from subsched.models import AgentResult, AgentResultKind, Capacity, CapacityState, Issue, TaskState
+from subsched.models import (
+    AgentResult,
+    AgentResultKind,
+    Capacity,
+    CapacityState,
+    Issue,
+    Task,
+    TaskState,
+)
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler, ScriptedWorker
 from subsched.storage import JsonStateStore
@@ -24,7 +33,7 @@ def _available(agent: str) -> Capacity:
     )
 
 
-def _scheduler(tmp_path: Path, *, push_enabled: bool) -> Scheduler:
+def _scheduler(tmp_path: Path, *, push_enabled: bool, ci_checker=None) -> Scheduler:
     return Scheduler(
         store=JsonStateStore(tmp_path / "state.json"),
         router=Router([AgentConfig("claude", priority=100)]),
@@ -33,6 +42,7 @@ def _scheduler(tmp_path: Path, *, push_enabled: bool) -> Scheduler:
         push_enabled=push_enabled,
         repo="owner/repo",
         base_branch="main",
+        ci_checker=ci_checker,
     )
 
 
@@ -57,9 +67,13 @@ def test_push_disabled_completes_without_any_git_or_github_calls(
     assert task.pr is None
 
 
-def test_push_enabled_happy_path_completes_with_pr_number(
+def test_push_enabled_happy_path_reaches_ready_for_review_with_pr_number(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Regression test for #142: opening a PR must stop at READY_FOR_REVIEW, not jump
+    straight to COMPLETE -- CI hasn't even been checked yet at this point, and a human
+    hasn't reviewed anything. COMPLETE previously happened unconditionally in the same
+    call, so "Task Completion Rate" was always 100% the moment a PR was opened."""
     monkeypatch.setattr(
         conflict_mod,
         "rebase_onto_base",
@@ -91,7 +105,7 @@ def test_push_enabled_happy_path_completes_with_pr_number(
     scheduler.tick([_available("claude")])
 
     task = scheduler.tasks[0]
-    assert task.status is TaskState.COMPLETE
+    assert task.status is TaskState.READY_FOR_REVIEW
     assert task.pr == 42
 
 
@@ -199,6 +213,110 @@ def test_pr_creation_failure_escalates_to_needs_human(
     assert "already exists" in task.needs_human_reason
 
 
+def _ready_for_review_task(issue_number: int, pr: int) -> Task:
+    return replace(
+        Task.from_issue(Issue(number=issue_number, title="Task")),
+        status=TaskState.READY_FOR_REVIEW,
+        pr=pr,
+    )
+
+
+def test_ci_monitoring_disabled_by_default_leaves_ready_for_review_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Regression test for #142: without CI monitoring configured (the default),
+    READY_FOR_REVIEW must not silently become COMPLETE just because tick() ran."""
+    scheduler = _scheduler(tmp_path, push_enabled=True)
+    task = _ready_for_review_task(101, pr=7)
+    scheduler.discover([])
+    scheduler.queue = scheduler.queue.append([task])
+    scheduler.tick([])
+
+    assert scheduler.tasks[0].status is TaskState.READY_FOR_REVIEW
+
+
+def test_ci_monitoring_promotes_to_complete_on_pass(tmp_path: Path) -> None:
+    from subsched.github.checks import CICheckState, PRChecksStatus
+
+    scheduler = _scheduler(
+        tmp_path,
+        push_enabled=True,
+        ci_checker=lambda pr: PRChecksStatus(
+            pr_number=pr, overall_state=CICheckState.PASS, checks=()
+        ),
+    )
+    task = _ready_for_review_task(101, pr=7)
+    scheduler.discover([])
+    scheduler.queue = scheduler.queue.append([task])
+    scheduler.tick([])
+
+    assert scheduler.tasks[0].status is TaskState.COMPLETE
+
+
+def test_ci_monitoring_escalates_to_needs_human_on_fail(tmp_path: Path) -> None:
+    from subsched.github.checks import CICheckResult, CICheckState, PRChecksStatus
+
+    scheduler = _scheduler(
+        tmp_path,
+        push_enabled=True,
+        ci_checker=lambda pr: PRChecksStatus(
+            pr_number=pr,
+            overall_state=CICheckState.FAIL,
+            checks=(
+                CICheckResult(
+                    name="test", state=CICheckState.FAIL, description="failed", link=""
+                ),
+            ),
+        ),
+    )
+    task = _ready_for_review_task(101, pr=7)
+    scheduler.discover([])
+    scheduler.queue = scheduler.queue.append([task])
+    scheduler.tick([])
+
+    updated = scheduler.tasks[0]
+    assert updated.status is TaskState.NEEDS_HUMAN
+    assert updated.needs_human_reason is not None
+    assert "7" in updated.needs_human_reason
+    assert "test" in updated.needs_human_reason
+
+
+def test_ci_monitoring_leaves_pending_unchanged(tmp_path: Path) -> None:
+    from subsched.github.checks import CICheckState, PRChecksStatus
+
+    scheduler = _scheduler(
+        tmp_path,
+        push_enabled=True,
+        ci_checker=lambda pr: PRChecksStatus(
+            pr_number=pr, overall_state=CICheckState.PENDING, checks=()
+        ),
+    )
+    task = _ready_for_review_task(101, pr=7)
+    scheduler.discover([])
+    scheduler.queue = scheduler.queue.append([task])
+    scheduler.tick([])
+
+    assert scheduler.tasks[0].status is TaskState.READY_FOR_REVIEW
+
+
+def test_ci_monitoring_ignores_tasks_without_pr(tmp_path: Path) -> None:
+    """A READY_FOR_REVIEW task with no pr number (shouldn't normally happen, but must
+    not crash the CI-polling step) is simply skipped."""
+
+    def boom(pr: int) -> object:
+        raise AssertionError("ci_checker must not be called for a task with no pr number")
+
+    scheduler = _scheduler(tmp_path, push_enabled=True, ci_checker=boom)
+    task = replace(
+        Task.from_issue(Issue(number=101, title="Task")), status=TaskState.READY_FOR_REVIEW
+    )
+    scheduler.discover([])
+    scheduler.queue = scheduler.queue.append([task])
+    scheduler.tick([])
+
+    assert scheduler.tasks[0].status is TaskState.READY_FOR_REVIEW
+
+
 def test_create_pr_disabled_completes_without_any_git_or_github_calls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -233,7 +351,13 @@ def test_create_pr_disabled_completes_without_any_git_or_github_calls(
 
 def test_create_pr_enabled_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The safe default (create_pr_enabled unset) must preserve the existing PR-creation
-    behavior -- this is a regression guard for the #136 wiring, not a new default."""
+    behavior -- this is a regression guard for the #136 wiring, not a new default.
+
+    Updated for #142 (merged after this test was written): a successful PR creation now
+    stops at READY_FOR_REVIEW, not COMPLETE, unless CI monitoring confirms a PASS -- see
+    test_ci_monitoring_promotes_to_complete_on_pass above for that path. This test's own
+    concern (create_pr_enabled unset still creates the PR) is unaffected by that change.
+    """
     monkeypatch.setattr(
         conflict_mod,
         "rebase_onto_base",
@@ -265,7 +389,7 @@ def test_create_pr_enabled_by_default(tmp_path: Path, monkeypatch: pytest.Monkey
     scheduler.tick([_available("claude")])
 
     task = scheduler.tasks[0]
-    assert task.status is TaskState.COMPLETE
+    assert task.status is TaskState.READY_FOR_REVIEW
     assert task.pr == 7
 
 
