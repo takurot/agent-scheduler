@@ -8,11 +8,30 @@ from typer.testing import CliRunner, Result
 from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
 from subsched.cli import app
 from subsched.github.issues import GitHubIssueSource
-from subsched.github.pull_requests import PullRequestInfo, PullRequestResult, PullRequestResultKind
+from subsched.github.pull_requests import (
+    MergedPrCheckKind,
+    MergedPrCheckResult,
+    PullRequestInfo,
+    PullRequestResult,
+    PullRequestResultKind,
+)
 from subsched.models import Issue, Task, TaskState
 from subsched.storage import JsonStateStore
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_merged_pr_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#146's merged-PR discovery check calls the real `gh` CLI by default. Per this
+    file's E2E policy (real git, no real provider/GitHub calls), every test here must
+    not make that live network call. Default to NONE (no merged PR found) so existing
+    tests keep exercising the ordinary READY path; tests that specifically exercise the
+    merged-PR feature override this via their own monkeypatch.setattr afterward."""
+    monkeypatch.setattr(
+        "subsched.cli.check_merged_pr_for_issue",
+        lambda repo, issue_number, **kwargs: MergedPrCheckResult(kind=MergedPrCheckKind.NONE),
+    )
 
 
 def _git(path: Path, *args: str) -> None:
@@ -488,4 +507,160 @@ def test_ci_monitoring_promotes_ready_for_review_to_complete(
 
     status = invoke(repo_dir, "status", "--verbose")
     assert "COMPLETE" in status.output
+
+
+def test_run_excludes_issue_with_confirmed_merged_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #146: a CONFIRMED merged PR must exclude the issue from
+    discovery end-to-end via the real CLI -- no task is created for it at all, and the
+    discovery-note explaining why is printed."""
+    monkeypatch.setattr(
+        "subsched.cli.check_merged_pr_for_issue",
+        lambda repo, issue_number, **kwargs: MergedPrCheckResult(
+            kind=MergedPrCheckKind.CONFIRMED, pr_number=999
+        ),
+    )
+
+    result = invoke(
+        tmp_path, "run", "--repo", "owner/project", "--issues", "101", "--dry-run"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "0 issue(s) discovered and persisted (dry-run)" in result.output
+    assert "#101" in result.output
+    assert "999" in result.output
+
+    status = invoke(tmp_path, "status")
+    assert "Queue is empty" in status.output
+
+
+def test_run_flags_ambiguous_merged_pr_as_needs_human(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #146: an AMBIGUOUS match must still create the task (visible
+    to the operator) but starting in NEEDS_HUMAN, not READY."""
+    monkeypatch.setattr(
+        "subsched.cli.check_merged_pr_for_issue",
+        lambda repo, issue_number, **kwargs: MergedPrCheckResult(
+            kind=MergedPrCheckKind.AMBIGUOUS,
+            reason=f"issue #{issue_number} has an unconfirmed merged PR reference",
+        ),
+    )
+
+    result = invoke(
+        tmp_path, "run", "--repo", "owner/project", "--issues", "101", "--dry-run"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 issue(s) discovered and persisted (dry-run)" in result.output
+
+    status = invoke(tmp_path, "status", "--verbose")
+    assert "NEEDS_HUMAN" in status.output
+    assert "unconfirmed merged PR" in status.output
+
+
+def test_run_allow_rediscovery_skips_the_merged_pr_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--allow-rediscovery is the explicit override: without it, discovery fails closed
+    on a merged issue; with it, the merged-PR check must not even run."""
+
+    def boom(*_a: object, **_k: object) -> object:
+        raise AssertionError("merged-PR check must not run when --allow-rediscovery is set")
+
+    monkeypatch.setattr("subsched.cli.check_merged_pr_for_issue", boom)
+
+    result = invoke(
+        tmp_path,
+        "run",
+        "--repo",
+        "owner/project",
+        "--issues",
+        "101",
+        "--dry-run",
+        "--allow-rediscovery",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 issue(s) discovered and persisted (dry-run)" in result.output
+
+    status = invoke(tmp_path, "status")
+    assert "READY" in status.output
+
+
+def test_native_run_honors_create_pr_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #136: github.completion.create_pr=false must actually disable
+    push/PR creation end-to-end via the CLI, not just be parsed and ignored -- the PR
+    adapter must never be called, and the task must still reach COMPLETE locally."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n"
+        "  repo: owner/project\n"
+        "  completion:\n"
+        "    create_pr: false\n"
+        "verification:\n"
+        "  commands:\n"
+        "    - 'true'\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
+
+    monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
+
+    def boom(*_a: object, **_k: object) -> object:
+        raise AssertionError("PR adapter must not be called when create_pr is false")
+
+    monkeypatch.setattr("subsched.github.pull_requests.create_or_get_pull_request", boom)
+
+    result = invoke(
+        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Effective write policy:" in result.output
+    assert "create_pr=False" in result.output
+    # Regression test for the code review on #136: create_pr=false takes the exact same
+    # no-git-writes-at-all path as push_enabled=False, so the startup line must not claim
+    # push=True here -- that would contradict what actually happens.
+    assert "push=False" in result.output
+    assert "COMPLETE" in result.output
+
+    status = invoke(repo_dir, "status", "--verbose")
+    assert "COMPLETE" in status.output
+    assert "PR #" not in status.output
+
+
+def test_dry_run_overrides_create_pr_true_and_skips_all_github_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--dry-run must take precedence over the config's (default-true) create_pr setting:
+    discovery-only, no worker/push/PR calls at all, regardless of config."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text("github:\n  repo: owner/project\n", encoding="utf-8")
+
+    result = invoke(
+        tmp_path, "run", "--config", str(config_file), "--issues", "1", "--dry-run"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Effective write policy:" in result.output
+    assert "push=False" in result.output
+    assert "create_pr=True" in result.output
 

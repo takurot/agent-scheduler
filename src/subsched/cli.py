@@ -22,6 +22,7 @@ from subsched.config import (
 )
 from subsched.github.checks import fetch_pr_checks
 from subsched.github.issues import GitHubCliError, GitHubIssueSource, diagnose_token
+from subsched.github.pull_requests import check_merged_pr_for_issue
 from subsched.models import TaskState
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler
@@ -85,6 +86,18 @@ def run(
     ] = False,
     allow_native: Annotated[
         bool, typer.Option("--allow-native", help="Explicitly enable native worker execution")
+    ] = False,
+    allow_rediscovery: Annotated[
+        bool,
+        typer.Option(
+            "--allow-rediscovery",
+            help=(
+                "Skip the merged-PR check and treat every eligible open issue as READY "
+                "even if it may already have a merged implementation PR (#146). Off by "
+                "default: without this explicit override, a merged-but-still-open issue "
+                "is excluded or escalated to NEEDS_HUMAN instead of being rediscovered."
+            ),
+        ),
     ] = False,
 ) -> None:
     """Discover issues and initialize the durable queue."""
@@ -154,6 +167,18 @@ def run(
             raise typer.Exit(2)
         typer.echo("Pre-flight safety checks passed: subscription verified, API fallback disabled.")
 
+    # push must reflect Scheduler._finalize_verified_task()'s actual gate: create_pr=false
+    # takes the same no-git-writes-at-all path as push_enabled=False (see docs/SPEC.md
+    # §40), so a misleading "push=True" here would contradict that.
+    effective_push = not dry_run and cfg.github.completion.create_pr
+    typer.echo(
+        "Effective write policy: "
+        f"native={allow_native and not dry_run}, "
+        f"push={effective_push}, "
+        f"create_pr={cfg.github.completion.create_pr}, "
+        f"close_issue={cfg.github.completion.close_issue}"
+    )
+
     requested: frozenset[int] | None = None
     if resolved_issues is not None and resolved_issues != "all-open":
         requested = frozenset(_parse_issue_numbers(resolved_issues))
@@ -186,6 +211,10 @@ def run(
     if cfg.execution.ci_monitoring:
         ci_checker = functools.partial(fetch_pr_checks, repo=resolved_repo)
 
+    merged_pr_checker = None
+    if not allow_rediscovery:
+        merged_pr_checker = functools.partial(check_merged_pr_for_issue, resolved_repo)
+
     try:
         scheduler = Scheduler(
             store=context.store,
@@ -203,9 +232,11 @@ def run(
             max_agent_switches=cfg.execution.max_agent_switches,
             max_tasks=cfg.execution.max_tasks_per_run,
             push_enabled=not dry_run,
+            create_pr_enabled=cfg.github.completion.create_pr,
             repo=resolved_repo,
             structured_logger=StructuredLogger(context.store.runtime_dir / "scheduler.jsonl"),
             ci_checker=ci_checker,
+            merged_pr_checker=merged_pr_checker,
         )
     except (ValueError, StateCorruptionError) as error:
         typer.echo(f"State error: {error}", err=True)
@@ -224,6 +255,8 @@ def run(
     additions_count = len(scheduler.tasks) - before_count
     mode_suffix = " (dry-run)" if dry_run else ""
     typer.echo(f"{additions_count} issue(s) discovered and persisted{mode_suffix}")
+    for note_issue, note_message in scheduler.discovery_notes:
+        typer.echo(f"  #{note_issue}: {note_message}")
 
     if dry_run:
         return

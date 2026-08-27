@@ -177,6 +177,19 @@ def test_config_rejects_unsafe_billing(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_config_rejects_close_issue_true(tmp_path: Path) -> None:
+    """Regression test for #136: close_issue: true has no implemented runtime path (it
+    would require a separate write-permission tier per SPEC), so accepting it silently
+    would be misleading -- config must fail closed instead of just ignoring it."""
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\n  completion:\n    close_issue: true\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError, match="close_issue"):
+        load_config(path)
+
+
 def test_config_rejects_unknown_keys(tmp_path: Path) -> None:
     path = tmp_path / "scheduler.yaml"
     path.write_text("github:\n  repo: o/r\nunknown_key: true\n", encoding="utf-8")
