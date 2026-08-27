@@ -14,6 +14,7 @@ from subsched.storage import (
     LockRecord,
     SchedulerLock,
     StateCorruptionError,
+    atomic_write_secure_bytes,
     find_repository_root,
     get_process_start_time,
 )
@@ -113,6 +114,123 @@ def test_standard_directory_initialization_and_backup(tmp_path: Path) -> None:
     task = Task.from_issue(Issue(number=1, title="one"))
     store.save_tasks((task,))
     assert (tmp_path / ".ai" / "backup" / "scheduler.bak.json").exists()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file permission bits are not meaningful on Windows"
+)
+def test_backup_file_hardened_to_0600_under_permissive_umask(tmp_path: Path) -> None:
+    """Regression test for #143: the scheduler.bak.json backup was written via a plain
+    Path.write_bytes(), so under a permissive umask it ended up 0644 -- world-/group-
+    readable runtime state -- unlike scheduler.json itself, which was already 0600 via
+    tempfile.mkstemp."""
+    import stat
+
+    old_umask = os.umask(0o022)
+    try:
+        store = JsonStateStore(tmp_path)
+        store.save_tasks(())
+        store.save_tasks((Task.from_issue(Issue(number=1, title="one")),))
+    finally:
+        os.umask(old_umask)
+
+    backup_file = tmp_path / ".ai" / "backup" / "scheduler.bak.json"
+    assert backup_file.exists()
+    assert stat.S_IMODE(backup_file.stat().st_mode) == 0o600
+
+
+def test_preexisting_backup_permissions_are_repaired_without_deleting_content(
+    tmp_path: Path,
+) -> None:
+    """A backup file left behind (0644) by a pre-#143 subsched version must be repaired
+    to 0600 the next time the state directories are initialized, without deleting it."""
+    import stat
+
+    backup_dir = tmp_path / ".ai" / "backup"
+    backup_dir.mkdir(parents=True)
+    stale = backup_dir / "scheduler.bak.json"
+    stale.write_text('{"stale": true}', encoding="utf-8")
+    os.chmod(stale, 0o644)
+
+    store = JsonStateStore(tmp_path)
+    store.save_tasks(())
+
+    assert stale.exists()
+    assert stale.read_text(encoding="utf-8") == '{"stale": true}'
+    assert stat.S_IMODE(stale.stat().st_mode) == 0o600
+
+
+def test_atomic_write_secure_bytes_rejects_symlinked_target_file(tmp_path: Path) -> None:
+    """Regression test for #143 code review: a pre-existing symlink AT the destination
+    path (directory itself untouched/real) must be rejected fail-closed -- covering the
+    TOCTOU/symlink-swap scenario the hardening exists for -- and the symlink's outside
+    target must be left untouched, not silently written through."""
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_target = outside_dir / "secret.txt"
+    outside_target.write_text("do not overwrite me", encoding="utf-8")
+
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    victim = real_dir / "victim.json"
+    victim.symlink_to(outside_target)
+
+    with pytest.raises(OSError, match="symlink"):
+        atomic_write_secure_bytes(victim, b'{"attacker": "controlled"}')
+
+    assert outside_target.read_text(encoding="utf-8") == "do not overwrite me"
+
+
+def test_atomic_write_secure_bytes_rejects_symlinked_parent_directory(tmp_path: Path) -> None:
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    sym_dir = tmp_path / "sym"
+    sym_dir.symlink_to(outside_dir, target_is_directory=True)
+
+    with pytest.raises(OSError, match="symlink"):
+        atomic_write_secure_bytes(sym_dir / "victim.json", b"{}")
+
+    assert list(outside_dir.iterdir()) == []
+
+
+def test_backup_write_is_atomic_no_leftover_tmp_file(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.save_tasks(())
+    store.save_tasks((Task.from_issue(Issue(number=1, title="one")),))
+
+    backup_dir = tmp_path / ".ai" / "backup"
+    assert list(backup_dir.glob("*.tmp")) == []
+    backup_file = backup_dir / "scheduler.bak.json"
+    assert json.loads(backup_file.read_text(encoding="utf-8"))["schema_version"] == 1
+
+
+def test_gitignore_covers_backup_and_checkpoint_state(tmp_path: Path) -> None:
+    """Regression test for #143: .ai/backup/ and .ai/checkpoints/ must be untracked so
+    runtime state (which can contain agent output, test results, and changed-file
+    lists) never shows up in `git status` or gets accidentally committed."""
+    repo_root = Path(__file__).resolve().parents[2]
+    gitignore = (repo_root / ".gitignore").read_text(encoding="utf-8")
+    assert ".ai/backup/" in gitignore
+    assert ".ai/checkpoints/" in gitignore
+
+    subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+    (tmp_path / ".gitignore").write_text(gitignore, encoding="utf-8")
+    backup_dir = tmp_path / ".ai" / "backup"
+    backup_dir.mkdir(parents=True)
+    (backup_dir / "scheduler.bak.json").write_text("{}", encoding="utf-8")
+    checkpoints_dir = tmp_path / ".ai" / "checkpoints"
+    checkpoints_dir.mkdir(parents=True)
+    (checkpoints_dir / "130.json").write_text("{}", encoding="utf-8")
+
+    result = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=str(tmp_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "backup" not in result.stdout
+    assert "checkpoints" not in result.stdout
 
 
 def test_capacity_cooldown_round_trip(tmp_path: Path) -> None:

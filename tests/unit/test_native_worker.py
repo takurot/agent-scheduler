@@ -175,6 +175,68 @@ def test_native_worker_no_heartbeat_when_no_structured_logger(tmp_path: Path) ->
     assert req.heartbeat is None
 
 
+def test_native_worker_includes_configured_verification_commands_in_claude_prompt(
+    tmp_path: Path,
+) -> None:
+    """Regression test for #139: verification.commands was used by the Scheduler's
+    post-worker gate but never passed into the worker prompt, so Claude/Codex had no way
+    to know which commands actually define 'verification passes' -- it could only guess
+    from docs/WORKFLOW.md or pyproject.toml, which may not match the configured gate."""
+    mock_claude = MagicMock()
+    mock_claude.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(
+        claude_agent=mock_claude,
+        codex_agent=MagicMock(),
+        verification_commands=("uv run ruff check .", "uv run pytest -q"),
+    )
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "claude")
+    stdin_payload = mock_claude.execute.call_args[0][0].stdin_payload
+    prompt = stdin_payload.decode("utf-8")
+
+    assert "uv run ruff check ." in prompt
+    assert "uv run pytest -q" in prompt
+
+
+def test_native_worker_includes_configured_verification_commands_in_codex_prompt(
+    tmp_path: Path,
+) -> None:
+    mock_codex = MagicMock()
+    mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(
+        claude_agent=MagicMock(),
+        codex_agent=mock_codex,
+        verification_commands=("uv run mypy src",),
+    )
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "codex")
+    stdin_payload = mock_codex.execute.call_args[0][0].stdin_payload
+    prompt = stdin_payload.decode("utf-8")
+
+    assert "uv run mypy src" in prompt
+
+
+def test_native_worker_defaults_to_no_verification_commands(tmp_path: Path) -> None:
+    """Backward-compatible default: NativeWorker() with no configured commands must not
+    break -- the prompt falls back to build_worker_prompt's existing generic guidance."""
+    mock_claude = MagicMock()
+    mock_claude.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(claude_agent=mock_claude, codex_agent=MagicMock())
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "claude")
+    prompt = mock_claude.execute.call_args[0][0].stdin_payload.decode("utf-8")
+    assert "defined in docs/WORKFLOW.md or pyproject.toml" in prompt
+
+
 def test_native_worker_applies_configured_agent_timeout(tmp_path: Path) -> None:
     """#123: NativeWorker's agent execution timeout must be configurable so it can be
     raised above the 300s default for real issues that take longer to implement."""

@@ -23,4 +23,6 @@ dist/
 .ai/tasks/
 .ai/handoffs/
 .ai/worktrees/
+.ai/backup/
+.ai/checkpoints/
 docs/PLAN.md

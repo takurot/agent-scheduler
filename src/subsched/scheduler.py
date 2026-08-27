@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 import time
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -11,6 +11,8 @@ from typing import Any, Protocol
 
 from subsched.contract import bootstrap_task_files
 from subsched.events import Clock, EventSource, EventType, SystemClock
+from subsched.github.checks import CICheckState, PRChecksStatus
+from subsched.github.pull_requests import MergedPrCheckKind, MergedPrCheckResult
 from subsched.models import (
     AgentResult,
     AgentResultKind,
@@ -68,6 +70,7 @@ class Scheduler:
         max_agent_switches: int = 6,
         max_tasks: int = 50,
         push_enabled: bool = False,
+        create_pr_enabled: bool = True,
         repo: str | None = None,
         base_branch: str = "main",
         structured_logger: StructuredLogger | None = None,
@@ -76,6 +79,8 @@ class Scheduler:
         # reconstruct one run's timeline even when multiple runs' events are interleaved
         # in the same log file. Auto-generated when not supplied.
         run_id: str | None = None,
+        ci_checker: Callable[[int], PRChecksStatus] | None = None,
+        merged_pr_checker: Callable[[int], MergedPrCheckResult] | None = None,
     ) -> None:
         self.store = store
         self.router = router
@@ -86,11 +91,15 @@ class Scheduler:
         self.event_sources = event_sources
         self.structured_logger = structured_logger
         self.run_id = run_id or secrets.token_hex(6)
+        self.ci_checker = ci_checker
+        self.merged_pr_checker = merged_pr_checker
+        self.discovery_notes: tuple[tuple[int, str], ...] = ()
         self.verification_commands = verification_commands
         if verification_timeout_seconds <= 0:
             raise ValueError("verification_timeout_seconds must be positive")
         self.verification_timeout_seconds = verification_timeout_seconds
         self.push_enabled = push_enabled
+        self.create_pr_enabled = create_pr_enabled
         self.repo = repo
         self.base_branch = base_branch
         self.concurrency = concurrency
@@ -162,11 +171,42 @@ class Scheduler:
     ) -> None:
         effective_exclude = frozenset({"security-sensitive"}).union(exclude_labels)
         existing = {task.issue_number for task in self.tasks}
-        additions = tuple(
-            Task.from_issue(issue)
+        candidates = [
+            issue
             for issue in issues
             if issue.number not in existing and not effective_exclude.intersection(issue.labels)
-        )
+        ]
+
+        additions: list[Task] = []
+        notes: list[tuple[int, str]] = []
+        for issue in candidates:
+            # #146: an open Issue whose implementation PR is already merged must not be
+            # rediscovered as READY (duplicate work). A CONFIRMED match (the Scheduler's
+            # own PR body/branch convention) is excluded entirely; anything weaker
+            # (AMBIGUOUS) fails closed to NEEDS_HUMAN instead of silently proceeding.
+            if self.merged_pr_checker is not None:
+                check = self.merged_pr_checker(issue.number)
+                if check.kind is MergedPrCheckKind.CONFIRMED:
+                    notes.append(
+                        (
+                            issue.number,
+                            f"excluded: merged PR #{check.pr_number} already implements "
+                            "this issue",
+                        )
+                    )
+                    continue
+                if check.kind is MergedPrCheckKind.AMBIGUOUS:
+                    flagged = replace(
+                        Task.from_issue(issue),
+                        status=TaskState.NEEDS_HUMAN,
+                        needs_human_reason=check.reason,
+                    )
+                    additions.append(flagged)
+                    notes.append((issue.number, check.reason))
+                    continue
+            additions.append(Task.from_issue(issue))
+
+        self.discovery_notes = tuple(notes)
         if len(self.tasks) + len(additions) > self.max_tasks:
             raise ValueError(f"task limit exceeded ({self.max_tasks})")
         new_queue = self.queue.append(additions)
@@ -206,6 +246,8 @@ class Scheduler:
 
         if self.store.is_paused():
             return False
+
+        self._poll_ci_checks(current)
 
         supplied = {capacity.agent: capacity for capacity in capacities}
         effective = self._effective_capacities(supplied, current)
@@ -372,17 +414,60 @@ class Scheduler:
         self._backoff_step = 0
         self._persist()
 
+    def _poll_ci_checks(self, now: datetime) -> None:
+        """#142: promote READY_FOR_REVIEW to COMPLETE only once CI actually PASSes (when
+        CI monitoring is configured); FAIL escalates to NEEDS_HUMAN (no auto-requeue, per
+        docs/SPEC.md's "unknown/failed GitHub state is not silently retried" policy, same
+        as push/PR-creation/commit-message failures elsewhere in this class);
+        PENDING/UNKNOWN leave the task exactly as-is -- an unknown CI state must never be
+        promoted to COMPLETE.
+        """
+        if self.ci_checker is None:
+            return
+        for task in self.tasks:
+            if task.status is not TaskState.READY_FOR_REVIEW or task.pr is None:
+                continue
+            status = self.ci_checker(task.pr)
+            if status.overall_state is CICheckState.PASS:
+                updated = task.transition(
+                    TaskState.COMPLETE, current_agent=task.current_agent, now=now
+                )
+                self.queue = self.queue.replace(updated)
+                self._persist()
+            elif status.overall_state is CICheckState.FAIL:
+                from subsched.agents.process import redact_sensitive_command_audit
+
+                failed = ", ".join(
+                    c.name for c in status.checks if c.state is CICheckState.FAIL
+                ) or "unknown check"
+                reason = "\n".join(
+                    redact_sensitive_command_audit(
+                        (f"CI failed for PR #{task.pr}: {failed}",)
+                    )
+                )
+                updated = task.transition(
+                    TaskState.NEEDS_HUMAN,
+                    current_agent=task.current_agent,
+                    now=now,
+                    reason=reason,
+                )
+                self.queue = self.queue.replace(updated)
+                self._persist()
+            # PENDING/UNKNOWN: leave the task in READY_FOR_REVIEW unchanged.
+
     def _finalize_verified_task(
         self, verifying: Task, agent: str, now: datetime, verification_summary: str
     ) -> Task:
         """Complete a task that has passed verification: rebase, push, and open/reuse its PR.
 
-        When push_enabled is False (the default, and what every existing test uses), or the
-        task has no worktree, this only advances local task state to COMPLETE -- no git or
-        GitHub calls are made. This keeps the change additive: nothing that already worked
-        without push/PR wiring changes behavior.
+        When push_enabled is False (the default, and what every existing test uses), when
+        create_pr_enabled is False (#136: github.completion.create_pr=false must actually
+        disable GitHub writes, not just be parsed and ignored), or the task has no worktree,
+        this only advances local task state to COMPLETE -- no git or GitHub calls are made.
+        This keeps the change additive: nothing that already worked without push/PR wiring
+        changes behavior.
         """
-        if not self.push_enabled or verifying.worktree is None:
+        if not self.push_enabled or not self.create_pr_enabled or verifying.worktree is None:
             pr_ready = verifying.transition(TaskState.PR_READY, current_agent=agent, now=now)
             ready_for_review = pr_ready.transition(
                 TaskState.READY_FOR_REVIEW, current_agent=agent, now=now
@@ -390,7 +475,11 @@ class Scheduler:
             return ready_for_review.transition(TaskState.COMPLETE, current_agent=agent, now=now)
 
         from subsched.github.conflict import handle_rebase_outcome, rebase_onto_base
-        from subsched.github.pull_requests import PullRequestResultKind, create_or_get_pull_request
+        from subsched.github.pull_requests import (
+            PullRequestResultKind,
+            create_or_get_pull_request,
+            find_close_keyword_commits,
+        )
         from subsched.github.push import PushResultKind, push_task_branch
 
         worktree_dir = Path(verifying.worktree)
@@ -412,6 +501,28 @@ class Scheduler:
             # handle_rebase_outcome escalated (e.g. NEEDS_HUMAN) on conflict/failure; the
             # reason is already attached to after_rebase.needs_human_reason.
             return after_rebase
+
+        # #140: never push a commit whose message contains a GitHub auto-close keyword
+        # (Fixes/Closes/Resolves #N) -- that would let a merge auto-close the issue,
+        # bypassing the "issues stay open until manual review" invariant. This never
+        # rewrites history; it only inspects and, on any violation (including an
+        # inconclusive git failure), fails closed to NEEDS_HUMAN instead of pushing.
+        violations = find_close_keyword_commits(worktree_dir, self.base_branch)
+        if violations is None or violations:
+            if violations is None:
+                reason = (
+                    "could not verify commit messages are free of GitHub auto-close "
+                    "keywords (git log failed); failing closed before push"
+                )
+            else:
+                joined = "; ".join(f"{v.commit}: {v.keyword_context}" for v in violations)
+                reason = (
+                    "commit message(s) contain GitHub auto-close keywords "
+                    f"(Fixes/Closes/Resolves #N): {joined}"
+                )
+            return verifying.transition(
+                TaskState.NEEDS_HUMAN, current_agent=agent, now=now, reason=reason
+            )
 
         push_result = push_task_branch(worktree_dir, branch_name)
         self._log(
@@ -450,10 +561,12 @@ class Scheduler:
 
         with_pr = replace(verifying, pr=pr_info.number)
         pr_ready = with_pr.transition(TaskState.PR_READY, current_agent=agent, now=now)
-        ready_for_review = pr_ready.transition(
-            TaskState.READY_FOR_REVIEW, current_agent=agent, now=now
-        )
-        return ready_for_review.transition(TaskState.COMPLETE, current_agent=agent, now=now)
+        # #142: stop here, not COMPLETE. Opening a PR means the Scheduler's own local
+        # verification passed, nothing more -- CI hasn't been checked (or may not even
+        # exist yet) and no human has reviewed anything. READY_FOR_REVIEW is now the
+        # default terminal state for this path; COMPLETE is only reached via CI
+        # monitoring (see _poll_ci_checks) confirming CI PASS, when enabled.
+        return pr_ready.transition(TaskState.READY_FOR_REVIEW, current_agent=agent, now=now)
 
     def _handle_result(self, task: Task, agent: str, result: AgentResult, now: datetime) -> None:
         if result.kind is AgentResultKind.PASS:

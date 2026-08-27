@@ -8,11 +8,30 @@ from typer.testing import CliRunner, Result
 from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
 from subsched.cli import app
 from subsched.github.issues import GitHubIssueSource
-from subsched.github.pull_requests import PullRequestInfo, PullRequestResult, PullRequestResultKind
+from subsched.github.pull_requests import (
+    MergedPrCheckKind,
+    MergedPrCheckResult,
+    PullRequestInfo,
+    PullRequestResult,
+    PullRequestResultKind,
+)
 from subsched.models import Issue, Task, TaskState
 from subsched.storage import JsonStateStore
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_merged_pr_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#146's merged-PR discovery check calls the real `gh` CLI by default. Per this
+    file's E2E policy (real git, no real provider/GitHub calls), every test here must
+    not make that live network call. Default to NONE (no merged PR found) so existing
+    tests keep exercising the ordinary READY path; tests that specifically exercise the
+    merged-PR feature override this via their own monkeypatch.setattr afterward."""
+    monkeypatch.setattr(
+        "subsched.cli.check_merged_pr_for_issue",
+        lambda repo, issue_number, **kwargs: MergedPrCheckResult(kind=MergedPrCheckKind.NONE),
+    )
 
 
 def _git(path: Path, *args: str) -> None:
@@ -363,12 +382,14 @@ def test_run_output_message_reflects_mode(tmp_path: Path, monkeypatch: pytest.Mo
     assert "(dry-run)" not in res_native.output
 
 
-def test_native_run_drives_scheduler_to_complete_and_opens_pr(
+def test_native_run_drives_scheduler_to_ready_for_review_and_opens_pr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End-to-end (per WORKFLOW.md's E2E policy: real git, no real provider or GitHub calls)
     check that `--allow-native` actually dispatches, verifies, pushes, and creates a PR --
-    not just discovers and persists."""
+    not just discovers and persists. Regression test for #142: opening a PR stops at
+    READY_FOR_REVIEW, not COMPLETE -- CI hasn't been checked and no human has reviewed
+    anything yet."""
     import shutil
 
     monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
@@ -389,7 +410,11 @@ def test_native_run_drives_scheduler_to_complete_and_opens_pr(
         encoding="utf-8",
     )
 
+    captured_prompts: list[str] = []
+
     def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        if request.stdin_payload:
+            captured_prompts.append(request.stdin_payload.decode("utf-8"))
         return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
 
     monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
@@ -415,11 +440,319 @@ def test_native_run_drives_scheduler_to_complete_and_opens_pr(
 
     assert result.exit_code == 0, result.output
     assert "1 issue(s) discovered and persisted" in result.output
+    assert "READY_FOR_REVIEW" in result.output
+
+    status = invoke(repo_dir, "status", "--verbose")
+    assert "READY_FOR_REVIEW" in status.output
+    assert "PR #7" in status.output
+
+    # #139: the configured verification.commands ('true') must actually reach the native
+    # worker's prompt, not just the Scheduler's post-worker gate.
+    assert captured_prompts
+    assert any("- true" in prompt for prompt in captured_prompts)
+
+
+def test_ci_monitoring_promotes_ready_for_review_to_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #142: with execution.ci_monitoring enabled, the Scheduler's
+    run_until_waiting loop re-ticks after PR creation within the same `run` invocation,
+    polls CI for the READY_FOR_REVIEW task, and promotes it to COMPLETE once CI actually
+    PASSes -- not just because a PR was opened."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+    remote_dir = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(remote_dir)], check=True, capture_output=True
+    )
+    _git(repo_dir, "remote", "add", "origin", str(remote_dir))
+    _git(repo_dir, "push", "-q", "-u", "origin", "main")
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n"
+        "  repo: owner/project\n"
+        "verification:\n"
+        "  commands:\n"
+        "    - 'true'\n"
+        "execution:\n"
+        "  ci_monitoring: true\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
+
+    monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
+    monkeypatch.setattr(
+        "subsched.github.pull_requests.create_or_get_pull_request",
+        lambda *a, **k: PullRequestResult(
+            kind=PullRequestResultKind.SUCCESS,
+            info=PullRequestInfo(
+                number=7, url="https://example.invalid/pull/7", title="t", body="b"
+            ),
+        ),
+    )
+
+    from subsched.github.checks import CICheckState, PRChecksStatus
+
+    monkeypatch.setattr(
+        "subsched.cli.fetch_pr_checks",
+        lambda pr_number, **kwargs: PRChecksStatus(
+            pr_number=pr_number, overall_state=CICheckState.PASS, checks=()
+        ),
+    )
+
+    result = invoke(
+        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+    )
+    assert result.exit_code == 0, result.output
     assert "COMPLETE" in result.output
 
     status = invoke(repo_dir, "status", "--verbose")
     assert "COMPLETE" in status.output
-    assert "PR #7" in status.output
+
+
+def test_run_excludes_issue_with_confirmed_merged_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #146: a CONFIRMED merged PR must exclude the issue from
+    discovery end-to-end via the real CLI -- no task is created for it at all, and the
+    discovery-note explaining why is printed."""
+    monkeypatch.setattr(
+        "subsched.cli.check_merged_pr_for_issue",
+        lambda repo, issue_number, **kwargs: MergedPrCheckResult(
+            kind=MergedPrCheckKind.CONFIRMED, pr_number=999
+        ),
+    )
+
+    result = invoke(
+        tmp_path, "run", "--repo", "owner/project", "--issues", "101", "--dry-run"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "0 issue(s) discovered and persisted (dry-run)" in result.output
+    assert "#101" in result.output
+    assert "999" in result.output
+
+    status = invoke(tmp_path, "status")
+    assert "Queue is empty" in status.output
+
+
+def test_run_flags_ambiguous_merged_pr_as_needs_human(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #146: an AMBIGUOUS match must still create the task (visible
+    to the operator) but starting in NEEDS_HUMAN, not READY."""
+    monkeypatch.setattr(
+        "subsched.cli.check_merged_pr_for_issue",
+        lambda repo, issue_number, **kwargs: MergedPrCheckResult(
+            kind=MergedPrCheckKind.AMBIGUOUS,
+            reason=f"issue #{issue_number} has an unconfirmed merged PR reference",
+        ),
+    )
+
+    result = invoke(
+        tmp_path, "run", "--repo", "owner/project", "--issues", "101", "--dry-run"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 issue(s) discovered and persisted (dry-run)" in result.output
+
+    status = invoke(tmp_path, "status", "--verbose")
+    assert "NEEDS_HUMAN" in status.output
+    assert "unconfirmed merged PR" in status.output
+
+
+def test_run_allow_rediscovery_skips_the_merged_pr_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--allow-rediscovery is the explicit override: without it, discovery fails closed
+    on a merged issue; with it, the merged-PR check must not even run."""
+
+    def boom(*_a: object, **_k: object) -> object:
+        raise AssertionError("merged-PR check must not run when --allow-rediscovery is set")
+
+    monkeypatch.setattr("subsched.cli.check_merged_pr_for_issue", boom)
+
+    result = invoke(
+        tmp_path,
+        "run",
+        "--repo",
+        "owner/project",
+        "--issues",
+        "101",
+        "--dry-run",
+        "--allow-rediscovery",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 issue(s) discovered and persisted (dry-run)" in result.output
+
+    status = invoke(tmp_path, "status")
+    assert "READY" in status.output
+
+
+def test_native_run_honors_create_pr_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #136: github.completion.create_pr=false must actually disable
+    push/PR creation end-to-end via the CLI, not just be parsed and ignored -- the PR
+    adapter must never be called, and the task must still reach COMPLETE locally."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n"
+        "  repo: owner/project\n"
+        "  completion:\n"
+        "    create_pr: false\n"
+        "verification:\n"
+        "  commands:\n"
+        "    - 'true'\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
+
+    monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
+
+    def boom(*_a: object, **_k: object) -> object:
+        raise AssertionError("PR adapter must not be called when create_pr is false")
+
+    monkeypatch.setattr("subsched.github.pull_requests.create_or_get_pull_request", boom)
+
+    result = invoke(
+        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Effective write policy:" in result.output
+    assert "create_pr=False" in result.output
+    # Regression test for the code review on #136: create_pr=false takes the exact same
+    # no-git-writes-at-all path as push_enabled=False, so the startup line must not claim
+    # push=True here -- that would contradict what actually happens.
+    assert "push=False" in result.output
+    assert "COMPLETE" in result.output
+
+    status = invoke(repo_dir, "status", "--verbose")
+    assert "COMPLETE" in status.output
+    assert "PR #" not in status.output
+
+
+def test_dry_run_overrides_create_pr_true_and_skips_all_github_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--dry-run must take precedence over the config's (default-true) create_pr setting:
+    discovery-only, no worker/push/PR calls at all, regardless of config."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text("github:\n  repo: owner/project\n", encoding="utf-8")
+
+    result = invoke(
+        tmp_path, "run", "--config", str(config_file), "--issues", "1", "--dry-run"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Effective write policy:" in result.output
+    assert "push=False" in result.output
+    assert "create_pr=True" in result.output
+
+
+def test_queue_priority_label_scores_changes_dispatch_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #138: queue.priority.label_scores was defined in config and
+    fully implemented by TaskQueue._sort_key(), but cli.py never passed it into the
+    Scheduler(...) construction -- so the config loaded without error (looked effective
+    to an operator) while dispatch order silently stayed plain issue-number order. This
+    drives a real --allow-native run over three issues and asserts the labeled,
+    higher-score issue dispatches before lower/no-score issues, and that a tie (equal or
+    absent score) falls back to ascending issue number."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    def list_open(
+        self: GitHubIssueSource, repo: str, *, label: str | None = None
+    ) -> tuple[Issue, ...]:
+        return (
+            Issue(number=101, title="no label"),
+            Issue(number=1, title="no label, lowest issue number"),
+            Issue(number=103, title="high priority", labels=("priority-high",)),
+        )
+
+    monkeypatch.setattr(GitHubIssueSource, "list_open", list_open)
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+    remote_dir = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(remote_dir)], check=True, capture_output=True
+    )
+    _git(repo_dir, "remote", "add", "origin", str(remote_dir))
+    _git(repo_dir, "push", "-q", "-u", "origin", "main")
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\n"
+        "verification:\n  commands:\n    - 'true'\n"
+        "queue:\n  priority:\n    label_scores:\n      priority-high: 100\n",
+        encoding="utf-8",
+    )
+
+    dispatch_order: list[int] = []
+
+    def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        # NativeWorker sets cwd=worktree_root/f"issue-{issue_number}".
+        issue_number = int(request.cwd.name.removeprefix("issue-"))
+        dispatch_order.append(issue_number)
+        return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
+
+    monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
+    pr_number = iter(range(1, 100))
+    monkeypatch.setattr(
+        "subsched.github.pull_requests.create_or_get_pull_request",
+        lambda *a, **k: PullRequestResult(
+            kind=PullRequestResultKind.SUCCESS,
+            info=PullRequestInfo(
+                number=next(pr_number), url="https://example.invalid/pull/x", title="t", body="b"
+            ),
+        ),
+    )
+
+    result = invoke(
+        repo_dir,
+        "run",
+        "--config",
+        str(config_file),
+        "--issues",
+        "1,101,103",
+        "--allow-native",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "3 issue(s) discovered and persisted" in result.output
+
+    # 103 has a configured label score and must dispatch first; 1 and 101 are tied
+    # (no matching label) and must fall back to ascending issue number.
+    assert dispatch_order == [103, 1, 101]
 
 
 def test_native_run_produces_jsonl_lifecycle_timeline(
@@ -470,7 +803,7 @@ def test_native_run_produces_jsonl_lifecycle_timeline(
         repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
     )
     assert result.exit_code == 0, result.output
-    assert "COMPLETE" in result.output
+    assert "READY_FOR_REVIEW" in result.output
 
     log_path = repo_dir / ".ai" / "runtime" / "scheduler.jsonl"
     assert log_path.exists()
