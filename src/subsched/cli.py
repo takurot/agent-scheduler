@@ -349,6 +349,10 @@ def run(
             create_pr_enabled=cfg.github.completion.create_pr,
             repo=resolved_repo,
             structured_logger=structured_logger,
+            # #145: gives handoff.continuous an actual runtime meaning (readback
+            # validation at every worker-end boundary) instead of remaining a
+            # best-effort natural-language instruction with no observable effect.
+            handoff_continuous=cfg.handoff.continuous,
             run_id=run_id,
             max_task_runtime_seconds=float(parse_duration(cfg.execution.max_task_runtime)),
             ci_checker=ci_checker,

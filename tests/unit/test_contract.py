@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from subsched.contract import (
@@ -108,3 +109,20 @@ def test_bootstrap_task_files_preserves_existing_handoff(tmp_path: Path) -> None
     content = existing_handoff.read_text(encoding="utf-8")
     assert "# Custom Existing Handoff" in content
     assert "Made good progress on step 2." in content
+
+
+def test_bootstrap_task_files_stamps_placeholder_with_supplied_now(tmp_path: Path) -> None:
+    """Regression test for #145: the initial handoff placeholder must be stamped with
+    the caller's logical `now` (the Scheduler's own dispatch clock) when supplied, not
+    always real wall-clock time. Otherwise a handoff-freshness readback comparing
+    against that same `now` reference is thrown off by the real-time gap between when
+    `now` was captured and when this placeholder is actually written -- an untouched
+    placeholder could look "fresher than dispatch" purely from that gap, defeating the
+    freshness check for a real Agent invocation that never updates the handoff."""
+    task = Task.from_issue(Issue(number=103, title="Support timeout"))
+    supplied_now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    bootstrap_task_files(tmp_path, task, now=supplied_now)
+
+    handoff_file = tmp_path / ".ai" / "handoffs" / "103.md"
+    assert supplied_now.isoformat() in handoff_file.read_text(encoding="utf-8")

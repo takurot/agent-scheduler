@@ -46,6 +46,53 @@ def _init_git_repo(path: Path) -> None:
     _git(path, "commit", "--allow-empty", "-q", "-m", "init")
 
 
+def _update_handoff(worktree_dir: Path, *, issue_number: int, title: str) -> None:
+    """Simulate a compliant Agent updating the handoff before finishing (#145)."""
+    import datetime as _dt
+
+    handoffs_dir = worktree_dir / ".ai" / "handoffs"
+    handoffs_dir.mkdir(parents=True, exist_ok=True)
+    (handoffs_dir / f"{issue_number}.md").write_text(
+        f"""# Issue
+
+#{issue_number} {title}
+
+## Goal
+
+{title}
+
+## Current Plan
+
+- Plan
+
+## Completed
+
+- Did real work
+
+## Current Work
+
+Wrapping up
+
+## Decisions
+
+- Used approach X
+
+## Known Broken State
+
+- None
+
+## Next Action
+
+- Verify
+
+## Timestamp
+
+{_dt.datetime.now(_dt.UTC).isoformat()}
+""",
+        encoding="utf-8",
+    )
+
+
 def _claude_success_stdout() -> str:
     return json.dumps(
         {
@@ -541,6 +588,10 @@ def test_native_run_drives_scheduler_to_ready_for_review_and_opens_pr(
     captured_prompts: list[str] = []
 
     def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        # #145: a compliant Agent updates the handoff before finishing (per
+        # MANAGED_CONTRACT); simulate that here so handoff.continuous's default-on
+        # readback validation doesn't escalate this otherwise-successful run.
+        _update_handoff(request.cwd, issue_number=1, title="Task 1")
         if request.stdin_payload:
             captured_prompts.append(request.stdin_payload.decode("utf-8"))
         return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
@@ -616,6 +667,10 @@ def test_ci_monitoring_promotes_ready_for_review_to_complete(
     )
 
     def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        # #145: handoff.continuous defaults to true, so a compliant Agent must update
+        # the handoff before finishing or this otherwise-successful run gets escalated
+        # to NEEDS_HUMAN instead of exercising the CI-monitoring path under test here.
+        _update_handoff(request.cwd, issue_number=1, title="Task 1")
         return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
 
     monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
@@ -646,6 +701,42 @@ def test_ci_monitoring_promotes_ready_for_review_to_complete(
 
     status = invoke(repo_dir, "status", "--verbose")
     assert "COMPLETE" in status.output
+
+
+def test_native_run_escalates_when_handoff_never_updated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #145: handoff.continuous defaults to true, so a real CLI
+    `run --allow-native` invocation must escalate to NEEDS_HUMAN (not silently trust a
+    self-reported PASS) when the Agent never advances the handoff -- the exact #130
+    dogfooding failure mode the issue was filed for."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\nverification:\n  commands:\n    - 'true'\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        # Does NOT update the handoff -- simulates a non-compliant or interrupted Agent.
+        return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
+
+    monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
+
+    result = invoke(
+        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "NEEDS_HUMAN" in result.output
+    assert "COMPLETE" not in result.output
 
 
 def test_run_excludes_issue_with_confirmed_merged_pr(
@@ -755,6 +846,10 @@ def test_native_run_honors_create_pr_false(
     )
 
     def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        # #145: handoff.continuous defaults to true, so a compliant Agent must update
+        # the handoff before finishing or this otherwise-successful run gets escalated
+        # to NEEDS_HUMAN instead of exercising the create_pr=false path under test here.
+        _update_handoff(request.cwd, issue_number=1, title="Task 1")
         return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
 
     monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
@@ -916,6 +1011,10 @@ def test_native_run_produces_jsonl_lifecycle_timeline(
     )
 
     def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        # #145: handoff.continuous defaults to true, so a compliant Agent must update
+        # the handoff before finishing or this otherwise-successful run gets escalated
+        # to NEEDS_HUMAN instead of exercising the JSONL lifecycle timeline under test.
+        _update_handoff(request.cwd, issue_number=1, title="Task 1")
         return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
 
     monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)

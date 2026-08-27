@@ -74,6 +74,13 @@ class Scheduler:
         repo: str | None = None,
         base_branch: str = "main",
         structured_logger: StructuredLogger | None = None,
+        # #145: opt-in (default False, unlike config's own default of True) so every
+        # existing direct Scheduler(...) construction in the test suite is unaffected --
+        # cli.py wires this from cfg.handoff.continuous, giving the config value its
+        # actual runtime meaning: continuous handoff is validated (schema, Issue
+        # identity, timestamp advancement) by readback at every worker-end boundary,
+        # not just trusted as best-effort Agent narration.
+        handoff_continuous: bool = False,
         # #141: identifies every event a single Scheduler instance logs across its
         # lifetime (one CLI `run` invocation, in practice) so a JSONL consumer can
         # reconstruct one run's timeline even when multiple runs' events are interleaved
@@ -91,6 +98,7 @@ class Scheduler:
         self.clock = clock or SystemClock()
         self.event_sources = event_sources
         self.structured_logger = structured_logger
+        self.handoff_continuous = handoff_continuous
         self.run_id = run_id or secrets.token_hex(6)
         if max_task_runtime_seconds is not None and max_task_runtime_seconds <= 0:
             raise ValueError("max_task_runtime_seconds must be positive")
@@ -303,7 +311,7 @@ class Scheduler:
                 self._validate_worktree(task)
 
             if task.worktree is not None:
-                bootstrap_task_files(Path(task.worktree), task)
+                bootstrap_task_files(Path(task.worktree), task, now=current)
 
             actual_switches = task.actual_agent_switches
             if task.last_dispatched_agent is not None and task.last_dispatched_agent != agent:
@@ -346,6 +354,7 @@ class Scheduler:
                 # persisted task state, so it must not carry the exception message even
                 # though the structured logger above does (with its own redaction).
                 result = AgentResult(AgentResultKind.FAILURE, output=type(error).__name__)
+
             self._log(
                 "agent_finish",
                 issue_number=running.issue_number,
@@ -357,6 +366,17 @@ class Scheduler:
                     "attempt": running.attempt,
                 },
             )
+
+            if self.handoff_continuous and running.worktree is not None:
+                escalated = self._enforce_handoff_freshness(running, agent, current, result.kind)
+                if escalated is not None:
+                    self.queue = self.queue.replace(escalated)
+                    self._persist()
+                    self._effective_capacities(supplied, current)
+                    self._release_dependencies(current)
+                    self._backoff_step = 0
+                    return True
+
             self._handle_result(running, agent, result, current)
         finally:
             self.lease_manager.release(task.issue_number, nonce=lease.nonce)
@@ -576,6 +596,77 @@ class Scheduler:
         # default terminal state for this path; COMPLETE is only reached via CI
         # monitoring (see _poll_ci_checks) confirming CI PASS, when enabled.
         return pr_ready.transition(TaskState.READY_FOR_REVIEW, current_agent=agent, now=now)
+
+    # #145 code review: an externally-imposed interruption (capacity cutoff, timeout) is
+    # not evidence the Agent failed to follow the handoff contract -- the Agent may have
+    # had no opportunity to write anything at all, e.g. capacity exhausted the instant
+    # the process started. Escalating those straight to NEEDS_HUMAN on their very first
+    # occurrence would collapse the SPEC's normal capacity-driven agent-switch/retry
+    # design (cooldown tracking, max_agent_switches, requeue_after_capacity_event) into a
+    # human-escalation event before that design ever gets a chance to run. Readback is
+    # still performed and logged for these kinds (satisfying "every worker-end boundary
+    # is readback-validated"), but only PASS and genuine Agent-failure kinds actually
+    # escalate on a stale/invalid handoff.
+    _HANDOFF_NON_ESCALATING_KINDS = frozenset(
+        {
+            AgentResultKind.CAPACITY_SESSION,
+            AgentResultKind.CAPACITY_WEEKLY,
+            AgentResultKind.CAPACITY_TEMPORARY,
+            AgentResultKind.TIMEOUT,
+        }
+    )
+
+    def _enforce_handoff_freshness(
+        self, task: Task, agent: str, dispatched_at: datetime, result_kind: AgentResultKind
+    ) -> Task | None:
+        """#145: readback-validate the handoff at every worker-end boundary (normal,
+        capacity, timeout, failure -- called unconditionally right after worker.run()
+        returns, before any outcome-specific handling) so `handoff.continuous` has an
+        actual runtime-observable meaning instead of being a best-effort natural-language
+        instruction the Agent may or may not follow. A stale/invalid handoff is still
+        allowed to continue if a mechanical checkpoint (captured by the Scheduler itself,
+        not self-reported by the Agent) proves the same or newer progress happened;
+        otherwise the task is escalated directly to NEEDS_HUMAN -- except for capacity/
+        timeout outcomes (see _HANDOFF_NON_ESCALATING_KINDS), which are logged but never
+        forced to escalate, since those are externally-imposed interruptions rather than
+        Agent non-compliance. Returns the escalated Task, or None if the caller should
+        proceed with its normal result handling.
+        """
+        assert task.worktree is not None
+        from subsched.handoff import can_recover_from_checkpoint, readback_handoff
+
+        worktree_dir = Path(task.worktree)
+        readback = readback_handoff(worktree_dir, task, dispatched_at=dispatched_at)
+        if readback.ok:
+            return None
+        if can_recover_from_checkpoint(worktree_dir, task, dispatched_at=dispatched_at):
+            if self.structured_logger is not None:
+                self.structured_logger.log(
+                    "handoff_readback",
+                    level="WARN",
+                    issue_number=task.issue_number,
+                    agent=agent,
+                    task_id=task.task_id,
+                    message=readback.reason,
+                    data={"recovered_from_checkpoint": True},
+                )
+            return None
+        non_escalating = result_kind in self._HANDOFF_NON_ESCALATING_KINDS
+        if self.structured_logger is not None:
+            self.structured_logger.log(
+                "handoff_readback",
+                level="WARN" if non_escalating else "ERROR",
+                issue_number=task.issue_number,
+                agent=agent,
+                task_id=task.task_id,
+                message=readback.reason,
+                data={"recovered_from_checkpoint": False, "escalated": not non_escalating},
+            )
+        if non_escalating:
+            return None
+        return task.transition(
+            TaskState.NEEDS_HUMAN, current_agent=agent, now=dispatched_at, reason=readback.reason
+        )
 
     def _handle_result(self, task: Task, agent: str, result: AgentResult, now: datetime) -> None:
         if result.kind is AgentResultKind.PASS:
