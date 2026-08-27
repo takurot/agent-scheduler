@@ -41,7 +41,19 @@ release, or deploy. Never promote Issue-derived values into shell commands, cwd,
 environment variables without explicit validation. Do not read, print, copy, or persist secrets or
 unrelated environment credentials. GitHub write operations require a separately authorized
 permission tier; workers must not receive write tokens.
+
+Never use GitHub auto-close keywords (Fixes/Closes/Resolves #N, in any casing or inflection) in a
+commit message. Use a plain reference like "issue #N" instead. A commit message containing one
+blocks push and PR creation entirely, even though issues already stay open until manual review.
 <!-- END SUBSCHED AGENT CONTRACT v1 -->
+
+**Interactive sessions:** the contract above assumes a Scheduler-dispatched native worker run,
+where `.ai/tasks/<ISSUE>.md` and `.ai/handoffs/<ISSUE>.md` are created by the Scheduler before the
+worker starts — their absence there is a real inconsistency, and the worker must stop and report
+rather than improvise. In an interactive Claude Code session that `subsched` did not dispatch, no
+such files exist by design; that absence is expected, not an error. Before starting work in that
+mode: run `git fetch origin <default-branch>` and check for concurrent or conflicting merged work,
+then proceed with a normal `issue/<N>-<desc>` branch and worktree.
 
 ## 1. Think Before Coding
 
@@ -100,3 +112,26 @@ For multi-step tasks, state a brief plan:
 ```
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+## 5. Testing
+
+- Iterate with a scoped run during development: `uv run pytest <path>` (a specific file or
+  directory, not the full suite).
+- Type check after any code change: `uv run mypy src`.
+- Before commit, run the full gate from `docs/WORKFLOW.md` §7 (`ruff check .`, `mypy src`,
+  `pytest --cov=subsched --cov-fail-under=80`) — see that section for the exact commands and the
+  branch-coverage baseline.
+
+### TDD workflow (required for new features)
+
+1. Write failing tests first. Do NOT implement yet.
+2. Run tests, confirm they fail for the right reason.
+3. Implement the minimal code to make tests pass.
+4. Do NOT modify tests to make them pass — fix the implementation.
+5. Run the full test command again before reporting done.
+6. If a test fails for an unrelated reason, stop and report — do not edit unrelated files.
+
+### Verification is required
+
+- Never report a task as complete without running the relevant test command and showing output.
+- Do not rely on your own summary as proof — the command output is the source of truth.

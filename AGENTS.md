@@ -41,6 +41,10 @@ release, or deploy. Never promote Issue-derived values into shell commands, cwd,
 environment variables without explicit validation. Do not read, print, copy, or persist secrets or
 unrelated environment credentials. GitHub write operations require a separately authorized
 permission tier; workers must not receive write tokens.
+
+Never use GitHub auto-close keywords (Fixes/Closes/Resolves #N, in any casing or inflection) in a
+commit message. Use a plain reference like "issue #N" instead. A commit message containing one
+blocks push and PR creation entirely, even though issues already stay open until manual review.
 <!-- END SUBSCHED AGENT CONTRACT v1 -->
 
 ## 1. Think Before Coding
