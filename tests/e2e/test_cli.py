@@ -130,6 +130,134 @@ def test_explicit_issue_dry_run_persists_queue_and_status(tmp_path: Path) -> Non
     assert "2" in status.output
 
 
+def test_run_prints_effective_config_summary_before_discovery(tmp_path: Path) -> None:
+    """Regression test for #144: repo, selection mode/target, native/write policy, and
+    verification commands must be visible before any discovery or state mutation."""
+    result = invoke(tmp_path, "run", "--repo", "owner/project", "--issues", "101", "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "Effective configuration:" in result.output
+    assert "repo: owner/project" in result.output
+    assert "selection: issues=101" in result.output
+    assert "execution: dry-run" in result.output
+    assert "write policy:" in result.output
+    assert "verification commands:" in result.output
+
+
+def test_run_with_list_mode_config_needs_no_cli_issues_override(
+    tmp_path: Path,
+) -> None:
+    """Regression test for #144: github.mode: list plus github.issues must be enough for
+    a config file alone to define a reproducible explicit-Issue run, with no --issues
+    CLI argument required."""
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\n  mode: list\n  issues:\n    - 101\n    - 7\n",
+        encoding="utf-8",
+    )
+
+    result = invoke(tmp_path, "run", "--config", str(config_file), "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "2 issue(s) discovered" in result.output
+    assert "selection: issues=101,7" in result.output
+
+    status = invoke(tmp_path, "status", "--verbose")
+    assert "#101" in status.output
+    assert "#7" in status.output
+    assert "#103" not in status.output
+
+
+def test_cli_issues_override_takes_precedence_over_config_list_mode(
+    tmp_path: Path,
+) -> None:
+    """Regression test for #144: CLI --issues must override config.github.mode: list's
+    issue set, not merge with or be overridden by it -- locking down the documented
+    CLI-override > config > safe-default precedence."""
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\n  mode: list\n  issues:\n    - 101\n",
+        encoding="utf-8",
+    )
+
+    result = invoke(
+        tmp_path, "run", "--config", str(config_file), "--issues", "103", "--dry-run"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 issue(s) discovered" in result.output
+    assert "selection: issues=103" in result.output
+
+    status = invoke(tmp_path, "status", "--verbose")
+    assert "#103" in status.output
+    assert "#101" not in status.output
+
+
+def test_config_validate_prints_summary_with_no_state_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#144: `subsched config validate` must resolve and print the same effective
+    configuration `run` would use, without ever contacting GitHub or touching scheduler
+    state."""
+    list_open_calls: list[str] = []
+
+    def list_open(
+        self: GitHubIssueSource, repo: str, *, label: str | None = None
+    ) -> tuple[Issue, ...]:
+        list_open_calls.append(repo)
+        return ()
+
+    monkeypatch.setattr(GitHubIssueSource, "list_open", list_open)
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\n  mode: list\n  issues:\n    - 101\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["--repository", str(tmp_path), "config", "validate", "--config", str(config_file)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Effective configuration:" in result.output
+    assert "repo: owner/project" in result.output
+    assert "selection: issues=101" in result.output
+    assert "Configuration is valid." in result.output
+    assert list_open_calls == []
+    assert not (tmp_path / ".ai" / "scheduler.json").exists()
+
+
+def test_config_validate_rejects_malformed_issues_like_run_would(tmp_path: Path) -> None:
+    """Regression test for #144 code review: config validate previously stored the raw
+    --issues string without ever calling the same parser run() uses, so it reported
+    'Configuration is valid.' for a value run() would reject with exit code 2."""
+    validate_result = runner.invoke(
+        app,
+        [
+            "--repository",
+            str(tmp_path),
+            "config",
+            "validate",
+            "--repo",
+            "owner/project",
+            "--issues",
+            "abc,xyz",
+            "--dry-run",
+        ],
+    )
+    assert validate_result.exit_code != 0
+    assert "Configuration is valid." not in validate_result.output
+
+    run_result = invoke(
+        tmp_path, "run", "--repo", "owner/project", "--issues", "abc,xyz", "--dry-run"
+    )
+    assert run_result.exit_code != 0
+    # Both commands must reject the same malformed input the same way.
+    assert validate_result.exit_code == run_result.exit_code
+
+
 def test_run_without_repository_option_uses_git_repository_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -850,3 +978,91 @@ def test_queue_priority_label_scores_changes_dispatch_order(
     # 103 has a configured label score and must dispatch first; 1 and 101 are tied
     # (no matching label) and must fall back to ascending issue number.
     assert dispatch_order == [103, 1, 101]
+
+
+def test_native_run_produces_jsonl_lifecycle_timeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #141: a successful native run previously produced zero
+    structured lifecycle events (only a worker exception path was wired to the logger) --
+    .ai/runtime/scheduler.jsonl did not even exist after a normal COMPLETE run. This
+    asserts the full expected event timeline is present and the file is permission-
+    hardened, matching #143's runtime-state hardening."""
+    import shutil
+    import stat
+    import sys
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+    remote_dir = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(remote_dir)], check=True, capture_output=True
+    )
+    _git(repo_dir, "remote", "add", "origin", str(remote_dir))
+    _git(repo_dir, "push", "-q", "-u", "origin", "main")
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\nverification:\n  commands:\n    - 'true'\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        # #145: handoff.continuous defaults to true, so a compliant Agent must update
+        # the handoff before finishing or this otherwise-successful run gets escalated
+        # to NEEDS_HUMAN instead of exercising the JSONL lifecycle timeline under test.
+        _update_handoff(request.cwd, issue_number=1, title="Task 1")
+        return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
+
+    monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
+    monkeypatch.setattr(
+        "subsched.github.pull_requests.create_or_get_pull_request",
+        lambda *a, **k: PullRequestResult(
+            kind=PullRequestResultKind.SUCCESS,
+            info=PullRequestInfo(
+                number=9, url="https://example.invalid/pull/9", title="t", body="b"
+            ),
+        ),
+    )
+
+    result = invoke(
+        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+    )
+    assert result.exit_code == 0, result.output
+    assert "READY_FOR_REVIEW" in result.output
+
+    log_path = repo_dir / ".ai" / "runtime" / "scheduler.jsonl"
+    assert log_path.exists()
+    lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    events = [entry["event"] for entry in lines]
+
+    for expected in (
+        "run_start",
+        "discovery",
+        "dispatch",
+        "agent_finish",
+        "verification_start",
+        "gate_result",
+        "checkpoint",
+        "rebase",
+        "push",
+        "pr_created",
+        "task_transition",
+        "run_end",
+    ):
+        assert expected in events, f"missing {expected} in {events}"
+
+    # Every event must carry the same run_id so a JSONL consumer can reconstruct this
+    # one run's timeline even if other runs' events are interleaved in the same file.
+    run_ids = {
+        entry["data"]["run_id"] for entry in lines if "data" in entry and "run_id" in entry["data"]
+    }
+    assert len(run_ids) == 1
+
+    if sys.platform != "win32":
+        assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(log_path.parent.stat().st_mode) == 0o700
+

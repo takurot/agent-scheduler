@@ -114,6 +114,47 @@ def test_run_process_group_output_size_limit(tmp_path: Path) -> None:
     assert result.cleanup_succeeded is True
 
 
+def test_run_process_group_invokes_heartbeat_without_busy_polling(tmp_path: Path) -> None:
+    """Regression test for #141: a long-running worker invocation previously blocked on
+    a single process.wait(timeout=full_timeout) call with no way to observe progress
+    until it finished. run_process_group must poll in heartbeat_interval_seconds
+    increments and invoke the heartbeat callback each time, without busy-polling (the
+    poll interval must equal heartbeat_interval_seconds, not a tight sub-millisecond
+    loop)."""
+    ticks: list[float] = []
+    request = ProcessExecutionRequest(
+        argv=(sys.executable, "-c", "import time; time.sleep(0.3)"),
+        cwd=tmp_path,
+        env={"PATH": os.environ.get("PATH", "")},
+        timeout_seconds=5.0,
+        heartbeat=ticks.append,
+        heartbeat_interval_seconds=0.05,
+    )
+    result = run_process_group(request)
+
+    assert result.exit_code == 0
+    assert result.timed_out is False
+    # ~0.3s of sleep at a 0.05s heartbeat interval should yield several heartbeats, not
+    # zero (heartbeat never fired) and not hundreds (busy-polling).
+    assert 3 <= len(ticks) <= 20
+    # Elapsed values passed to the heartbeat must be monotonically non-decreasing.
+    assert ticks == sorted(ticks)
+
+
+def test_run_process_group_no_heartbeat_configured_behaves_as_before(tmp_path: Path) -> None:
+    """Backward compatibility: heartbeat=None (the default) must not change behavior or
+    require a callback."""
+    request = ProcessExecutionRequest(
+        argv=(sys.executable, "-c", "print('hello world')"),
+        cwd=tmp_path,
+        env={"PATH": os.environ.get("PATH", "")},
+        timeout_seconds=5.0,
+    )
+    result = run_process_group(request)
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "hello world"
+
+
 def test_run_process_group_timeout_terminates_group(tmp_path: Path) -> None:
     request = ProcessExecutionRequest(
         argv=(

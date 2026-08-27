@@ -104,7 +104,26 @@ def run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResul
     stdin_writer.start()
 
     try:
-        process.wait(timeout=request.timeout_seconds)
+        # #141: poll in heartbeat_interval_seconds increments instead of a single
+        # process.wait(timeout=full_timeout) call, so a heartbeat callback can observe
+        # progress on a long-running agent invocation without busy-polling (the loop only
+        # wakes up once per heartbeat_interval_seconds, default 60s) and without changing
+        # the overall timeout/cleanup semantics below.
+        deadline = time.monotonic() + request.timeout_seconds
+        elapsed = 0.0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd=request.argv, timeout=request.timeout_seconds)
+            wait_for = min(remaining, request.heartbeat_interval_seconds)
+            try:
+                process.wait(timeout=wait_for)
+                break
+            except subprocess.TimeoutExpired:
+                elapsed += wait_for
+                if request.heartbeat is not None:
+                    request.heartbeat(elapsed)
+                continue
     except subprocess.TimeoutExpired:
         cleanup_ok = stop_process_group(process, request.grace_seconds)
         return ProcessExecutionResult(
