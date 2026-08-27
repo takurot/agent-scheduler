@@ -33,6 +33,12 @@ def test_build_worker_prompt_contains_mandatory_instructions() -> None:
     assert "Scheduler's responsibility after verification passes." in prompt
     assert "Do not close the issue" in prompt
     assert "never automatically" in prompt
+    # Regression test for #140: the prompt must explicitly forbid GitHub auto-close
+    # keywords in commit messages, not just in the (Scheduler-generated) PR body.
+    assert "Fixes" in prompt
+    assert "Closes" in prompt
+    assert "Resolves" in prompt
+    assert "commit message" in prompt
 
 
 def test_validate_dispatch_preconditions_fails_if_files_missing(tmp_path: Path) -> None:
