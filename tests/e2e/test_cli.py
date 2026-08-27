@@ -21,6 +21,32 @@ from subsched.storage import JsonStateStore
 runner = CliRunner()
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _assert_isolated_from_primary_repo(path: Path) -> None:
+    """#147: interim guard against the exact class of incident that issue documented --
+    a real `git init`/`git commit` intended for an isolated pytest tmp_path instead
+    landing on this actual project repository. Fails loud immediately rather than
+    letting a real, destructive git operation run against `_REPO_ROOT` or a path that
+    contains/is contained by it.
+    """
+    resolved = path.resolve()
+    if resolved == _REPO_ROOT:
+        raise AssertionError(
+            f"refusing to run git init against the primary repository itself: {resolved}"
+        )
+    if _REPO_ROOT in resolved.parents:
+        raise AssertionError(
+            f"refusing to run git init inside the primary repository: {resolved} is under "
+            f"{_REPO_ROOT}"
+        )
+    if resolved in _REPO_ROOT.parents:
+        raise AssertionError(
+            f"refusing to run git init on an ancestor of the primary repository: {resolved}"
+        )
+
+
 @pytest.fixture(autouse=True)
 def _no_real_merged_pr_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
     """#146's merged-PR discovery check calls the real `gh` CLI by default. Per this
@@ -40,6 +66,7 @@ def _git(path: Path, *args: str) -> None:
 
 def _init_git_repo(path: Path) -> None:
     """Create a minimal real local git repository with one commit on `main`."""
+    _assert_isolated_from_primary_repo(path)
     subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True, capture_output=True)
     _git(path, "config", "user.email", "test@example.invalid")
     _git(path, "config", "user.name", "Test")
@@ -980,6 +1007,25 @@ def test_queue_priority_label_scores_changes_dispatch_order(
     assert dispatch_order == [103, 1, 101]
 
 
+def test_assert_isolated_from_primary_repo_rejects_the_real_repo_root() -> None:
+    """Regression test for #147: the interim guard must refuse to run git init against
+    the primary repository itself."""
+    with pytest.raises(AssertionError, match="primary repository itself"):
+        _assert_isolated_from_primary_repo(_REPO_ROOT)
+
+
+def test_assert_isolated_from_primary_repo_rejects_a_path_inside_the_real_repo() -> None:
+    with pytest.raises(AssertionError, match="inside the primary repository"):
+        _assert_isolated_from_primary_repo(_REPO_ROOT / "src" / "subsched")
+
+
+def test_assert_isolated_from_primary_repo_accepts_a_genuinely_isolated_path(
+    tmp_path: Path,
+) -> None:
+    # Must not raise.
+    _assert_isolated_from_primary_repo(tmp_path)
+
+
 def test_native_run_produces_jsonl_lifecycle_timeline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1065,4 +1111,3 @@ def test_native_run_produces_jsonl_lifecycle_timeline(
     if sys.platform != "win32":
         assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
         assert stat.S_IMODE(log_path.parent.stat().st_mode) == 0o700
-
