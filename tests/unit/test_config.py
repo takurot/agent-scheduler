@@ -139,6 +139,18 @@ def test_agent_timeout_seconds_default_and_override(tmp_path: Path) -> None:
     assert load_config(override_path).execution.agent_timeout_seconds == 900
 
 
+def test_ci_monitoring_defaults_to_disabled(tmp_path: Path) -> None:
+    default_path = tmp_path / "default.yaml"
+    default_path.write_text("github:\n  repo: o/r\n", encoding="utf-8")
+    assert load_config(default_path).execution.ci_monitoring is False
+
+    enabled_path = tmp_path / "enabled.yaml"
+    enabled_path.write_text(
+        "github:\n  repo: o/r\nexecution:\n  ci_monitoring: true\n", encoding="utf-8"
+    )
+    assert load_config(enabled_path).execution.ci_monitoring is True
+
+
 def test_agent_timeout_seconds_rejects_non_positive(tmp_path: Path) -> None:
     path = tmp_path / "scheduler.yaml"
     path.write_text(

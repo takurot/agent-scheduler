@@ -109,6 +109,7 @@ class ExecutionConfig:
     max_tasks_per_run: int = 50
     pause_running_policy: str = "continue"
     agent_timeout_seconds: int = 300
+    ci_monitoring: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +177,7 @@ SECTION_KEYS: dict[str, frozenset[str]] = {
             "max_tasks_per_run",
             "pause_running_policy",
             "agent_timeout_seconds",
+            "ci_monitoring",
         }
     ),
     "queue": frozenset({"priority"}),
@@ -307,6 +309,9 @@ def _parse_execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
     agent_timeout_seconds = _strict_pos_int(
         raw.get("agent_timeout_seconds", 300), "execution.agent_timeout_seconds"
     )
+    ci_monitoring = _strict_bool(
+        raw.get("ci_monitoring", False), "execution.ci_monitoring"
+    )
     return ExecutionConfig(
         concurrency=concurrency,
         max_agent_switches=max_switches,
@@ -315,6 +320,7 @@ def _parse_execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
         max_tasks_per_run=max_tasks,
         pause_running_policy=policy,
         agent_timeout_seconds=agent_timeout_seconds,
+        ci_monitoring=ci_monitoring,
     )
 
 

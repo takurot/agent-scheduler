@@ -363,12 +363,14 @@ def test_run_output_message_reflects_mode(tmp_path: Path, monkeypatch: pytest.Mo
     assert "(dry-run)" not in res_native.output
 
 
-def test_native_run_drives_scheduler_to_complete_and_opens_pr(
+def test_native_run_drives_scheduler_to_ready_for_review_and_opens_pr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End-to-end (per WORKFLOW.md's E2E policy: real git, no real provider or GitHub calls)
     check that `--allow-native` actually dispatches, verifies, pushes, and creates a PR --
-    not just discovers and persists."""
+    not just discovers and persists. Regression test for #142: opening a PR stops at
+    READY_FOR_REVIEW, not COMPLETE -- CI hasn't been checked and no human has reviewed
+    anything yet."""
     import shutil
 
     monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
@@ -415,9 +417,75 @@ def test_native_run_drives_scheduler_to_complete_and_opens_pr(
 
     assert result.exit_code == 0, result.output
     assert "1 issue(s) discovered and persisted" in result.output
+    assert "READY_FOR_REVIEW" in result.output
+
+    status = invoke(repo_dir, "status", "--verbose")
+    assert "READY_FOR_REVIEW" in status.output
+    assert "PR #7" in status.output
+
+
+def test_ci_monitoring_promotes_ready_for_review_to_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #142: with execution.ci_monitoring enabled, the Scheduler's
+    run_until_waiting loop re-ticks after PR creation within the same `run` invocation,
+    polls CI for the READY_FOR_REVIEW task, and promotes it to COMPLETE once CI actually
+    PASSes -- not just because a PR was opened."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+    remote_dir = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", str(remote_dir)], check=True, capture_output=True
+    )
+    _git(repo_dir, "remote", "add", "origin", str(remote_dir))
+    _git(repo_dir, "push", "-q", "-u", "origin", "main")
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n"
+        "  repo: owner/project\n"
+        "verification:\n"
+        "  commands:\n"
+        "    - 'true'\n"
+        "execution:\n"
+        "  ci_monitoring: true\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
+
+    monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
+    monkeypatch.setattr(
+        "subsched.github.pull_requests.create_or_get_pull_request",
+        lambda *a, **k: PullRequestResult(
+            kind=PullRequestResultKind.SUCCESS,
+            info=PullRequestInfo(
+                number=7, url="https://example.invalid/pull/7", title="t", body="b"
+            ),
+        ),
+    )
+
+    from subsched.github.checks import CICheckState, PRChecksStatus
+
+    monkeypatch.setattr(
+        "subsched.cli.fetch_pr_checks",
+        lambda pr_number, **kwargs: PRChecksStatus(
+            pr_number=pr_number, overall_state=CICheckState.PASS, checks=()
+        ),
+    )
+
+    result = invoke(
+        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+    )
+    assert result.exit_code == 0, result.output
     assert "COMPLETE" in result.output
 
     status = invoke(repo_dir, "status", "--verbose")
     assert "COMPLETE" in status.output
-    assert "PR #7" in status.output
 

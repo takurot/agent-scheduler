@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import re
 import shutil
 from collections import Counter
@@ -19,6 +20,7 @@ from subsched.config import (
     parse_natural_language_instruction,
     validate_repo,
 )
+from subsched.github.checks import fetch_pr_checks
 from subsched.github.issues import GitHubCliError, GitHubIssueSource, diagnose_token
 from subsched.models import TaskState
 from subsched.router import AgentConfig, Router
@@ -180,6 +182,10 @@ def run(
             typer.echo(f"Worktree setup failed: {error}", err=True)
             raise typer.Exit(1) from error
 
+    ci_checker = None
+    if cfg.execution.ci_monitoring:
+        ci_checker = functools.partial(fetch_pr_checks, repo=resolved_repo)
+
     try:
         scheduler = Scheduler(
             store=context.store,
@@ -199,6 +205,7 @@ def run(
             push_enabled=not dry_run,
             repo=resolved_repo,
             structured_logger=StructuredLogger(context.store.runtime_dir / "scheduler.jsonl"),
+            ci_checker=ci_checker,
         )
     except (ValueError, StateCorruptionError) as error:
         typer.echo(f"State error: {error}", err=True)

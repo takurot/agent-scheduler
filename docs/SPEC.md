@@ -1292,6 +1292,29 @@ IMPLEMENTED
 
 Bernsteinを採用できる場合、このverification gateを既存機能へ委譲する。Bernsteinはtaskごとのworktreeとlint/type/test gateを持つ。
 
+## COMPLETEの定義（#142）
+
+`COMPLETE`は「PRを作成した」ことを意味しない。PR作成直後の既定terminal stateは
+`READY_FOR_REVIEW`であり、これはSchedulerローカルのverification（上記IMPLEMENTED）は
+通過したが、CI結果・人間によるreviewはまだ得られていないことを示す。
+
+- `execution.ci_monitoring: false`（既定）: `READY_FOR_REVIEW`のままとどまり、Scheduler
+  は自動でCOMPLETEへ昇格させない。PR merge後の後始末（Issue再発見の抑止等）は#146の
+  discovery-time reconciliationが別途担当する。
+- `execution.ci_monitoring: true`: 各tickで`READY_FOR_REVIEW`かつ`pr`を持つTaskの
+  CI状態を`gh pr checks`経由で確認する。
+  - CI `PASS` → `COMPLETE`へ昇格する。
+  - CI `FAIL` → `NEEDS_HUMAN`へ遷移する（失敗したcheck名を理由として記録）。**自動
+    requeueはしない**。push/PR作成失敗（#128）やcommit message違反（#140）と同じ
+    fail-closedの設計方針に合わせ、CI失敗は常に人間の判断を挟む。
+  - CI `PENDING`/`UNKNOWN` → 状態を変更しない（`READY_FOR_REVIEW`のまま様子を見る）。
+
+いずれの場合も、Issueの自動close・自動mergeは行わない（既存契約を維持）。
+
+metricsは`issues_implemented`（`READY_FOR_REVIEW`/`PR_READY`/`COMPLETE`を含む「実装済み」
+件数）、`issues_ready_for_review`（レビュー待ち件数）、`task_completion_rate`
+（`COMPLETE`のみを分子とする完了率）を分離して報告する。
+
 ---
 
 # 40. Pull Request Creation
