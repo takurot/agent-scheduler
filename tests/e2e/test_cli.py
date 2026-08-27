@@ -7,6 +7,7 @@ from typer.testing import CliRunner, Result
 
 from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
 from subsched.cli import app
+from subsched.gitenv import git_safe_env
 from subsched.github.issues import GitHubIssueSource
 from subsched.github.pull_requests import (
     MergedPrCheckKind,
@@ -61,13 +62,24 @@ def _no_real_merged_pr_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _git(path: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(path), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=git_safe_env(),
+    )
 
 
 def _init_git_repo(path: Path) -> None:
     """Create a minimal real local git repository with one commit on `main`."""
     _assert_isolated_from_primary_repo(path)
-    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main", str(path)],
+        check=True,
+        capture_output=True,
+        env=git_safe_env(),
+    )
     _git(path, "config", "user.email", "test@example.invalid")
     _git(path, "config", "user.name", "Test")
     _git(path, "commit", "--allow-empty", "-q", "-m", "init")

@@ -7,6 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from subsched.agents.process import redact_sensitive_command_audit
+from subsched.gitenv import git_safe_env
 from subsched.models import ALLOWED_TRANSITIONS, Task, TaskState
 
 
@@ -34,6 +35,7 @@ def rebase_onto_base(
         proc = subprocess.run(
             ["git", "rebase", base_branch],
             cwd=str(worktree_dir),
+            env=git_safe_env(),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -60,6 +62,7 @@ def rebase_onto_base(
         diff_proc = subprocess.run(
             ["git", "diff", "--name-only", "--diff-filter=U"],
             cwd=str(worktree_dir),
+            env=git_safe_env(),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -75,6 +78,7 @@ def rebase_onto_base(
         subprocess.run(
             ["git", "rebase", "--abort"],
             cwd=str(worktree_dir),
+            env=git_safe_env(),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,

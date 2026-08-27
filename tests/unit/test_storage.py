@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from subsched.gitenv import GIT_LOCATION_OVERRIDE_VARS
 from subsched.models import Capacity, CapacityState, Issue, Task, TaskState
 from subsched.storage import (
     JsonStateStore,
@@ -510,4 +511,24 @@ def test_find_repository_root_falls_back_on_nonzero_exit(tmp_path: Path) -> None
     root = find_repository_root(tmp_path, run=failing_run)
 
     assert root == tmp_path
+
+
+def test_find_repository_root_strips_git_location_override_env_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leaked GIT_DIR/GIT_WORK_TREE must never redirect the probe away from `start`
+    (issue #147)."""
+    monkeypatch.setenv("GIT_DIR", "/leaked/.git")
+    captured: dict[str, object] = {}
+
+    def spying_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout=str(tmp_path), stderr="")
+
+    find_repository_root(tmp_path, run=spying_run)
+
+    env = captured.get("env")
+    assert isinstance(env, dict)
+    for name in GIT_LOCATION_OVERRIDE_VARS:
+        assert name not in env
 

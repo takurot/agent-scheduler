@@ -7,6 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from subsched.agents.process import redact_sensitive_command_audit
+from subsched.gitenv import git_safe_env
 
 
 class PushResultKind(StrEnum):
@@ -62,7 +63,7 @@ def push_task_branch(
         res = subprocess.run(
             argv,
             cwd=str(worktree_dir),
-            env=env,
+            env=git_safe_env(env),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,

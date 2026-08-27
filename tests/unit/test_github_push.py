@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from subsched.gitenv import GIT_LOCATION_OVERRIDE_VARS
 from subsched.github.push import (
     PushResultKind,
     push_task_branch,
@@ -53,6 +54,27 @@ def test_push_task_branch_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     res = push_task_branch(tmp_path, "feature/x")
     assert res.kind is PushResultKind.SUCCESS
     assert calls == [("git", "push", "-u", "--", "origin", "HEAD:refs/heads/feature/x")]
+
+
+def test_push_task_branch_strips_git_location_override_env_vars(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A leaked GIT_DIR/GIT_WORK_TREE must never redirect the push away from `worktree_dir`
+    (issue #147)."""
+    monkeypatch.setenv("GIT_DIR", "/leaked/.git")
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    push_task_branch(tmp_path, "feature/x")
+
+    env = captured.get("env")
+    assert isinstance(env, dict)
+    for name in GIT_LOCATION_OVERRIDE_VARS:
+        assert name not in env
 
 
 def test_push_task_branch_classifications(

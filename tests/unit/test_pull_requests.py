@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from subsched.gitenv import GIT_LOCATION_OVERRIDE_VARS
 from subsched.github.pull_requests import (
     MergedPrCheckKind,
     PullRequestResultKind,
@@ -298,3 +299,25 @@ def test_find_close_keyword_commits_does_not_rewrite_history(tmp_path: Path) -> 
 def test_find_close_keyword_commits_fails_closed_on_git_error(tmp_path: Path) -> None:
     result = find_close_keyword_commits(tmp_path / "not-a-repo", "main")
     assert result is None
+
+
+def test_find_close_keyword_commits_strips_git_location_override_env_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leaked GIT_DIR/GIT_WORK_TREE must never redirect this read-only `git log` away
+    from `worktree_dir` (issue #147 follow-up: this call site was missed in the initial
+    git_safe_env() rollout)."""
+    monkeypatch.setenv("GIT_DIR", "/leaked/.git")
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    find_close_keyword_commits(tmp_path, "main")
+
+    env = captured.get("env")
+    assert isinstance(env, dict)
+    for name in GIT_LOCATION_OVERRIDE_VARS:
+        assert name not in env

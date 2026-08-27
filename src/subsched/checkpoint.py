@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from subsched.gitenv import git_safe_env
 from subsched.models import AgentResult
 from subsched.storage import atomic_write_secure_bytes, secure_directory
 
@@ -118,6 +119,7 @@ def _run_git(cwd: Path, args: list[str]) -> str:
         res = subprocess.run(
             ["git", *args],
             cwd=str(cwd),
+            env=git_safe_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
