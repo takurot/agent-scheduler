@@ -26,6 +26,55 @@ logger = logging.getLogger(__name__)
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
 
 
+def secure_directory(path: Path, *, mode: int = 0o700) -> None:
+    """Create `path` (and any missing parents) and enforce `mode` on it, refusing a
+    symlinked target so runtime state directories (backups, checkpoints) can't be
+    redirected outside the intended tree. Existing regular files directly inside are
+    repaired to 0600 in place -- without touching their content -- so state written
+    before this hardening was added (or by an older subsched version) is not left
+    world-/group-readable forever, and is never deleted.
+    """
+    if path.is_symlink():
+        raise OSError(f"refusing to use symlinked directory: {path}")
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, mode)
+    for child in path.iterdir():
+        if child.is_symlink() or not child.is_file():
+            continue
+        with contextlib.suppress(OSError):
+            os.chmod(child, 0o600)
+
+
+def atomic_write_secure_bytes(path: Path, data: bytes, *, mode: int = 0o600) -> None:
+    """Write `data` to `path` atomically (temp file + fsync + rename, plus a directory
+    fsync) with `mode` permissions, refusing to write through a symlink at `path` or its
+    parent directory (fail-closed against a TOCTOU/symlink swap onto sensitive runtime
+    state)."""
+    parent = path.parent
+    if parent.is_symlink():
+        raise OSError(f"refusing to write into symlinked directory: {parent}")
+    if path.is_symlink():
+        raise OSError(f"refusing to write over a symlink: {path}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f"{path.name}.", suffix=".tmp", dir=parent
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_name, mode)
+        os.replace(temporary_name, path)
+        directory_descriptor = os.open(parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except BaseException:
+        Path(temporary_name).unlink(missing_ok=True)
+        raise
+
+
 def find_repository_root(start: Path, *, run: RunCommand | None = None) -> Path:
     """Return the git repository root containing `start`, or `start` unchanged otherwise.
 
@@ -259,8 +308,7 @@ class JsonStateStore:
             self.quarantine_dir,
             self.backup_dir,
         ):
-            directory.mkdir(parents=True, exist_ok=True)
-            os.chmod(directory, 0o700)
+            secure_directory(directory)
 
     def lock(self) -> SchedulerLock:
         return SchedulerLock(self.lock_file)
@@ -314,7 +362,7 @@ class JsonStateStore:
         if self.path.exists():
             backup_file = self.backup_dir / "scheduler.bak.json"
             try:
-                backup_file.write_bytes(self.path.read_bytes())
+                atomic_write_secure_bytes(backup_file, self.path.read_bytes())
             except OSError as err:
                 logger.warning("failed to create backup before saving state: %s", err)
 
