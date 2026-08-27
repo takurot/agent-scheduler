@@ -17,6 +17,7 @@ from subsched.config import (
     ConfigError,
     SchedulerConfig,
     load_config,
+    parse_duration,
     parse_natural_language_instruction,
     validate_repo,
 )
@@ -248,6 +249,7 @@ def run(
             # validation at every worker-end boundary) instead of remaining a
             # best-effort natural-language instruction with no observable effect.
             handoff_continuous=cfg.handoff.continuous,
+            max_task_runtime_seconds=float(parse_duration(cfg.execution.max_task_runtime)),
             ci_checker=ci_checker,
             merged_pr_checker=merged_pr_checker,
         )
@@ -331,6 +333,11 @@ def status(
             typer.echo(f"  #{t.issue_number:<4} {t.status.value:<18} {t.title}{pr_str}{agent_str}")
             if t.needs_human_reason:
                 typer.echo(f"        reason: {t.needs_human_reason}")
+            if t.run_started_at:
+                # #137: distinct from execution.agent_timeout_seconds (a per-invocation
+                # config value, not per-task state) -- this is the durable Task-level
+                # runtime budget's start point, since first dispatch.
+                typer.echo(f"        task runtime since: {t.run_started_at.isoformat()}")
 
 
 @app.command()
