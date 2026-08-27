@@ -72,6 +72,7 @@ class Scheduler:
         repo: str | None = None,
         base_branch: str = "main",
         structured_logger: StructuredLogger | None = None,
+        max_task_runtime_seconds: float | None = None,
         ci_checker: Callable[[int], PRChecksStatus] | None = None,
         merged_pr_checker: Callable[[int], MergedPrCheckResult] | None = None,
     ) -> None:
@@ -83,6 +84,9 @@ class Scheduler:
         self.clock = clock or SystemClock()
         self.event_sources = event_sources
         self.structured_logger = structured_logger
+        if max_task_runtime_seconds is not None and max_task_runtime_seconds <= 0:
+            raise ValueError("max_task_runtime_seconds must be positive")
+        self.max_task_runtime_seconds = max_task_runtime_seconds
         self.ci_checker = ci_checker
         self.merged_pr_checker = merged_pr_checker
         self.discovery_notes: tuple[tuple[int, str], ...] = ()
@@ -200,6 +204,7 @@ class Scheduler:
         if self.store.is_paused():
             return False
 
+        self._expire_overrun_tasks(current)
         self._poll_ci_checks(current)
 
         supplied = {capacity.agent: capacity for capacity in capacities}
@@ -261,6 +266,10 @@ class Scheduler:
                 dispatched,
                 actual_agent_switches=actual_switches,
                 last_dispatched_agent=agent,
+                # #137: set once on first dispatch, preserved on every later attempt
+                # (retry, failover, restart) so execution.max_task_runtime is a durable
+                # budget for the whole Task, not reset per attempt.
+                run_started_at=task.run_started_at or current,
             )
             running = dispatched.transition(TaskState.IN_PROGRESS, current_agent=agent, now=current)
             self.queue = self.queue.replace(running)
@@ -593,6 +602,42 @@ class Scheduler:
                 active_cooldowns = {**active_cooldowns, name: capacity}
         self._cooldowns = active_cooldowns
         return {**supplied, **active_cooldowns}
+
+    _RUNTIME_EXPIRABLE_STATES = frozenset(
+        {
+            TaskState.READY,
+            TaskState.WAITING_CAPACITY,
+            TaskState.RETRY,
+            TaskState.WAITING_DEPENDENCY,
+            TaskState.BLOCKED,
+        }
+    )
+
+    def _expire_overrun_tasks(self, now: datetime) -> None:
+        """#137: enforce execution.max_task_runtime as a durable budget covering the
+        whole Task (across failover/retry/restart), not a single attempt. Runs before
+        dispatch on every tick so a task whose budget is already exhausted is never
+        redispatched. Escalates to NEEDS_HUMAN (fail-closed, no silent drop) rather than
+        a terminal FAILED/CANCELLED, since the work may still be valuable and just needs
+        a human decision (matches the fail-closed pattern used elsewhere in this class).
+        """
+        if self.max_task_runtime_seconds is None:
+            return
+        for task in self.tasks:
+            if task.status not in self._RUNTIME_EXPIRABLE_STATES or task.run_started_at is None:
+                continue
+            elapsed = (now - task.run_started_at).total_seconds()
+            if elapsed < self.max_task_runtime_seconds:
+                continue
+            reason = (
+                f"execution.max_task_runtime exceeded ({int(elapsed)}s >= "
+                f"{int(self.max_task_runtime_seconds)}s since first dispatch)"
+            )
+            updated = task.transition(
+                TaskState.NEEDS_HUMAN, current_agent=task.current_agent, now=now, reason=reason
+            )
+            self.queue = self.queue.replace(updated)
+            self._persist()
 
     def _release_waiting_tasks(self, now: datetime) -> None:
         for task in self.tasks:
