@@ -66,6 +66,7 @@ class Scheduler:
         max_agent_switches: int = 6,
         max_tasks: int = 50,
         push_enabled: bool = False,
+        create_pr_enabled: bool = True,
         repo: str | None = None,
         base_branch: str = "main",
         structured_logger: StructuredLogger | None = None,
@@ -83,6 +84,7 @@ class Scheduler:
             raise ValueError("verification_timeout_seconds must be positive")
         self.verification_timeout_seconds = verification_timeout_seconds
         self.push_enabled = push_enabled
+        self.create_pr_enabled = create_pr_enabled
         self.repo = repo
         self.base_branch = base_branch
         self.concurrency = concurrency
@@ -312,12 +314,14 @@ class Scheduler:
     ) -> Task:
         """Complete a task that has passed verification: rebase, push, and open/reuse its PR.
 
-        When push_enabled is False (the default, and what every existing test uses), or the
-        task has no worktree, this only advances local task state to COMPLETE -- no git or
-        GitHub calls are made. This keeps the change additive: nothing that already worked
-        without push/PR wiring changes behavior.
+        When push_enabled is False (the default, and what every existing test uses), when
+        create_pr_enabled is False (#136: github.completion.create_pr=false must actually
+        disable GitHub writes, not just be parsed and ignored), or the task has no worktree,
+        this only advances local task state to COMPLETE -- no git or GitHub calls are made.
+        This keeps the change additive: nothing that already worked without push/PR wiring
+        changes behavior.
         """
-        if not self.push_enabled or verifying.worktree is None:
+        if not self.push_enabled or not self.create_pr_enabled or verifying.worktree is None:
             pr_ready = verifying.transition(TaskState.PR_READY, current_agent=agent, now=now)
             ready_for_review = pr_ready.transition(
                 TaskState.READY_FOR_REVIEW, current_agent=agent, now=now
