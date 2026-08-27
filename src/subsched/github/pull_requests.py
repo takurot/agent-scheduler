@@ -5,16 +5,20 @@ import re
 import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
 from subsched.agents.process import redact_sensitive_command_audit
 from subsched.models import Task
 
-_CLOSE_KEYWORD_RE = re.compile(r"\b(fix(e[sd])?|close[sd]?|resolve[sd]?)\s*#", re.IGNORECASE)
+# Shared between the PR body sanitizer (_strip_close_keywords) and the commit-message
+# gate (find_close_keyword_commits) so both enforce the exact same auto-close policy
+# (regression test for #140: previously only PR body text was checked).
+CLOSE_KEYWORD_RE = re.compile(r"\b(fix(e[sd])?|close[sd]?|resolve[sd]?)\s*#", re.IGNORECASE)
 
 
 def _strip_close_keywords(text: str) -> str:
     """Replace GitHub auto-closing keywords with safe issue reference."""
-    return _CLOSE_KEYWORD_RE.sub("issue #", text)
+    return CLOSE_KEYWORD_RE.sub("issue #", text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +43,74 @@ class PullRequestResult:
 
 def _redact(text: str) -> str:
     return "\n".join(redact_sensitive_command_audit(tuple(text.splitlines())))
+
+
+@dataclass(frozen=True, slots=True)
+class CloseKeywordViolation:
+    commit: str
+    keyword_context: str
+
+
+_LOG_RECORD_SEP = "\x1e"
+_LOG_FIELD_SEP = "\x1f"
+
+
+def find_close_keyword_commits(
+    worktree_dir: Path,
+    base_branch: str,
+    env: dict[str, str] | None = None,
+    timeout_seconds: float = 30.0,
+) -> tuple[CloseKeywordViolation, ...] | None:
+    """Scan commits reachable from HEAD but not from base_branch for GitHub auto-close
+    keywords (Fixes/Closes/Resolves #N) anywhere in the full commit message.
+
+    Regression coverage for #140: a worker's local commit message was never checked
+    before push (only the generated PR body was sanitized), so a commit whose message
+    happened to end with e.g. "Closes #130" could trigger GitHub's merge-time
+    auto-close, bypassing the "issues stay open until manual review" invariant.
+
+    Returns an empty tuple when no commit is reachable from HEAD but not base_branch,
+    or when none contain a close keyword. Returns None (fail closed) if the commits
+    could not be inspected at all (e.g. git failure), so the caller must not treat
+    "could not check" as "clean". Never rewrites history -- read-only `git log`.
+    """
+    argv = [
+        "git",
+        "-C",
+        str(worktree_dir),
+        "log",
+        f"{base_branch}..HEAD",
+        f"--format=%H{_LOG_FIELD_SEP}%B{_LOG_RECORD_SEP}",
+    ]
+    try:
+        res = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_seconds,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+
+    violations: list[CloseKeywordViolation] = []
+    for record in res.stdout.split(_LOG_RECORD_SEP):
+        record = record.strip("\n")
+        if not record:
+            continue
+        commit_sha, _, message = record.partition(_LOG_FIELD_SEP)
+        if CLOSE_KEYWORD_RE.search(message):
+            violations.append(
+                CloseKeywordViolation(
+                    commit=commit_sha[:12], keyword_context=_redact(message.strip())
+                )
+            )
+    return tuple(violations)
 
 
 def build_pr_body(issue_number: int, summary: str = "", verification_results: str = "") -> str:
@@ -105,6 +177,125 @@ def lookup_existing_pr(
         )
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, ValueError):
         return None
+
+
+class MergedPrCheckKind(StrEnum):
+    NONE = "NONE"
+    CONFIRMED = "CONFIRMED"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+@dataclass(frozen=True, slots=True)
+class MergedPrCheckResult:
+    kind: MergedPrCheckKind
+    pr_number: int | None = None
+    reason: str = ""
+
+
+def check_merged_pr_for_issue(
+    repo: str,
+    issue_number: int,
+    env: dict[str, str] | None = None,
+    timeout_seconds: float = 30.0,
+) -> MergedPrCheckResult:
+    """Look for a merged PR that already implements this issue (#146: without this,
+    discovery re-adds a merged-but-still-open issue as READY and duplicates work).
+
+    Untrusted-schema handling: PR body/branch-name content from GitHub is never trusted
+    blindly. Only a merged PR whose body starts with the exact Scheduler-generated
+    "Implements work for #N." prefix (see build_pr_body) *and* whose branch matches the
+    Scheduler's own naming convention (subsched/issue-N) is treated as CONFIRMED -- a
+    strong, structural signal that the Scheduler itself created and merged this PR.
+    Anything weaker (a merged PR that merely mentions the issue number, multiple
+    candidates, or a gh failure) is AMBIGUOUS and must not be silently treated as
+    confirmed-safe; callers fail closed on AMBIGUOUS by excluding the issue from READY
+    and escalating it to NEEDS_HUMAN for manual review, matching the SPEC principle that
+    the Scheduler never auto-closes or auto-completes ambiguous GitHub state.
+    """
+    argv = [
+        "gh",
+        "pr",
+        "list",
+        "--repo",
+        repo,
+        "--search",
+        f"#{issue_number} in:body",
+        "--state",
+        "merged",
+        "--json",
+        "number,headRefName,body",
+        "--limit",
+        "10",
+    ]
+    try:
+        res = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_seconds,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return MergedPrCheckResult(
+            kind=MergedPrCheckKind.AMBIGUOUS,
+            reason=(
+                f"could not verify whether issue #{issue_number} already has a merged "
+                "PR (gh invocation failed); review manually before treating it as READY"
+            ),
+        )
+    if res.returncode != 0:
+        return MergedPrCheckResult(
+            kind=MergedPrCheckKind.AMBIGUOUS,
+            reason=(
+                f"could not verify whether issue #{issue_number} already has a merged "
+                f"PR (gh exited {res.returncode}); review manually before treating it as READY"
+            ),
+        )
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return MergedPrCheckResult(
+            kind=MergedPrCheckKind.AMBIGUOUS,
+            reason=(
+                f"could not verify whether issue #{issue_number} already has a merged "
+                "PR (unparseable gh output); review manually before treating it as READY"
+            ),
+        )
+    if not isinstance(data, list) or not data:
+        return MergedPrCheckResult(kind=MergedPrCheckKind.NONE)
+
+    expected_prefix = f"Implements work for #{issue_number}."
+    expected_branch = f"subsched/issue-{issue_number}"
+    confirmed: list[int] = []
+    numbers: list[str] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        try:
+            number = int(item["number"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        numbers.append(str(number))
+        head_ref = str(item.get("headRefName", ""))
+        body = str(item.get("body", ""))
+        if body.startswith(expected_prefix) and head_ref == expected_branch:
+            confirmed.append(number)
+
+    if len(data) == 1 and len(confirmed) == 1:
+        return MergedPrCheckResult(kind=MergedPrCheckKind.CONFIRMED, pr_number=confirmed[0])
+
+    return MergedPrCheckResult(
+        kind=MergedPrCheckKind.AMBIGUOUS,
+        reason=(
+            f"issue #{issue_number} is referenced by merged PR(s) "
+            f"{', '.join(numbers) or '(unparseable)'} but the match could not be "
+            "confirmed automatically (unexpected body/branch format); review manually "
+            "before treating this issue as READY"
+        ),
+    )
 
 
 def create_or_get_pull_request(
