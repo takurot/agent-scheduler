@@ -68,6 +68,10 @@ class GitHubConfig:
     include_labels: tuple[str, ...] = ("ai-ready",)
     exclude_labels: tuple[str, ...] = ("blocked", "human-only", "security-sensitive")
     completion: GitHubCompletionConfig = GitHubCompletionConfig()
+    # #144: only meaningful (and only populated) when mode == "list" -- lets a config file
+    # define an explicit, reproducible Issue run on its own, without a separate --issues
+    # CLI argument every invocation.
+    issues: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,7 +169,9 @@ ROOT_KEYS = frozenset(
 )
 
 SECTION_KEYS: dict[str, frozenset[str]] = {
-    "github": frozenset({"repo", "mode", "include_labels", "exclude_labels", "completion"}),
+    "github": frozenset(
+        {"repo", "mode", "include_labels", "exclude_labels", "completion", "issues"}
+    ),
     "routing": frozenset({"strategy", "provider_capacity", "local_estimate"}),
     "billing": frozenset({"api_fallback", "metered_usage", "unknown_mode"}),
     "execution": frozenset(
@@ -223,12 +229,35 @@ def _parse_github_config(raw: Mapping[str, Any]) -> GitHubConfig:
     if not isinstance(exc_labels, (list, tuple)):
         raise ConfigError("github.exclude_labels must be a list of strings")
 
+    # #144: github.mode == "list" previously had no field to actually carry the Issue
+    # numbers, so a config file alone could never define a reproducible explicit-Issue
+    # run -- an extra --issues CLI argument was required every time. Validate fail-fast
+    # (empty/duplicate/non-positive) here rather than silently accepting a config that
+    # can never be executed, and reject the mismatched-intent case (issues set but mode
+    # isn't "list") rather than silently ignoring it.
+    issues_raw = raw.get("issues")
+    if issues_raw is not None:
+        if not isinstance(issues_raw, (list, tuple)):
+            raise ConfigError("github.issues must be a list of positive integers")
+        issues = tuple(
+            _strict_pos_int(item, "github.issues", min_val=1) for item in issues_raw
+        )
+        if len(set(issues)) != len(issues):
+            raise ConfigError("github.issues must not contain duplicate issue numbers")
+    else:
+        issues = ()
+    if mode == "list" and not issues:
+        raise ConfigError("github.mode 'list' requires a non-empty github.issues list")
+    if mode != "list" and issues:
+        raise ConfigError("github.issues is only used when github.mode is 'list'")
+
     return GitHubConfig(
         repo=repo,
         mode=mode,
         include_labels=tuple(str(x) for x in inc_labels),
         exclude_labels=tuple(str(x) for x in exc_labels),
         completion=completion,
+        issues=issues,
     )
 
 

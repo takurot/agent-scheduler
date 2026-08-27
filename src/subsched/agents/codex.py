@@ -440,6 +440,8 @@ class CodexAgent:
             timeout_seconds=request.timeout_seconds,
             grace_seconds=request.grace_seconds,
             output_limit_bytes=request.output_limit_bytes,
+            heartbeat=request.heartbeat,
+            heartbeat_interval_seconds=request.heartbeat_interval_seconds,
         )
         res = run_process_group(proc_req)
         if res.timed_out:

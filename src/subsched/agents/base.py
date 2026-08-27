@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -16,6 +17,12 @@ class ProcessExecutionRequest:
     timeout_seconds: float = 300.0
     grace_seconds: float = 2.0
     output_limit_bytes: int = 1_048_576
+    # #141: invoked with elapsed seconds every heartbeat_interval_seconds while waiting
+    # on a long-running subprocess, so an operator watching structured logs/CLI output
+    # can distinguish "still running" from "stopped/hung" -- without busy-polling, since
+    # the wait loop only wakes up every heartbeat_interval_seconds, not on a tight loop.
+    heartbeat: Callable[[float], None] | None = None
+    heartbeat_interval_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         if not self.argv:
@@ -28,6 +35,8 @@ class ProcessExecutionRequest:
             raise ValueError("grace_seconds must be positive")
         if self.output_limit_bytes <= 0:
             raise ValueError("output_limit_bytes must be positive")
+        if self.heartbeat_interval_seconds <= 0:
+            raise ValueError("heartbeat_interval_seconds must be positive")
 
 
 @dataclass(frozen=True, slots=True)
