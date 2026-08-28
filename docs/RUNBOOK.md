@@ -101,17 +101,26 @@ When an agent execution returns a classified provider rate limit (session or wee
 1. The scheduler captures the `reset_at` timestamp from provider telemetry.
 2. The agent is placed into cooldown and remaining tasks fail over to an alternate available agent (e.g. Claude -> Codex).
 3. If all agents are exhausted, the scheduler enters `WAITING_CAPACITY` and computes the earliest reset event.
-4. The current CLI does not have a validated proactive provider-capacity probe. A saved cooldown
+4. Use `subsched run ... --watch` to keep the process alive within its bounded timeout. The
+   one-shot default exits after reporting the wait. Watch checks pause state and pending CI at the
+   configured poll interval, but does not call the capacity supplier before `wait_duration()`.
+5. The current CLI does not have a validated proactive provider-capacity probe. A saved cooldown
    is released only by a fresh `source=provider`, `confidence=high` observation after reset;
    re-running with policy-only availability cannot release it. Until a provider adapter supplies
    that observation, operator review is required rather than automatic resume.
 
-The following Python API is intended for an adapter that supplies a real, validated observation;
-`manual_wake()` alone does not make an agent available:
+The following Python API is intended for an adapter that supplies a real, validated observation:
 ```python
 scheduler.refresh_capacities([fresh_capacity])
-scheduler.manual_wake()
 ```
+
+`manual_wake()` is a separate, explicit operator override that clears cooldowns without proving
+provider availability. It is not exposed by the CLI and must not be used as an automatic reset
+path; use it only after independent provider verification and human review.
+
+`--watch-poll-seconds` is limited to 1-300 seconds and `--watch-timeout-seconds` to 1-86400
+seconds. `Ctrl-C` exits with code 130 after preserving durable task/worktree state. `subsched pause`
+continues to prevent new dispatches while the watch process is alive.
 
 ---
 

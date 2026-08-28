@@ -750,12 +750,15 @@ def test_ci_monitoring_promotes_ready_for_review_to_complete(
 
     from subsched.github.checks import CICheckState, PRChecksStatus
 
+    ci_states = iter((CICheckState.PENDING, CICheckState.PASS))
     monkeypatch.setattr(
         "subsched.cli.fetch_pr_checks",
         lambda pr_number, **kwargs: PRChecksStatus(
-            pr_number=pr_number, overall_state=CICheckState.PASS, checks=()
+            pr_number=pr_number, overall_state=next(ci_states), checks=()
         ),
     )
+    sleeps: list[float] = []
+    monkeypatch.setattr("subsched.cli._sleep", sleeps.append)
 
     result = invoke(
         repo_dir,
@@ -766,9 +769,15 @@ def test_ci_monitoring_promotes_ready_for_review_to_complete(
         "1",
         "--allow-native",
         "--subscription-billing-verified",
+        "--watch",
+        "--watch-poll-seconds",
+        "1",
+        "--watch-timeout-seconds",
+        "10",
     )
     assert result.exit_code == 0, result.output
     assert "COMPLETE" in result.output
+    assert sleeps == [1.0]
 
     status = invoke(repo_dir, "status", "--verbose")
     assert "COMPLETE" in status.output

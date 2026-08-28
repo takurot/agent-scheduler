@@ -1519,6 +1519,11 @@ PIDだけで判断せず、起動時刻も照合してPID reuseを防ぐ。
 
 # 45. Waiting for Capacity
 
+CLI実装では既存のone-shot互換性を維持し、継続待機は明示的な`subsched run --watch`で
+有効化する。watchはpoll間隔（1〜300秒）とwall-clock上限（1〜86400秒）を必須境界として
+持ち、上限到達時はdurable state/worktree/handoffを保持して終了する。CI PENDINGはpoll間隔
+ごとに再確認する一方、capacity supplierは`wait_duration()`到来前に再実行しない。
+
 例えば：
 
 ```text
@@ -1571,6 +1576,11 @@ Codex unavailable
 ```
 
 でもSchedulerプロセスは終了しない。
+
+上記は`--watch` opt-in時の意味論である。既定のone-shot `run`は待機状態と次回時刻を表示して
+終了する。watch中のpauseは新規dispatchを止め、SIGINTはexit 130で安全に終了する。
+provider/highのfresh probeが存在しない場合はpolicy/low観測でcooldownを解除せず、watch上限で
+fail-closedに終了する。
 
 ```text
 Task Queue

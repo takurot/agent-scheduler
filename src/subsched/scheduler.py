@@ -354,11 +354,14 @@ class Scheduler:
                 elif event.event_type == EventType.RESUME:
                     self.store.set_paused(False)
 
+        # Pause stops new dispatch only. Existing PR CI remains observable so a bounded
+        # --watch run can finish tracking already-running work while paused (#166).
+        self._poll_ci_checks(current)
+
         if self.store.is_paused():
             return False
 
         self._expire_overrun_tasks(current)
-        self._poll_ci_checks(current)
 
         supplied = {capacity.agent: capacity for capacity in capacities}
         effective = self._effective_capacities(supplied, current)
