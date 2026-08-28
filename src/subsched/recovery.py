@@ -97,35 +97,54 @@ def check_process_liveness(record: ProcessRecord) -> ProcessStatus:
     return ProcessStatus.LIVE
 
 
+def _escalate_to_needs_human(task: Task, reason: str) -> Task:
+    """Transition to NEEDS_HUMAN via the state machine's actual allowed edges.
+
+    DISPATCHED cannot transition directly to NEEDS_HUMAN (see ALLOWED_TRANSITIONS in
+    models.py) -- only IN_PROGRESS can. A crash-recovery escalation must still succeed
+    for a task that crashed before ever reaching IN_PROGRESS, so route it through RETRY
+    first when necessary instead of raising StateTransitionError.
+    """
+    if task.status is TaskState.DISPATCHED:
+        task = task.transition(TaskState.RETRY, reason=reason)
+    return task.transition(TaskState.NEEDS_HUMAN, reason=reason)
+
+
 def reconcile_task_recovery(worktree_dir: Path, task: Task) -> tuple[Task, str]:
     """Reconcile task on recovery: check live/dead process, worktree, and handoff."""
     record = load_process_record(worktree_dir, task.issue_number)
-    if record is None:
-        return task, "no process record found; state unchanged"
-
-    liveness = check_process_liveness(record)
-    if liveness == ProcessStatus.LIVE:
-        return task, f"process {record.pid} is still live; resumed monitoring"
-
-    clear_process_record(worktree_dir, task.issue_number)
+    if record is not None:
+        liveness = check_process_liveness(record)
+        if liveness == ProcessStatus.LIVE:
+            return task, f"process {record.pid} is still live; resumed monitoring"
+        clear_process_record(worktree_dir, task.issue_number)
+        reason_prefix = f"process {record.pid} terminated"
+    else:
+        # #164: dispatch always writes a process record before the worker runs, so a
+        # DISPATCHED/IN_PROGRESS task with none here is unverifiable (legacy state from
+        # before this record existed, or a crash in the narrow window before it was
+        # written). Fail-closed by treating it the same as a confirmed-dead process
+        # rather than leaving the task's state unchanged and permanently stuck.
+        reason_prefix = "no process record found for in-flight task"
 
     if not worktree_dir.exists() or not worktree_dir.is_dir() or worktree_dir.is_symlink():
-        return (
-            task.transition(TaskState.NEEDS_HUMAN),
-            "worktree invalid or missing; escalated to NEEDS_HUMAN",
-        )
+        reason = f"{reason_prefix}; worktree invalid or missing; escalated to NEEDS_HUMAN"
+        return _escalate_to_needs_human(task, reason), reason
 
     handoff_ok = reconstruct_or_quarantine_handoff(worktree_dir, task)
     if not handoff_ok:
-        return (
-            task.transition(TaskState.NEEDS_HUMAN),
-            "handoff was corrupted and quarantined; escalated to NEEDS_HUMAN",
-        )
+        reason = f"{reason_prefix}; handoff was corrupted and quarantined; escalated to NEEDS_HUMAN"
+        return _escalate_to_needs_human(task, reason), reason
 
     if task.status in {TaskState.DISPATCHED, TaskState.IN_PROGRESS}:
+        reason = f"{reason_prefix}; task transitioned to RETRY"
+        # #164: counts the same as a live AgentResultKind.FAILURE (see
+        # Scheduler._handle_result's generic failure path) so a crash-loop -- the
+        # process dying repeatedly on the same task -- still escalates to NEEDS_HUMAN
+        # via the existing max_agent_failures budget instead of respawning forever.
         return (
-            task.transition(TaskState.RETRY),
-            f"process {record.pid} terminated; task transitioned to RETRY",
+            task.transition(TaskState.RETRY, reason=reason, increment_attempt=True),
+            reason,
         )
 
-    return task, "process record cleared; task unchanged"
+    return task, f"{reason_prefix}; process record cleared; task unchanged"
