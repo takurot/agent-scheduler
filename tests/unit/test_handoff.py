@@ -223,3 +223,18 @@ def test_reconstruct_decision_table(tmp_path: Path) -> None:
     res2 = reconstruct_or_quarantine_handoff(tmp_path, task)
     assert res2 is False
     assert (tmp_path / ".ai" / "handoffs" / "quarantine").exists()
+
+
+def test_reconstruct_handoff_preserves_repository_instructions(tmp_path: Path) -> None:
+    task = Task.from_issue(Issue(number=103, title="Support timeout"))
+    instructions = {
+        "AGENTS.md": "# User AGENTS\n\nKeep this exact content.\n",
+        "CLAUDE.md": "# User CLAUDE\n\nKeep this exact content too.\n",
+    }
+    for name, content in instructions.items():
+        (tmp_path / name).write_text(content, encoding="utf-8")
+
+    assert reconstruct_or_quarantine_handoff(tmp_path, task) is True
+
+    for name, content in instructions.items():
+        assert (tmp_path / name).read_text(encoding="utf-8") == content

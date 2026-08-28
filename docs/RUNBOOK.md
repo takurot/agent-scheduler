@@ -153,6 +153,24 @@ process crashes unexpectedly while a task is DISPATCHED/IN_PROGRESS:
   recorded for the task, it escalates directly to `NEEDS_HUMAN` instead of resuming blindly.
 - If the recorded PID is still genuinely alive, the task and its lease are left untouched.
 
+### Repository Instruction Files and Legacy Managed Blocks
+
+`AGENTS.md` and `CLAUDE.md` belong to the target repository. Current `subsched` releases read them
+when present but never create, edit, or remove them during dispatch, failover, or recovery.
+
+Task worktrees created by older releases may contain an injected block delimited by
+`BEGIN SUBSCHED AGENT CONTRACT` / `END SUBSCHED AGENT CONTRACT`. Do not remove those blocks in bulk:
+an operator may have edited the delimited content, and automatic cleanup cannot distinguish those
+edits from the historical generated text. For each preserved worktree:
+
+1. inspect `git status --short` and `git diff -- AGENTS.md CLAUDE.md`;
+2. compare the block with repository-owned instructions and retained task history;
+3. remove it manually only after confirming no user-authored content will be lost;
+4. rerun repository verification and keep the worktree/handoff intact.
+
+Rollback must not re-enable automatic injection. A conflict between repository instructions and
+the Scheduler execution envelope requires operator review rather than rewriting either file.
+
 ### Merge Conflicts (`NEEDS_HUMAN`)
 When a task branch conflicts with the base branch:
 - `rebase_onto_base` detects the conflict and immediately executes `git rebase --abort`.
