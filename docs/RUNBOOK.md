@@ -120,10 +120,21 @@ If `state.json` fails schema validation or CRC check:
 - Inspect the quarantine directory to diagnose schema errors.
 
 ### Process Crash & Handoff Recovery
-If the scheduler host or agent subprocess crashes unexpectedly:
-- On restart, `reconcile_task_recovery` checks the process PID via `.ai/runtime/<issue>.process.json`.
-- If dead, the task handoff at `.ai/handoffs/<issue>.md` is validated and rebuilt.
-- The task transitions to `RETRY` and execution resumes safely in the assigned worktree.
+Every dispatch writes `.ai/runtime/<issue>.process.json` (Scheduler PID, start time, agent,
+worktree) before the worker runs and removes it once the worker returns. If the scheduler
+process crashes unexpectedly while a task is DISPATCHED/IN_PROGRESS:
+- On restart, `Scheduler.__init__` reconciles every DISPATCHED/IN_PROGRESS task against its
+  recorded process **before** leases are re-registered, so a stale in-flight task can never
+  hold a permanent lease and block other READY tasks.
+- If the recorded PID is dead (or the record itself is missing — treated as unverifiable and
+  handled the same as dead, fail-closed), the task handoff at `.ai/handoffs/<issue>.md` is
+  validated and rebuilt, and the task moves to `RETRY`.
+- `RETRY` is then resolved immediately: below the `max_agent_failures` budget it returns to
+  `READY` for another attempt; at or above the budget it escalates to `NEEDS_HUMAN` (the same
+  crash-loop protection a live agent failure gets).
+- If the worktree is missing/invalid, the handoff is corrupted, or no worktree was ever
+  recorded for the task, it escalates directly to `NEEDS_HUMAN` instead of resuming blindly.
+- If the recorded PID is still genuinely alive, the task and its lease are left untouched.
 
 ### Merge Conflicts (`NEEDS_HUMAN`)
 When a task branch conflicts with the base branch:

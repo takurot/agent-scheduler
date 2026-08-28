@@ -121,6 +121,58 @@ def test_check_process_liveness_detects_pid_reuse() -> None:
     assert check_process_liveness(rec) is ProcessStatus.DEAD
 
 
+def test_reconcile_with_no_process_record_is_treated_as_crashed(tmp_path: Path) -> None:
+    """#164: dispatch always writes a process record before the worker runs; if a
+    DISPATCHED/IN_PROGRESS task has none at reconcile time (legacy state, or a crash in
+    the narrow window before the record was written), that is unverifiable -- fail-closed
+    by treating it exactly like a dead process instead of leaving the task IN_PROGRESS
+    and silently stuck forever."""
+    issue = Issue(number=103, title="Support timeout")
+    task = Task.from_issue(issue)
+    task = task.transition(TaskState.DISPATCHED, current_agent="claude")
+    task = task.transition(TaskState.IN_PROGRESS, current_agent="claude")
+    bootstrap_task_files(tmp_path, task)
+
+    reconciled_task, msg = reconcile_task_recovery(tmp_path, task)
+    assert reconciled_task.status is TaskState.RETRY
+    assert "no process record" in msg
+
+
+def test_reconcile_from_dispatched_status_with_missing_worktree_does_not_raise(
+    tmp_path: Path,
+) -> None:
+    """#164: a DISPATCHED (not yet IN_PROGRESS) task escalating to NEEDS_HUMAN must go
+    through the state machine's actual allowed transitions -- DISPATCHED cannot jump
+    straight to NEEDS_HUMAN -- instead of raising StateTransitionError."""
+    issue = Issue(number=104, title="Never started")
+    task = Task.from_issue(issue)
+    task = task.transition(TaskState.DISPATCHED, current_agent="claude")
+
+    missing_worktree = tmp_path / "does-not-exist"
+    reconciled_task, msg = reconcile_task_recovery(missing_worktree, task)
+    assert reconciled_task.status is TaskState.NEEDS_HUMAN
+    assert reconciled_task.needs_human_reason is not None
+    assert "NEEDS_HUMAN" in msg
+
+
+def test_reconcile_from_in_progress_status_with_missing_worktree_escalates_directly(
+    tmp_path: Path,
+) -> None:
+    """IN_PROGRESS can transition directly to NEEDS_HUMAN (unlike DISPATCHED), so this
+    must not go through the extra RETRY hop `_escalate_to_needs_human` uses for
+    DISPATCHED."""
+    issue = Issue(number=105, title="Already running")
+    task = Task.from_issue(issue)
+    task = task.transition(TaskState.DISPATCHED, current_agent="claude")
+    task = task.transition(TaskState.IN_PROGRESS, current_agent="claude")
+
+    missing_worktree = tmp_path / "does-not-exist"
+    reconciled_task, msg = reconcile_task_recovery(missing_worktree, task)
+    assert reconciled_task.status is TaskState.NEEDS_HUMAN
+    assert reconciled_task.needs_human_reason is not None
+    assert "NEEDS_HUMAN" in msg
+
+
 def test_check_process_liveness_matches_real_start_time() -> None:
     actual_start_time = get_process_start_time(os.getpid()) or ""
     rec = ProcessRecord(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 import time
 from collections import deque
@@ -24,10 +25,19 @@ from subsched.models import (
     detect_dependency_cycles,
 )
 from subsched.queue import TaskQueue
+from subsched.recovery import (
+    ProcessRecord,
+    clear_process_record,
+    escalate_to_needs_human,
+    reconcile_task_recovery,
+    save_process_record,
+)
 from subsched.router import FRESHNESS, Router
-from subsched.storage import JsonStateStore
+from subsched.storage import JsonStateStore, get_process_start_time
 from subsched.structured_logger import StructuredLogger
 from subsched.tasks.worktree import WorktreeAdapter
+
+_IN_FLIGHT_RECOVERY_STATES = frozenset({TaskState.DISPATCHED, TaskState.IN_PROGRESS})
 
 
 class Worker(Protocol):
@@ -115,11 +125,17 @@ class Scheduler:
         self.repo = repo
         self.base_branch = base_branch
         self.concurrency = concurrency
+        if max_agent_failures <= 0:
+            raise ValueError("max_agent_failures must be positive")
+        if max_agent_switches <= 0 or max_tasks <= 0:
+            raise ValueError("scheduler safety limits must be positive")
+        self.max_agent_failures = max_agent_failures
+        self.max_agent_switches = max_agent_switches
+        self.max_tasks = max_tasks
         from subsched.lease import LeaseManager
 
         self.lease_manager = LeaseManager(max_concurrency=concurrency)
         self.queue = TaskQueue(store.load_tasks(), label_scores=label_scores)
-        self.lease_manager.reconcile(self.queue.tasks)
         persisted_capacities = store.load_capacities()
         allowed_cooldowns = {
             CapacityState.COOLDOWN_SESSION,
@@ -130,13 +146,14 @@ class Scheduler:
         if any(capacity.state not in allowed_cooldowns for capacity in persisted_capacities):
             raise ValueError("persisted capacity must be a scheduler cooldown blocker")
         self._cooldowns = {capacity.agent: capacity for capacity in persisted_capacities}
-        if max_agent_failures <= 0:
-            raise ValueError("max_agent_failures must be positive")
-        if max_agent_switches <= 0 or max_tasks <= 0:
-            raise ValueError("scheduler safety limits must be positive")
-        self.max_agent_failures = max_agent_failures
-        self.max_agent_switches = max_agent_switches
-        self.max_tasks = max_tasks
+        # #164: resolve any task still DISPATCHED/IN_PROGRESS from a prior process
+        # (crash, kill, host restart) before the lease manager re-leases it -- otherwise
+        # an unresolved in-flight task holds a permanent lease and silently blocks every
+        # other READY task forever. Must run after self._cooldowns is set (_persist()
+        # reads it) and before lease_manager.reconcile() (which must see the resolved
+        # states, not the stale ones).
+        self._reconcile_recovery()
+        self.lease_manager.reconcile(self.queue.tasks)
         self.is_waiting_for_capacity = any(
             task.status is TaskState.WAITING_CAPACITY for task in self.tasks
         )
@@ -177,6 +194,54 @@ class Scheduler:
             message=message,
             data=merged_data,
         )
+
+    def _reconcile_recovery(self) -> None:
+        """#164: reconcile every DISPATCHED/IN_PROGRESS task against its recorded
+        process before the lease manager re-registers it. `reconcile_task_recovery`'s
+        own RETRY result is not queueable by itself -- nothing else in this class
+        transitions RETRY -> READY, it is always resolved by its caller in the same
+        step -- so it is resolved here into READY or NEEDS_HUMAN using the same
+        per-agent-failure threshold `_handle_result` uses for a live agent failure.
+        """
+        in_flight = [
+            task for task in self.queue.tasks if task.status in _IN_FLIGHT_RECOVERY_STATES
+        ]
+        changed = False
+        for task in in_flight:
+            from_state = task.status
+            if task.worktree is None:
+                # No worktree recorded at all: there is no process record, no handoff,
+                # and no way to verify what happened. Fail-closed rather than resume
+                # blindly. Routed through recovery.escalate_to_needs_human (not a plain
+                # .transition() call) because DISPATCHED cannot transition directly to
+                # NEEDS_HUMAN -- see ALLOWED_TRANSITIONS in models.py.
+                reason = "no worktree recorded for in-flight task; escalated to NEEDS_HUMAN"
+                resolved = escalate_to_needs_human(task, reason)
+            else:
+                reconciled, reason = reconcile_task_recovery(Path(task.worktree), task)
+                if reconciled.status is TaskState.RETRY:
+                    next_state = (
+                        TaskState.NEEDS_HUMAN
+                        if reconciled.attempt >= self.max_agent_failures
+                        else TaskState.READY
+                    )
+                    resolved = reconciled.transition(next_state, reason=reason)
+                else:
+                    resolved = reconciled
+
+            if resolved.status is from_state:
+                continue
+            changed = True
+            self.queue = self.queue.replace(resolved)
+            self._log(
+                "recovery",
+                issue_number=resolved.issue_number,
+                task_id=resolved.task_id,
+                message=reason,
+                data={"from_state": from_state.value, "to_state": resolved.status.value},
+            )
+        if changed:
+            self._persist()
 
     def discover(
         self, issues: Iterable[Issue], *, exclude_labels: frozenset[str] = frozenset()
@@ -338,6 +403,23 @@ class Scheduler:
             )
 
             dispatch_started = time.monotonic()
+            # #164: record which process is executing this dispatch *before* calling
+            # the (synchronous, blocking) worker, so that if this Scheduler process
+            # itself dies mid-dispatch, a future restart can tell the task was really
+            # in flight and not just abandoned. Cleared unconditionally once the worker
+            # call returns, whether it succeeded or raised.
+            if running.worktree is not None:
+                save_process_record(
+                    Path(running.worktree),
+                    ProcessRecord(
+                        pid=os.getpid(),
+                        started_at=get_process_start_time(os.getpid()) or "",
+                        agent=agent,
+                        issue_number=running.issue_number,
+                        worktree=running.worktree,
+                        attempt_nonce=lease.nonce,
+                    ),
+                )
             try:
                 result = self.worker.run(running, agent)
             except Exception as error:
@@ -354,6 +436,9 @@ class Scheduler:
                 # persisted task state, so it must not carry the exception message even
                 # though the structured logger above does (with its own redaction).
                 result = AgentResult(AgentResultKind.FAILURE, output=type(error).__name__)
+            finally:
+                if running.worktree is not None:
+                    clear_process_record(Path(running.worktree), running.issue_number)
 
             self._log(
                 "agent_finish",
