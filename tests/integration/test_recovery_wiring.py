@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -86,6 +87,8 @@ def test_crashed_task_does_not_block_other_ready_tasks(tmp_path: Path) -> None:
     reconciled = {t.issue_number: t.status for t in scheduler.tasks}
     assert reconciled[7] is TaskState.NEEDS_HUMAN
     assert reconciled[8] is TaskState.READY
+    crashed = next(t for t in scheduler.tasks if t.issue_number == 7)
+    assert dict(crashed.per_agent_failures) == {"claude": 1}
     assert load_process_record(worktree_root / "issue-7", 7) is None
     assert scheduler.lease_manager.active_count == 0
 
@@ -95,9 +98,8 @@ def test_crashed_task_does_not_block_other_ready_tasks(tmp_path: Path) -> None:
 
 
 def test_crashed_task_below_failure_threshold_recovers_to_ready(tmp_path: Path) -> None:
-    """A crash is not itself counted as an agent failure: with the default
-    max_agent_failures budget untouched, a task that crashed on its first attempt is
-    eligible for another attempt (RETRY -> READY) rather than being escalated."""
+    """A first crash consumes one per-agent failure but remains below the default
+    max_agent_failures=2 threshold, so recovery resolves RETRY -> READY."""
     worktree_root = tmp_path / "worktrees"
     task7 = _crashed_in_progress_task(worktree_root / "issue-7", 7)
 
@@ -114,10 +116,93 @@ def test_crashed_task_below_failure_threshold_recovers_to_ready(tmp_path: Path) 
     )
 
     assert scheduler.tasks[0].status is TaskState.READY
+    assert dict(scheduler.tasks[0].per_agent_failures) == {"claude": 1}
 
     dispatched = scheduler.tick([_available("claude")])
     assert dispatched is True
     assert scheduler.worker.dispatches == [(7, "claude")]  # type: ignore[attr-defined]
+
+
+def test_verification_failure_then_first_crash_does_not_escalate(tmp_path: Path) -> None:
+    """A verification retry must not consume the crash-recovery Agent budget.
+
+    With max_agent_failures=2, one prior verification failure plus the first Claude
+    crash leaves Claude's own failure count at one and resolves recovery to READY even
+    though the shared diagnostic attempt counter reaches two.
+    """
+    worktree_root = tmp_path / "worktrees"
+    task = replace(
+        _crashed_in_progress_task(worktree_root / "issue-13", 13),
+        attempt=1,
+        verification_failures=1,
+        last_dispatched_agent="claude",
+    )
+
+    store = JsonStateStore(tmp_path / "state.json")
+    store.save_tasks((task,))
+
+    scheduler = Scheduler(
+        store=store,
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=ScriptedWorker({}),
+        worktree_root=worktree_root,
+        max_agent_failures=2,
+    )
+
+    recovered = scheduler.tasks[0]
+    assert recovered.status is TaskState.READY
+    assert recovered.attempt == 2
+    assert recovered.verification_failures == 1
+    assert dict(recovered.per_agent_failures) == {"claude": 1}
+
+
+def test_crash_recovery_without_agent_identity_fails_closed(tmp_path: Path) -> None:
+    worktree_root = tmp_path / "worktrees"
+    task = replace(
+        _crashed_in_progress_task(worktree_root / "issue-14", 14),
+        current_agent=None,
+        last_dispatched_agent=None,
+    )
+    store = JsonStateStore(tmp_path / "state.json")
+    store.save_tasks((task,))
+
+    scheduler = Scheduler(
+        store=store,
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=ScriptedWorker({}),
+        worktree_root=worktree_root,
+    )
+
+    recovered = scheduler.tasks[0]
+    assert recovered.status is TaskState.NEEDS_HUMAN
+    assert recovered.per_agent_failures == ()
+    assert recovered.needs_human_reason is not None
+    assert "Agent identity missing" in recovered.needs_human_reason
+
+
+def test_crash_recovery_with_inconsistent_agent_identity_fails_closed(tmp_path: Path) -> None:
+    worktree_root = tmp_path / "worktrees"
+    task = replace(
+        _crashed_in_progress_task(worktree_root / "issue-15", 15),
+        last_dispatched_agent="codex",
+    )
+    store = JsonStateStore(tmp_path / "state.json")
+    store.save_tasks((task,))
+
+    scheduler = Scheduler(
+        store=store,
+        router=Router(
+            [AgentConfig("claude", priority=100), AgentConfig("codex", priority=90)]
+        ),
+        worker=ScriptedWorker({}),
+        worktree_root=worktree_root,
+    )
+
+    recovered = scheduler.tasks[0]
+    assert recovered.status is TaskState.NEEDS_HUMAN
+    assert recovered.per_agent_failures == ()
+    assert recovered.needs_human_reason is not None
+    assert "Agent identity inconsistent" in recovered.needs_human_reason
 
 
 def test_in_progress_task_with_no_worktree_escalates_to_needs_human(tmp_path: Path) -> None:

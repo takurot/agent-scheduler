@@ -208,8 +208,9 @@ class Scheduler:
         process before the lease manager re-registers it. `reconcile_task_recovery`'s
         own RETRY result is not queueable by itself -- nothing else in this class
         transitions RETRY -> READY, it is always resolved by its caller in the same
-        step -- so it is resolved here into READY or NEEDS_HUMAN using the same
-        per-agent-failure threshold `_handle_result` uses for a live agent failure.
+        step -- so the crash is recorded against the dispatched Agent and resolved here
+        into READY or NEEDS_HUMAN using the same per-agent-failure threshold
+        `_handle_result` uses for a live agent failure.
         """
         in_flight = [
             task for task in self.queue.tasks if task.status in _IN_FLIGHT_RECOVERY_STATES
@@ -217,6 +218,16 @@ class Scheduler:
         changed = False
         for task in in_flight:
             from_state = task.status
+            if (
+                task.current_agent is not None
+                and task.last_dispatched_agent is not None
+                and task.current_agent != task.last_dispatched_agent
+            ):
+                recovery_agent = None
+                recovery_agent_error = "dispatched Agent identity inconsistent"
+            else:
+                recovery_agent = task.current_agent or task.last_dispatched_agent
+                recovery_agent_error = "dispatched Agent identity missing"
             if task.worktree is None:
                 # No worktree recorded at all: there is no process record, no handoff,
                 # and no way to verify what happened. Fail-closed rather than resume
@@ -228,12 +239,26 @@ class Scheduler:
             else:
                 reconciled, reason = reconcile_task_recovery(Path(task.worktree), task)
                 if reconciled.status is TaskState.RETRY:
-                    next_state = (
-                        TaskState.NEEDS_HUMAN
-                        if reconciled.attempt >= self.max_agent_failures
-                        else TaskState.READY
-                    )
-                    resolved = reconciled.transition(next_state, reason=reason)
+                    if recovery_agent is None:
+                        reason = (
+                            f"{reason}; {recovery_agent_error}; "
+                            "escalated to NEEDS_HUMAN"
+                        )
+                        resolved = reconciled.transition(TaskState.NEEDS_HUMAN, reason=reason)
+                    else:
+                        failures_dict = dict(reconciled.per_agent_failures)
+                        failures_dict[recovery_agent] = failures_dict.get(recovery_agent, 0) + 1
+                        agent_failure_count = failures_dict[recovery_agent]
+                        reconciled = replace(
+                            reconciled,
+                            per_agent_failures=tuple(sorted(failures_dict.items())),
+                        )
+                        next_state = (
+                            TaskState.NEEDS_HUMAN
+                            if agent_failure_count >= self.max_agent_failures
+                            else TaskState.READY
+                        )
+                        resolved = reconciled.transition(next_state, reason=reason)
                 else:
                     resolved = reconciled
 

@@ -129,9 +129,13 @@ process crashes unexpectedly while a task is DISPATCHED/IN_PROGRESS:
 - If the recorded PID is dead (or the record itself is missing — treated as unverifiable and
   handled the same as dead, fail-closed), the task handoff at `.ai/handoffs/<issue>.md` is
   validated and rebuilt, and the task moves to `RETRY`.
-- `RETRY` is then resolved immediately: below the `max_agent_failures` budget it returns to
-  `READY` for another attempt; at or above the budget it escalates to `NEEDS_HUMAN` (the same
-  crash-loop protection a live agent failure gets).
+- The crash increments `per_agent_failures` for the dispatched Agent. `RETRY` is then resolved
+  immediately: below that Agent's `max_agent_failures` budget it returns to `READY`; at or above
+  the budget it escalates to `NEEDS_HUMAN`. Task-wide `attempt` and prior verification failures do
+  not consume this budget.
+- If the persisted `current_agent` / `last_dispatched_agent` identity is missing or inconsistent,
+  recovery cannot safely attribute the crash and escalates to `NEEDS_HUMAN` without changing any
+  Agent's failure count.
 - If the worktree is missing/invalid, the handoff is corrupted, or no worktree was ever
   recorded for the task, it escalates directly to `NEEDS_HUMAN` instead of resuming blindly.
 - If the recorded PID is still genuinely alive, the task and its lease are left untouched.

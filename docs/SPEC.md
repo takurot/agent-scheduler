@@ -1811,6 +1811,9 @@ gateの失敗は`per_agent_failures`を増やさず、代わりに独立した�
 と設定値`execution.max_verification_failures`（default 2）で管理する。Agent failureと
 verification failureのbudgetを混在させないのは、同じAgentが初回失敗しただけで
 verification retry歴のせいで`NEEDS_HUMAN`へ誤昇格させないため（#175）。
+crash recoveryも同じ契約に従い、復旧対象のdispatch Agentについて
+`per_agent_failures[agent]`を増やして判定する。永続stateからAgentを一意に特定できない場合は、
+誤ったfailure countを更新せず`NEEDS_HUMAN`へfail-closedで遷移する。
 
 ---
 
