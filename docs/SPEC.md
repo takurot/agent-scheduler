@@ -1805,6 +1805,13 @@ safety:
 
 capacity failoverはAgent failureとは別にカウントする。
 
+`max_agent_failures`はTaskごと・Agentごとの`per_agent_failures[agent]`にのみ適用され、
+`Task.attempt`（verification retryを含むTask全体のretry回数）は参照しない。verification
+gateの失敗は`per_agent_failures`を増やさず、代わりに独立したカウンタ`verification_failures`
+と設定値`execution.max_verification_failures`（default 2）で管理する。Agent failureと
+verification failureのbudgetを混在させないのは、同じAgentが初回失敗しただけで
+verification retry歴のせいで`NEEDS_HUMAN`へ誤昇格させないため（#175）。
+
 ---
 
 # 51. Metrics
