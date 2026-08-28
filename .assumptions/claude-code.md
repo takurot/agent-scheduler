@@ -92,3 +92,7 @@ Still unverified against the live provider by design:
 - authentication and billing failure text/schema
 - tool permission behavior inside a future verified OS sandbox
 - provider-specific behavior during a real timeout (local signal/descendant cleanup is verified)
+
+Consequently, `parse_claude_capacity` is a replay-only contract. The production sensor must not
+label policy-derived availability as provider/high or use it to release a saved cooldown until a
+separately authorized Phase 0 observation establishes a stable capacity command and schema.

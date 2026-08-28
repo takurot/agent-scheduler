@@ -4,6 +4,9 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
+from subsched.agents.claude import ClaudeBillingMode
 from subsched.agents.native import NativeWorker
 from subsched.contract import bootstrap_task_files
 from subsched.models import AgentResult, AgentResultKind, Issue, Task
@@ -15,6 +18,28 @@ def test_native_worker_missing_worktree() -> None:
     result = worker.run(task, "claude")
     assert result.kind is AgentResultKind.FAILURE
     assert "missing task worktree" in result.output
+
+
+def test_native_worker_defaults_billing_to_unverified() -> None:
+    worker = NativeWorker()
+
+    assert worker.claude_agent.execution_policy.billing_mode is ClaudeBillingMode.UNKNOWN
+    assert worker.codex_agent.subscription_billing_verified is False
+
+
+def test_native_worker_accepts_explicit_subscription_billing_verification() -> None:
+    worker = NativeWorker(subscription_billing_verified=True)
+
+    assert (
+        worker.claude_agent.execution_policy.billing_mode
+        is ClaudeBillingMode.SUBSCRIPTION_VERIFIED
+    )
+    assert worker.codex_agent.subscription_billing_verified is True
+
+
+def test_native_worker_rejects_non_boolean_billing_verification() -> None:
+    with pytest.raises(TypeError, match="must be a boolean"):
+        NativeWorker(subscription_billing_verified="false")  # type: ignore[arg-type]
 
 
 def test_native_worker_fails_if_preconditions_missing(tmp_path: Path) -> None:

@@ -56,3 +56,7 @@ Any future provider probe still requires explicit operator opt-in and independen
 authentication uses the intended subscription with metered/API fallback disabled. Its output must
 be scrubbed of secrets, prompts, issue content, and personal paths before a fixture is committed.
 The error fixtures remain synthetic and are not claimed as captured provider responses.
+
+No observed Codex success event exposed current five-hour or weekly provider capacity. Therefore
+`parse_codex_capacity` remains replay-only, while the production sensor reports policy-derived
+availability with low confidence and cannot release a persisted cooldown.

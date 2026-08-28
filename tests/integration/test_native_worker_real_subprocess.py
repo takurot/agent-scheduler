@@ -47,7 +47,7 @@ def test_native_worker_actually_launches_claude_via_path_resolution(
     task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(worktree))
     bootstrap_task_files(worktree, task)
 
-    worker = NativeWorker()
+    worker = NativeWorker(subscription_billing_verified=True)
     result = worker.run(task, "claude")
 
     assert result.kind is AgentResultKind.PASS, result.output

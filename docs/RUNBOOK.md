@@ -97,13 +97,17 @@ uv run subsched cancel 101
 
 ## 4. Capacity Failover & Wait Scheduling
 
-When an agent encounters provider rate limits (session or weekly):
+When an agent execution returns a classified provider rate limit (session or weekly):
 1. The scheduler captures the `reset_at` timestamp from provider telemetry.
 2. The agent is placed into cooldown and remaining tasks fail over to an alternate available agent (e.g. Claude -> Codex).
 3. If all agents are exhausted, the scheduler enters `WAITING_CAPACITY` and computes the earliest reset event.
-4. When the reset time arrives, a fresh capacity probe is evaluated before resuming execution.
+4. The current CLI does not have a validated proactive provider-capacity probe. A saved cooldown
+   is released only by a fresh `source=provider`, `confidence=high` observation after reset;
+   re-running with policy-only availability cannot release it. Until a provider adapter supplies
+   that observation, operator review is required rather than automatic resume.
 
-To manually wake or refresh capacity:
+The following Python API is intended for an adapter that supplies a real, validated observation;
+`manual_wake()` alone does not make an agent available:
 ```python
 scheduler.refresh_capacities([fresh_capacity])
 scheduler.manual_wake()

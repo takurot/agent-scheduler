@@ -36,16 +36,24 @@ class NativeWorker:
         # means. Defaults to () for backward compatibility -- build_worker_prompt already
         # falls back to a generic "see docs/WORKFLOW.md or pyproject.toml" line when empty.
         verification_commands: Sequence[str] = (),
+        subscription_billing_verified: bool = False,
     ) -> None:
+        if type(subscription_billing_verified) is not bool:
+            raise TypeError("subscription billing verification must be a boolean")
+        billing_mode = (
+            ClaudeBillingMode.SUBSCRIPTION_VERIFIED
+            if subscription_billing_verified
+            else ClaudeBillingMode.UNKNOWN
+        )
         self.claude_agent = claude_agent or ClaudeAgent(
             ClaudeExecutionPolicy(
                 live_probe_opt_in=True,
-                billing_mode=ClaudeBillingMode.SUBSCRIPTION_VERIFIED,
+                billing_mode=billing_mode,
             )
         )
         self.codex_agent = codex_agent or CodexAgent(
             allow_live=True,
-            subscription_billing_verified=True,
+            subscription_billing_verified=subscription_billing_verified,
         )
         self.agent_timeout_seconds = agent_timeout_seconds
         self.structured_logger = structured_logger

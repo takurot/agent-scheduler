@@ -193,6 +193,8 @@ def test_claude_capacity_sensor_protocol_and_execution_policy() -> None:
     caps = sensor.observe("claude", now=now)
     assert len(caps) == 1
     assert caps[0].state == CapacityState.DISABLED_BILLING
+    assert caps[0].source == "policy"
+    assert caps[0].confidence == "low"
 
     verified_policy = ClaudeExecutionPolicy(
         live_probe_opt_in=True,
@@ -202,3 +204,5 @@ def test_claude_capacity_sensor_protocol_and_execution_policy() -> None:
     verified_caps = verified_sensor.observe("claude", now=now)
     assert len(verified_caps) == 1
     assert verified_caps[0].state == CapacityState.AVAILABLE
+    assert verified_caps[0].source == "policy"
+    assert verified_caps[0].confidence == "low"

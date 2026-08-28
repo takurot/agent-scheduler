@@ -589,11 +589,35 @@ def test_run_output_message_reflects_mode(tmp_path: Path, monkeypatch: pytest.Mo
     tmp_path2.mkdir()
     _init_git_repo(tmp_path2)
     res_native = invoke(
-        tmp_path2, "run", "--repo", "owner/project", "--issues", "1", "--allow-native"
+        tmp_path2,
+        "run",
+        "--repo",
+        "owner/project",
+        "--issues",
+        "1",
+        "--allow-native",
+        "--subscription-billing-verified",
     )
     assert res_native.exit_code == 0
     assert "discovered and persisted" in res_native.output
     assert "(dry-run)" not in res_native.output
+
+
+def test_native_run_fails_closed_when_subscription_billing_is_unverified(
+    tmp_path: Path,
+) -> None:
+    result = invoke(
+        tmp_path,
+        "run",
+        "--repo",
+        "owner/project",
+        "--issues",
+        "1",
+        "--allow-native",
+    )
+
+    assert result.exit_code == 2
+    assert "subscription billing is unverified" in result.output
 
 
 def test_native_run_drives_scheduler_to_ready_for_review_and_opens_pr(
@@ -654,6 +678,7 @@ def test_native_run_drives_scheduler_to_ready_for_review_and_opens_pr(
         "--issues",
         "1",
         "--allow-native",
+        "--subscription-billing-verified",
     )
 
     assert result.exit_code == 0, result.output
@@ -733,7 +758,14 @@ def test_ci_monitoring_promotes_ready_for_review_to_complete(
     )
 
     result = invoke(
-        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+        repo_dir,
+        "run",
+        "--config",
+        str(config_file),
+        "--issues",
+        "1",
+        "--allow-native",
+        "--subscription-billing-verified",
     )
     assert result.exit_code == 0, result.output
     assert "COMPLETE" in result.output
@@ -770,7 +802,14 @@ def test_native_run_escalates_when_handoff_never_updated(
     monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
 
     result = invoke(
-        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+        repo_dir,
+        "run",
+        "--config",
+        str(config_file),
+        "--issues",
+        "1",
+        "--allow-native",
+        "--subscription-billing-verified",
     )
 
     assert result.exit_code == 0, result.output
@@ -818,7 +857,14 @@ def test_native_run_verification_failure_does_not_consume_agent_failure_budget(
     monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
 
     result = invoke(
-        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+        repo_dir,
+        "run",
+        "--config",
+        str(config_file),
+        "--issues",
+        "1",
+        "--allow-native",
+        "--subscription-billing-verified",
     )
 
     assert result.exit_code == 0, result.output
@@ -953,7 +999,14 @@ def test_native_run_honors_create_pr_false(
     monkeypatch.setattr("subsched.github.pull_requests.create_or_get_pull_request", boom)
 
     result = invoke(
-        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+        repo_dir,
+        "run",
+        "--config",
+        str(config_file),
+        "--issues",
+        "1",
+        "--allow-native",
+        "--subscription-billing-verified",
     )
 
     assert result.exit_code == 0, result.output
@@ -1063,6 +1116,7 @@ def test_queue_priority_label_scores_changes_dispatch_order(
         "--issues",
         "1,101,103",
         "--allow-native",
+        "--subscription-billing-verified",
     )
 
     assert result.exit_code == 0, result.output
@@ -1141,7 +1195,14 @@ def test_native_run_produces_jsonl_lifecycle_timeline(
     )
 
     result = invoke(
-        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+        repo_dir,
+        "run",
+        "--config",
+        str(config_file),
+        "--issues",
+        "1",
+        "--allow-native",
+        "--subscription-billing-verified",
     )
     assert result.exit_code == 0, result.output
     assert "READY_FOR_REVIEW" in result.output

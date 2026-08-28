@@ -105,6 +105,8 @@ def test_codex_capacity_sensor_protocol_and_policy() -> None:
     caps_unverified = sensor_unverified.observe("codex", now=now)
     assert len(caps_unverified) == 1
     assert caps_unverified[0].state == CapacityState.DISABLED_BILLING
+    assert caps_unverified[0].source == "policy"
+    assert caps_unverified[0].confidence == "low"
 
     sensor_not_opted: CapacitySensor = CodexCapacitySensor(
         allow_live=False,
@@ -113,6 +115,8 @@ def test_codex_capacity_sensor_protocol_and_policy() -> None:
     caps_not_opted = sensor_not_opted.observe("codex", now=now)
     assert len(caps_not_opted) == 1
     assert caps_not_opted[0].state == CapacityState.DISABLED
+    assert caps_not_opted[0].source == "policy"
+    assert caps_not_opted[0].confidence == "low"
 
     sensor_verified: CapacitySensor = CodexCapacitySensor(
         allow_live=True,
@@ -121,3 +125,5 @@ def test_codex_capacity_sensor_protocol_and_policy() -> None:
     caps_verified = sensor_verified.observe("codex", now=now)
     assert len(caps_verified) == 1
     assert caps_verified[0].state == CapacityState.AVAILABLE
+    assert caps_verified[0].source == "policy"
+    assert caps_verified[0].confidence == "low"

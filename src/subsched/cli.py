@@ -210,6 +210,16 @@ def run(
     allow_native: Annotated[
         bool, typer.Option("--allow-native", help="Explicitly enable native worker execution")
     ] = False,
+    subscription_billing_verified: Annotated[
+        bool,
+        typer.Option(
+            "--subscription-billing-verified",
+            help=(
+                "Confirm that Claude/Codex use subscription billing with metered/API "
+                "fallback disabled for this run"
+            ),
+        ),
+    ] = False,
     allow_rediscovery: Annotated[
         bool,
         typer.Option(
@@ -251,6 +261,14 @@ def run(
         raise typer.Exit(2)
 
     if allow_native and not dry_run:
+        if not subscription_billing_verified:
+            typer.echo(
+                "Native execution blocked: subscription billing is unverified; pass "
+                "--subscription-billing-verified only after independently checking provider "
+                "authentication and billing mode.",
+                err=True,
+            )
+            raise typer.Exit(2)
         missing_cmds = [
             cmd for cmd in ("git", "gh", "claude", "codex") if shutil.which(cmd) is None
         ]
@@ -328,6 +346,7 @@ def run(
             ),
             worker=NativeWorker(
                 agent_timeout_seconds=float(cfg.execution.agent_timeout_seconds),
+                subscription_billing_verified=subscription_billing_verified,
                 structured_logger=structured_logger,
                 # #139: same tuple passed to the Scheduler's verification_commands=
                 # below, so the worker prompt and the post-worker gate never diverge.
@@ -385,10 +404,18 @@ def run(
 
     claude_sensor = ClaudeCapacitySensor(
         ClaudeExecutionPolicy(
-            live_probe_opt_in=True, billing_mode=ClaudeBillingMode.SUBSCRIPTION_VERIFIED
+            live_probe_opt_in=True,
+            billing_mode=(
+                ClaudeBillingMode.SUBSCRIPTION_VERIFIED
+                if subscription_billing_verified
+                else ClaudeBillingMode.UNKNOWN
+            ),
         )
     )
-    codex_sensor = CodexCapacitySensor(allow_live=True, subscription_billing_verified=True)
+    codex_sensor = CodexCapacitySensor(
+        allow_live=True,
+        subscription_billing_verified=subscription_billing_verified,
+    )
     capacities = (*claude_sensor.observe("claude"), *codex_sensor.observe("codex"))
 
     try:
