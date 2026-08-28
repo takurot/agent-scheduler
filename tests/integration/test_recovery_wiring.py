@@ -147,6 +147,37 @@ def test_in_progress_task_with_no_worktree_escalates_to_needs_human(tmp_path: Pa
     assert scheduler.lease_manager.active_count == 0
 
 
+def test_dispatched_task_with_no_worktree_escalates_without_crashing_startup(
+    tmp_path: Path,
+) -> None:
+    """PR #178 review finding: DISPATCHED cannot transition directly to NEEDS_HUMAN
+    (ALLOWED_TRANSITIONS in models.py), so a persisted task found at DISPATCHED with no
+    worktree recorded (hand-edited or legacy state.json; unreachable via the live
+    dispatch path, which always sets the worktree before persisting DISPATCHED) must not
+    raise StateTransitionError out of Scheduler.__init__ -- that would abort the entire
+    run for every task, not just this one."""
+    worktree_root = tmp_path / "worktrees"
+    task = Task.from_issue(Issue(number=12, title="Task 12")).transition(
+        TaskState.DISPATCHED, current_agent="claude"
+    )
+    assert task.worktree is None
+
+    store = JsonStateStore(tmp_path / "state.json")
+    store.save_tasks((task,))
+
+    scheduler = Scheduler(
+        store=store,
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=ScriptedWorker({}),
+        worktree_root=worktree_root,
+    )
+
+    reconciled = scheduler.tasks[0]
+    assert reconciled.status is TaskState.NEEDS_HUMAN
+    assert reconciled.needs_human_reason is not None
+    assert scheduler.lease_manager.active_count == 0
+
+
 def test_still_live_process_is_left_untouched_on_startup(tmp_path: Path) -> None:
     """If the recorded process is genuinely still running, reconcile must not disturb
     the task or its lease -- a second dispatch of the same issue would violate

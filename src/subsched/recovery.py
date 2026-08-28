@@ -97,7 +97,7 @@ def check_process_liveness(record: ProcessRecord) -> ProcessStatus:
     return ProcessStatus.LIVE
 
 
-def _escalate_to_needs_human(task: Task, reason: str) -> Task:
+def escalate_to_needs_human(task: Task, reason: str) -> Task:
     """Transition to NEEDS_HUMAN via the state machine's actual allowed edges.
 
     DISPATCHED cannot transition directly to NEEDS_HUMAN (see ALLOWED_TRANSITIONS in
@@ -129,12 +129,12 @@ def reconcile_task_recovery(worktree_dir: Path, task: Task) -> tuple[Task, str]:
 
     if not worktree_dir.exists() or not worktree_dir.is_dir() or worktree_dir.is_symlink():
         reason = f"{reason_prefix}; worktree invalid or missing; escalated to NEEDS_HUMAN"
-        return _escalate_to_needs_human(task, reason), reason
+        return escalate_to_needs_human(task, reason), reason
 
     handoff_ok = reconstruct_or_quarantine_handoff(worktree_dir, task)
     if not handoff_ok:
         reason = f"{reason_prefix}; handoff was corrupted and quarantined; escalated to NEEDS_HUMAN"
-        return _escalate_to_needs_human(task, reason), reason
+        return escalate_to_needs_human(task, reason), reason
 
     if task.status in {TaskState.DISPATCHED, TaskState.IN_PROGRESS}:
         reason = f"{reason_prefix}; task transitioned to RETRY"

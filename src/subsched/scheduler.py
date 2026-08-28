@@ -28,6 +28,7 @@ from subsched.queue import TaskQueue
 from subsched.recovery import (
     ProcessRecord,
     clear_process_record,
+    escalate_to_needs_human,
     reconcile_task_recovery,
     save_process_record,
 )
@@ -211,9 +212,11 @@ class Scheduler:
             if task.worktree is None:
                 # No worktree recorded at all: there is no process record, no handoff,
                 # and no way to verify what happened. Fail-closed rather than resume
-                # blindly.
+                # blindly. Routed through recovery.escalate_to_needs_human (not a plain
+                # .transition() call) because DISPATCHED cannot transition directly to
+                # NEEDS_HUMAN -- see ALLOWED_TRANSITIONS in models.py.
                 reason = "no worktree recorded for in-flight task; escalated to NEEDS_HUMAN"
-                resolved = task.transition(TaskState.NEEDS_HUMAN, reason=reason)
+                resolved = escalate_to_needs_human(task, reason)
             else:
                 reconciled, reason = reconcile_task_recovery(Path(task.worktree), task)
                 if reconciled.status is TaskState.RETRY:
