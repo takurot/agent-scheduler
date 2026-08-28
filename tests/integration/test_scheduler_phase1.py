@@ -178,7 +178,7 @@ def test_capacity_switches_stop_at_human_intervention_limit(tmp_path: Path) -> N
     assert scheduler.tasks[0].agent_switches == 2
 
 
-def test_local_estimate_does_not_release_provider_cooldown(tmp_path: Path) -> None:
+def test_policy_availability_does_not_release_provider_cooldown(tmp_path: Path) -> None:
     now = datetime(2026, 8, 12, 22, tzinfo=UTC)
     reset = now + timedelta(hours=1)
     store = JsonStateStore(tmp_path)
@@ -193,11 +193,11 @@ def test_local_estimate_does_not_release_provider_cooldown(tmp_path: Path) -> No
     )
     scheduler.discover((Issue(number=1, title="one"),))
     scheduler.run_until_waiting((available("claude", now),), now=now)
-    local = Capacity(
+    policy = Capacity(
         agent="claude",
         state=CapacityState.AVAILABLE,
         observed_at=reset,
-        source="local_estimate",
+        source="policy",
         confidence="low",
     )
     next_worker = ScriptedWorker({(1, "claude"): (AgentResult(AgentResultKind.PASS),)})
@@ -208,7 +208,7 @@ def test_local_estimate_does_not_release_provider_cooldown(tmp_path: Path) -> No
         worktree_root=tmp_path / "worktrees",
     )
 
-    restarted.run_until_waiting((local,), now=reset)
+    restarted.run_until_waiting((policy,), now=reset)
 
     assert next_worker.dispatches == []
 

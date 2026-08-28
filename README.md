@@ -8,7 +8,7 @@
 
 - 🔒 **Subscription-Only Execution**: Strictly operates within flat-rate subscription quotas (Claude Pro/Team, ChatGPT Plus/Team). Prevents accidental pay-as-you-go API key charges with fail-closed safety.
 - 🌳 **Worktree Isolation**: Creates isolated Git worktrees (`subsched/issue-<number>`) for each task to prevent workspace collision.
-- ⚡ **Multi-Agent Capacity & Failover**: Monitors rate limits across providers in real time, automatically failing over between agents (Claude ↔ Codex) or pausing until reset time.
+- ⚡ **Reactive Multi-Agent Failover**: Classifies rate-limit results returned by workers and preserves cooldown/reset state for failover. Proactive provider-capacity monitoring is not yet wired.
 - 🛡️ **Automated TDD & Quality Gates**: Enforces test-driven development, running repository verification (`ruff`, `mypy`, `pytest` with $\ge 80\%$ coverage, `pip-audit`) before pull requests.
 - 🔀 **Merge Conflict Protection**: Automatically attempts `git rebase main` and cleanly aborts (`git rebase --abort`) on conflict, safely escalating to `NEEDS_HUMAN`.
 - 📊 **Observability & Metrics**: Tracks autonomous completion rates, task success metrics, structured JSON Lines event logs, and markdown run reports.
@@ -21,7 +21,7 @@
 
 **The task's Git worktree is a working-directory default, not an OS-level sandbox.** It does not use a container, chroot, or network isolation. A Bash command run by the agent can technically read or write files outside the worktree and reach the network. Pull request review only inspects the code diff the agent proposes to commit — it does not catch side effects of commands executed during the session (e.g. files touched outside the repo, data sent over the network). Environment variables passed to the agent process are filtered to a small allowlist (no secrets), but this does not restrict filesystem access to files such as `~/.ssh`.
 
-**Only run `--allow-native` against issues and repositories you trust.** True OS-level sandboxing (containerized execution, filesystem/network isolation) is a planned hardening item, not yet implemented.
+**Only run `--allow-native` against issues and repositories you trust.** Native runs also require `--subscription-billing-verified`; pass it only after independently confirming that each enabled CLI uses subscription billing and that metered/API fallback is disabled. This flag is an operator assertion, not a provider-capacity probe. True OS-level sandboxing (containerized execution, filesystem/network isolation) is a planned hardening item, not yet implemented.
 
 ---
 
@@ -84,16 +84,16 @@ subsched run --repo owner/project --issues 101,102 --dry-run
 Executes coding agents in subscription mode, runs tests, and creates Pull Requests:
 ```bash
 # Run specific issues
-subsched run --repo owner/project --issues 101,102 --allow-native
+subsched run --repo owner/project --issues 101,102 --allow-native --subscription-billing-verified
 
 # Run by label
-subsched run --repo owner/project --label ai-ready --allow-native
+subsched run --repo owner/project --label ai-ready --allow-native --subscription-billing-verified
 
 # Run with natural language instruction
-subsched run "Execute all open issues" --repo owner/project --allow-native
+subsched run "Execute all open issues" --repo owner/project --allow-native --subscription-billing-verified
 
 # Run using configuration file
-subsched run --config subsched.yaml --allow-native
+subsched run --config subsched.yaml --allow-native --subscription-billing-verified
 ```
 
 ### Monitoring & Operations

@@ -191,8 +191,8 @@ class CodexCapacitySensor:
                     state=CapacityState.DISABLED,
                     scope="overall",
                     observed_at=current,
-                    source="provider",
-                    confidence="high",
+                    source="policy",
+                    confidence="low",
                 ),
             )
         if not self.subscription_billing_verified:
@@ -202,8 +202,8 @@ class CodexCapacitySensor:
                     state=CapacityState.DISABLED_BILLING,
                     scope="overall",
                     observed_at=current,
-                    source="provider",
-                    confidence="high",
+                    source="policy",
+                    confidence="low",
                 ),
             )
         return (
@@ -212,7 +212,7 @@ class CodexCapacitySensor:
                 state=CapacityState.AVAILABLE,
                 scope="overall",
                 observed_at=current,
-                source="provider",
-                confidence="high",
+                source="policy",
+                confidence="low",
             ),
         )

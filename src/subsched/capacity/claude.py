@@ -224,8 +224,8 @@ class ClaudeCapacitySensor:
                     state=self.execution_policy.worker_state,
                     scope="overall",
                     observed_at=current,
-                    source="provider",
-                    confidence="high",
+                    source="policy",
+                    confidence="low",
                 ),
             )
         return (
@@ -234,7 +234,7 @@ class ClaudeCapacitySensor:
                 state=CapacityState.AVAILABLE,
                 scope="overall",
                 observed_at=current,
-                source="provider",
-                confidence="high",
+                source="policy",
+                confidence="low",
             ),
         )

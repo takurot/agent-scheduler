@@ -702,6 +702,13 @@ class Capacity:
 
 # 21. Sensor Priority
 
+実装状態（Issue #165）: Claude/Codex CLIからprovider残量を取得する検証済みcommand/schemaは
+まだ存在しない。したがってproduction CLIのsensorはpolicy上のenabled/billing状態だけを
+`source="policy"`, `confidence="low"`として返す。provider出力parserはsanitized fixtureの
+replay契約として凍結し、実probeがPhase 0で確認されるまでproduction admission controlや
+cooldown解除には使わない。`source="provider"`, `confidence="high"`は実際に観測・検証した
+payloadにだけ付与する。
+
 ```text
 1 Provider-derived structured capacity
 2 Structured CLI result/error
@@ -1136,6 +1143,11 @@ DISABLED_BILLING
 ```
 
 を用意する。
+
+`subsched run --allow-native`はbilling modeを推測しない。各enabled CLIがsubscription認証で、
+metered/API fallbackが無効であることを独立に確認したoperatorが、実行ごとに
+`--subscription-billing-verified`を明示しなければnative workerを起動しない。この確認は
+capacity観測の代替ではなく、合成capacityのprovenanceをprovider/highへ昇格させない。
 
 ---
 

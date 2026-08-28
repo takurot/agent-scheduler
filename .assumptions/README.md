@@ -10,6 +10,7 @@ Observed on 2026-08-12. These checks do not establish permanent provider contrac
 | Codex CLI | CLI is installed; `codex exec` requires a controlled live spike | Native worker disabled |
 | Bernstein | Not installed and compatibility B1-B4 is unverified | Not a runtime dependency |
 | ccusage | Not installed; local usage is not provider capacity ground truth | Not used for admission control |
+| Provider capacity | No validated Claude/Codex command or live schema exposes current provider capacity | Parsers remain replay-only; runtime policy observations are low-confidence and cannot release cooldown |
 
 Live Agent calls, subscription consumption, GitHub mutations, and PR creation are deliberately
 excluded from automatic Phase 0 tests. Capture raw schemas only after billing/authentication mode
