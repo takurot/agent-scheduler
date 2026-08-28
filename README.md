@@ -94,7 +94,16 @@ subsched run "Execute all open issues" --repo owner/project --allow-native --sub
 
 # Run using configuration file
 subsched run --config subsched.yaml --allow-native --subscription-billing-verified
+
+# Keep the process alive for bounded capacity/CI waiting (default: 1 hour, 30s CI polls)
+subsched run --config subsched.yaml --allow-native --subscription-billing-verified --watch
 ```
+
+Without `--watch`, `run` remains one-shot and reports when durable work is waiting. `--watch`
+re-polls pending CI and waits until the next capacity reset, but exits at
+`--watch-timeout-seconds`. Capacity is not probed before `Scheduler.wait_duration()` elapses.
+Because proactive provider probes are not yet wired, policy-only observations cannot release a
+provider cooldown; the bounded watch then exits with state preserved.
 
 ### Monitoring & Operations
 

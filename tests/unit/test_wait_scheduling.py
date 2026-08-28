@@ -4,6 +4,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+
+from subsched.cli import _run_watch_loop
 from subsched.events import FakeClock
 from subsched.models import (
     AgentResult,
@@ -76,6 +79,124 @@ def test_earliest_reset_calculation_and_wait_duration(tmp_path: Path) -> None:
     assert scheduler.next_reset_at() == t_claude_reset
     wait_dur = scheduler.wait_duration()
     assert abs(wait_dur.total_seconds() - 3600) < 2
+
+
+def test_watch_loop_waits_until_reset_before_refresh_and_policy_cannot_release(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 12, 10, 0, tzinfo=UTC)
+    clock = FakeClock(now)
+    elapsed = 0.0
+    worker = ScriptedWorker(
+        {
+            (101, "claude"): (
+                AgentResult(
+                    AgentResultKind.CAPACITY_SESSION,
+                    reset_at=now + timedelta(seconds=60),
+                ),
+            )
+        }
+    )
+    scheduler = Scheduler(
+        store=JsonStateStore(tmp_path / "state.json"),
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=worker,
+        worktree_root=tmp_path / "worktrees",
+        clock=clock,
+    )
+    scheduler.discover([Issue(number=101, title="Task 101")])
+    observations = [
+        Capacity(
+            agent="claude",
+            state=CapacityState.AVAILABLE,
+            observed_at=now,
+            source="provider",
+            confidence="high",
+        ),
+        Capacity(
+            agent="claude",
+            state=CapacityState.AVAILABLE,
+            observed_at=now + timedelta(seconds=60),
+            source="policy",
+            confidence="low",
+        ),
+    ]
+    probe_calls = 0
+
+    def capacity_supplier() -> tuple[Capacity, ...]:
+        nonlocal probe_calls
+        value = observations[min(probe_calls, len(observations) - 1)]
+        probe_calls += 1
+        return (value,)
+
+    def fake_sleep(seconds: float) -> None:
+        nonlocal elapsed
+        elapsed += seconds
+        clock.advance(timedelta(seconds=seconds))
+
+    timed_out = _run_watch_loop(
+        scheduler,
+        capacity_supplier=capacity_supplier,
+        watch=True,
+        ci_monitoring=False,
+        poll_seconds=10,
+        timeout_seconds=70,
+        sleep=fake_sleep,
+        monotonic=lambda: elapsed,
+    )
+
+    assert timed_out is True
+    assert probe_calls == 2
+    assert worker.dispatches == [(101, "claude")]
+    assert scheduler.is_waiting_for_capacity is True
+
+
+def test_watch_loop_interrupt_preserves_waiting_state(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 12, 10, 0, tzinfo=UTC)
+    clock = FakeClock(now)
+    store = JsonStateStore(tmp_path / "state.json")
+    scheduler = Scheduler(
+        store=store,
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=ScriptedWorker(
+            {
+                (101, "claude"): (
+                    AgentResult(
+                        AgentResultKind.CAPACITY_SESSION,
+                        reset_at=now + timedelta(minutes=5),
+                    ),
+                )
+            }
+        ),
+        worktree_root=tmp_path / "worktrees",
+        clock=clock,
+    )
+    scheduler.discover([Issue(number=101, title="Task 101")])
+    available = Capacity(
+        agent="claude",
+        state=CapacityState.AVAILABLE,
+        observed_at=now,
+        source="provider",
+        confidence="high",
+    )
+
+    def interrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_watch_loop(
+            scheduler,
+            capacity_supplier=lambda: (available,),
+            watch=True,
+            ci_monitoring=False,
+            poll_seconds=10,
+            timeout_seconds=60,
+            sleep=interrupt,
+            monotonic=lambda: 0.0,
+        )
+
+    assert scheduler.is_waiting_for_capacity is True
+    assert store.load_tasks()[0].status is TaskState.WAITING_CAPACITY
 
 
 def test_bounded_backoff_when_reset_is_unknown(tmp_path: Path) -> None:

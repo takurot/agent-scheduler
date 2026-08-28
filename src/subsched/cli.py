@@ -4,7 +4,9 @@ import functools
 import re
 import secrets
 import shutil
+import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -26,7 +28,7 @@ from subsched.config import (
 from subsched.github.checks import fetch_pr_checks
 from subsched.github.issues import GitHubCliError, GitHubIssueSource, diagnose_token
 from subsched.github.pull_requests import check_merged_pr_for_issue
-from subsched.models import TaskState
+from subsched.models import Capacity, TaskState
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler
 from subsched.storage import (
@@ -41,6 +43,7 @@ from subsched.tasks.worktree import GitWorktreeAdapter, WorktreeAdapter, Worktre
 app = typer.Typer(no_args_is_help=True, help="Subscription-aware coding agent scheduler")
 config_app = typer.Typer(no_args_is_help=True, help="Config inspection and validation")
 app.add_typer(config_app, name="config")
+_sleep = time.sleep
 RepositoryOption = Annotated[
     Path | None,
     typer.Option("--repository", hidden=True, file_okay=False, resolve_path=True),
@@ -191,6 +194,77 @@ def _format_effective_config_summary(
     ]
 
 
+def _watch_needed(scheduler: Scheduler, *, ci_monitoring: bool) -> bool:
+    return scheduler.is_waiting_for_capacity or (
+        ci_monitoring
+        and any(task.status is TaskState.READY_FOR_REVIEW for task in scheduler.tasks)
+    )
+
+
+def _run_watch_loop(
+    scheduler: Scheduler,
+    *,
+    capacity_supplier: Callable[[], tuple[Capacity, ...]],
+    watch: bool,
+    ci_monitoring: bool,
+    poll_seconds: float,
+    timeout_seconds: float,
+    sleep: Callable[[float], None] | None = None,
+    monotonic: Callable[[], float] | None = None,
+) -> bool:
+    """Run once, then boundedly poll CI and wait for the next capacity-probe time.
+
+    Returns True only when watch work remains after the configured bound. Tests inject
+    FakeClock-backed sleep/monotonic functions; production uses monotonic wall time.
+    """
+    if poll_seconds <= 0 or timeout_seconds <= 0:
+        raise ValueError("watch poll and timeout values must be positive")
+    sleep_fn = sleep or _sleep
+    monotonic_fn = monotonic or time.monotonic
+    capacities = capacity_supplier()
+    scheduler.run_until_waiting(capacities)
+    if not watch:
+        return False
+
+    deadline = monotonic_fn() + timeout_seconds
+    max_iterations = int(timeout_seconds / poll_seconds) + 2
+    probe_in = (
+        scheduler.wait_duration().total_seconds()
+        if scheduler.is_waiting_for_capacity
+        else None
+    )
+
+    for _ in range(max_iterations):
+        if not _watch_needed(scheduler, ci_monitoring=ci_monitoring):
+            return False
+        remaining = deadline - monotonic_fn()
+        if remaining <= 0:
+            return True
+
+        delay = min(poll_seconds, remaining)
+        if probe_in is not None:
+            delay = min(delay, max(0.0, probe_in))
+        if delay > 0:
+            sleep_fn(delay)
+            if probe_in is not None:
+                probe_in -= delay
+
+        refreshed = False
+        if scheduler.is_waiting_for_capacity and probe_in is not None and probe_in <= 0:
+            capacities = capacity_supplier()
+            scheduler.refresh_capacities(capacities)
+            refreshed = True
+
+        scheduler.run_until_waiting(capacities)
+        if scheduler.is_waiting_for_capacity:
+            if refreshed or probe_in is None:
+                probe_in = scheduler.wait_duration().total_seconds()
+        else:
+            probe_in = None
+
+    return _watch_needed(scheduler, ci_monitoring=ci_monitoring)
+
+
 @app.command()
 def run(
     ctx: typer.Context,
@@ -220,6 +294,28 @@ def run(
             ),
         ),
     ] = False,
+    watch: Annotated[
+        bool,
+        typer.Option("--watch", help="Boundedly wait for capacity resets and pending CI"),
+    ] = False,
+    watch_poll_seconds: Annotated[
+        float,
+        typer.Option(
+            "--watch-poll-seconds",
+            min=1.0,
+            max=300.0,
+            help="Minimum interval between CI polls while --watch is active",
+        ),
+    ] = 30.0,
+    watch_timeout_seconds: Annotated[
+        float,
+        typer.Option(
+            "--watch-timeout-seconds",
+            min=1.0,
+            max=86400.0,
+            help="Maximum wall-clock duration for --watch",
+        ),
+    ] = 3600.0,
     allow_rediscovery: Annotated[
         bool,
         typer.Option(
@@ -416,16 +512,30 @@ def run(
         allow_live=True,
         subscription_billing_verified=subscription_billing_verified,
     )
-    capacities = (*claude_sensor.observe("claude"), *codex_sensor.observe("codex"))
+
+    def capacity_supplier() -> tuple[Capacity, ...]:
+        return (*claude_sensor.observe("claude"), *codex_sensor.observe("codex"))
 
     try:
-        scheduler.run_until_waiting(capacities)
+        watch_timed_out = _run_watch_loop(
+            scheduler,
+            capacity_supplier=capacity_supplier,
+            watch=watch,
+            ci_monitoring=cfg.execution.ci_monitoring,
+            poll_seconds=watch_poll_seconds,
+            timeout_seconds=watch_timeout_seconds,
+        )
     except KeyboardInterrupt:
         structured_logger.log(
             "run_end", data={"run_id": run_id, "interrupted": True}
         )
         typer.echo("\nInterrupted; in-progress task state was saved safely.", err=True)
         raise typer.Exit(130) from None
+
+    if watch_timed_out:
+        typer.echo(
+            f"Watch timeout reached after ~{int(watch_timeout_seconds)}s; durable state preserved."
+        )
 
     if scheduler.is_waiting_for_capacity:
         wait_seconds = int(scheduler.wait_duration().total_seconds())
@@ -442,6 +552,8 @@ def run(
         data={
             "run_id": run_id,
             "waiting_for_capacity": scheduler.is_waiting_for_capacity,
+            "watch": watch,
+            "watch_timed_out": watch_timed_out,
             "task_counts": dict(counts),
         },
     )
