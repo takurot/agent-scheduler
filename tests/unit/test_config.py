@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from subsched.config import (
     ConfigError,
@@ -16,6 +17,13 @@ from subsched.config import (
 def test_config_loads_example_yaml() -> None:
     example_path = Path(__file__).parents[2] / "examples" / "scheduler.yaml"
     assert example_path.exists()
+    raw = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+    assert raw["github"]["completion"]["close_issue"] is False
+    assert raw["routing"]["strategy"] == "capacity-aware"
+    assert raw["routing"]["provider_capacity"]["preferred"] is True
+    assert raw["routing"]["local_estimate"]["proactive_switch"] is False
+    assert raw["execution"]["pause_running_policy"] == "continue"
+    assert raw["queue"]["priority"]["tie_break"] == "issue_number_asc"
     config = load_config(example_path)
 
     assert config.github.repo == "owner/project"
@@ -27,6 +35,12 @@ def test_config_loads_example_yaml() -> None:
     assert config.billing.api_fallback is False
     assert config.billing.metered_usage is False
     assert config.billing.unknown_mode == "disable"
+    assert config.github.completion.close_issue is False
+    assert config.routing.strategy == "capacity-aware"
+    assert config.routing.provider_capacity.preferred is True
+    assert config.routing.local_estimate.proactive_switch is False
+    assert config.execution.pause_running_policy == "continue"
+    assert config.queue.priority.tie_break == "issue_number_asc"
 
 
 def test_config_loads_all_spec_sections(tmp_path: Path) -> None:
@@ -169,9 +183,19 @@ def test_config_rejects_parallel_execution_in_phase1(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_config_rejects_unsafe_billing(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "billing_yaml",
+    (
+        "api_fallback: true",
+        "metered_usage: true",
+        "unknown_mode: allow",
+    ),
+)
+def test_config_rejects_unsafe_billing(tmp_path: Path, billing_yaml: str) -> None:
     path = tmp_path / "scheduler.yaml"
-    path.write_text("github:\n  repo: o/r\nbilling:\n  api_fallback: true\n", encoding="utf-8")
+    path.write_text(
+        f"github:\n  repo: o/r\nbilling:\n  {billing_yaml}\n", encoding="utf-8"
+    )
 
     with pytest.raises(ConfigError, match="billing must remain fail-closed"):
         load_config(path)
@@ -321,6 +345,17 @@ def test_config_default_routing_values_are_accepted(tmp_path: Path) -> None:
     assert config.routing.strategy == "capacity-aware"
     assert config.routing.provider_capacity.preferred is True
     assert config.routing.local_estimate.proactive_switch is False
+
+
+def test_config_rejects_unimplemented_queue_tie_break(tmp_path: Path) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\nqueue:\n  priority:\n    tie_break: fifo\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match=r"queue\.priority\.tie_break"):
+        load_config(path)
 
 
 def test_parse_duration() -> None:

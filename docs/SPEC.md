@@ -1972,6 +1972,14 @@ execution:
   max_task_runtime: 6h
   max_tasks_per_run: 50
   agent_timeout_seconds: 300
+  pause_running_policy: continue
+
+
+queue:
+
+  priority:
+    label_scores: {}
+    tie_break: issue_number_asc
 
 
 handoff:
@@ -1985,6 +1993,13 @@ verification:
     - pytest
     - ruff check .
 ```
+
+現runtimeで受理する値は、`routing.strategy=capacity-aware`、
+`routing.provider_capacity.preferred=true`、`routing.local_estimate.proactive_switch=false`、
+`billing.api_fallback=false`、`billing.metered_usage=false`、`billing.unknown_mode=disable`、
+`execution.pause_running_policy=continue`、`queue.priority.tie_break=issue_number_asc`、
+`github.completion.close_issue=false`に限定する。未実装の値を受理して無視せず、config load時に
+`ConfigError`でfail-closedに拒否する。
 
 ---
 
