@@ -109,6 +109,7 @@ class ExecutionConfig:
     concurrency: int = 1
     max_agent_switches: int = 6
     max_agent_failures: int = 2
+    max_verification_failures: int = 2
     max_task_runtime: str = "6h"
     max_tasks_per_run: int = 50
     pause_running_policy: str = "continue"
@@ -179,6 +180,7 @@ SECTION_KEYS: dict[str, frozenset[str]] = {
             "concurrency",
             "max_agent_switches",
             "max_agent_failures",
+            "max_verification_failures",
             "max_task_runtime",
             "max_tasks_per_run",
             "pause_running_policy",
@@ -358,6 +360,9 @@ def _parse_execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
     max_failures = _strict_pos_int(
         raw.get("max_agent_failures", 2), "execution.max_agent_failures"
     )
+    max_verification_failures = _strict_pos_int(
+        raw.get("max_verification_failures", 2), "execution.max_verification_failures"
+    )
     max_tasks = _strict_pos_int(raw.get("max_tasks_per_run", 50), "execution.max_tasks_per_run")
     runtime = raw.get("max_task_runtime", "6h")
     parse_duration(runtime)
@@ -380,6 +385,7 @@ def _parse_execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
         concurrency=concurrency,
         max_agent_switches=max_switches,
         max_agent_failures=max_failures,
+        max_verification_failures=max_verification_failures,
         max_task_runtime=str(runtime),
         max_tasks_per_run=max_tasks,
         pause_running_policy=policy,

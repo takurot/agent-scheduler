@@ -77,6 +77,11 @@ class Scheduler:
         label_scores: dict[str, int] | None = None,
         concurrency: int = 1,
         max_agent_failures: int = 2,
+        # #175: verification-gate failures previously shared `task.attempt` with
+        # genuine Agent failures, so `max_agent_failures` could escalate to
+        # NEEDS_HUMAN after a single real Agent failure preceded by verification
+        # retries. Tracked as its own durable budget via Task.verification_failures.
+        max_verification_failures: int = 2,
         max_agent_switches: int = 6,
         max_tasks: int = 50,
         push_enabled: bool = False,
@@ -127,9 +132,12 @@ class Scheduler:
         self.concurrency = concurrency
         if max_agent_failures <= 0:
             raise ValueError("max_agent_failures must be positive")
+        if max_verification_failures <= 0:
+            raise ValueError("max_verification_failures must be positive")
         if max_agent_switches <= 0 or max_tasks <= 0:
             raise ValueError("scheduler safety limits must be positive")
         self.max_agent_failures = max_agent_failures
+        self.max_verification_failures = max_verification_failures
         self.max_agent_switches = max_agent_switches
         self.max_tasks = max_tasks
         from subsched.lease import LeaseManager
@@ -200,8 +208,9 @@ class Scheduler:
         process before the lease manager re-registers it. `reconcile_task_recovery`'s
         own RETRY result is not queueable by itself -- nothing else in this class
         transitions RETRY -> READY, it is always resolved by its caller in the same
-        step -- so it is resolved here into READY or NEEDS_HUMAN using the same
-        per-agent-failure threshold `_handle_result` uses for a live agent failure.
+        step -- so the crash is recorded against the dispatched Agent and resolved here
+        into READY or NEEDS_HUMAN using the same per-agent-failure threshold
+        `_handle_result` uses for a live agent failure.
         """
         in_flight = [
             task for task in self.queue.tasks if task.status in _IN_FLIGHT_RECOVERY_STATES
@@ -209,6 +218,16 @@ class Scheduler:
         changed = False
         for task in in_flight:
             from_state = task.status
+            if (
+                task.current_agent is not None
+                and task.last_dispatched_agent is not None
+                and task.current_agent != task.last_dispatched_agent
+            ):
+                recovery_agent = None
+                recovery_agent_error = "dispatched Agent identity inconsistent"
+            else:
+                recovery_agent = task.current_agent or task.last_dispatched_agent
+                recovery_agent_error = "dispatched Agent identity missing"
             if task.worktree is None:
                 # No worktree recorded at all: there is no process record, no handoff,
                 # and no way to verify what happened. Fail-closed rather than resume
@@ -220,12 +239,26 @@ class Scheduler:
             else:
                 reconciled, reason = reconcile_task_recovery(Path(task.worktree), task)
                 if reconciled.status is TaskState.RETRY:
-                    next_state = (
-                        TaskState.NEEDS_HUMAN
-                        if reconciled.attempt >= self.max_agent_failures
-                        else TaskState.READY
-                    )
-                    resolved = reconciled.transition(next_state, reason=reason)
+                    if recovery_agent is None:
+                        reason = (
+                            f"{reason}; {recovery_agent_error}; "
+                            "escalated to NEEDS_HUMAN"
+                        )
+                        resolved = reconciled.transition(TaskState.NEEDS_HUMAN, reason=reason)
+                    else:
+                        failures_dict = dict(reconciled.per_agent_failures)
+                        failures_dict[recovery_agent] = failures_dict.get(recovery_agent, 0) + 1
+                        agent_failure_count = failures_dict[recovery_agent]
+                        reconciled = replace(
+                            reconciled,
+                            per_agent_failures=tuple(sorted(failures_dict.items())),
+                        )
+                        next_state = (
+                            TaskState.NEEDS_HUMAN
+                            if agent_failure_count >= self.max_agent_failures
+                            else TaskState.READY
+                        )
+                        resolved = reconciled.transition(next_state, reason=reason)
                 else:
                     resolved = reconciled
 
@@ -819,12 +852,17 @@ class Scheduler:
                     },
                 )
             else:
+                # #175: verification-gate failures are their own budget
+                # (max_verification_failures), never mixed with per-agent Agent
+                # failure counts -- this branch does not touch per_agent_failures.
+                new_verification_failures = task.verification_failures + 1
                 retry = verifying.transition(
                     TaskState.RETRY, current_agent=None, increment_attempt=True, now=now
                 )
+                retry = replace(retry, verification_failures=new_verification_failures)
                 next_state = (
                     TaskState.NEEDS_HUMAN
-                    if retry.attempt >= self.max_agent_failures
+                    if new_verification_failures >= self.max_verification_failures
                     else TaskState.READY
                 )
                 final = retry.transition(next_state, now=now)
@@ -897,6 +935,10 @@ class Scheduler:
         else:
             failures_dict = dict(task.per_agent_failures)
             failures_dict[agent] = failures_dict.get(agent, 0) + 1
+            # #175: escalation is gated on this Agent's own failure count, not on
+            # task.attempt -- task.attempt also advances on verification retries, which
+            # must not count against max_agent_failures (docs/SPEC.md #50).
+            agent_failure_count = failures_dict[agent]
             per_agent = tuple(sorted(failures_dict.items()))
             retry = task.transition(
                 TaskState.RETRY,
@@ -907,7 +949,7 @@ class Scheduler:
             retry = replace(retry, per_agent_failures=per_agent)
             next_state = (
                 TaskState.NEEDS_HUMAN
-                if retry.attempt >= self.max_agent_failures
+                if agent_failure_count >= self.max_agent_failures
                 else TaskState.READY
             )
             final = retry.transition(next_state, now=now)

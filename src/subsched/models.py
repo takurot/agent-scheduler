@@ -221,6 +221,10 @@ class Task:
     actual_agent_switches: int = 0
     last_dispatched_agent: str | None = None
     per_agent_failures: tuple[tuple[str, int], ...] = ()
+    # #175: verification-gate failures counted separately from per_agent_failures so
+    # `max_agent_failures` escalation is gated on genuine Agent failures only, never on
+    # verification retries (see Scheduler._handle_result / max_verification_failures).
+    verification_failures: int = 0
     current_agent: str | None = None
     worktree: str | None = None
     dependencies: tuple[int, ...] = ()
@@ -289,6 +293,7 @@ class Task:
             "actual_agent_switches": self.actual_agent_switches,
             "last_dispatched_agent": self.last_dispatched_agent,
             "per_agent_failures": dict(self.per_agent_failures),
+            "verification_failures": self.verification_failures,
             "current_agent": self.current_agent,
             "worktree": self.worktree,
             "dependencies": list(self.dependencies),
@@ -317,6 +322,7 @@ class Task:
                 per_agent_failures=tuple(
                     (str(k), int(v)) for k, v in value.get("per_agent_failures", {}).items()
                 ),
+                verification_failures=int(value.get("verification_failures", 0)),
                 current_agent=value.get("current_agent"),
                 worktree=value.get("worktree"),
                 dependencies=tuple(int(item) for item in value["dependencies"]),

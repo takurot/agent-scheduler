@@ -343,6 +343,7 @@ def run(
             verification_timeout_seconds=float(cfg.verification.timeout_seconds),
             concurrency=cfg.execution.concurrency,
             max_agent_failures=cfg.execution.max_agent_failures,
+            max_verification_failures=cfg.execution.max_verification_failures,
             max_agent_switches=cfg.execution.max_agent_switches,
             max_tasks=cfg.execution.max_tasks_per_run,
             push_enabled=not dry_run,

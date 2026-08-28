@@ -778,6 +778,60 @@ def test_native_run_escalates_when_handoff_never_updated(
     assert "COMPLETE" not in result.output
 
 
+def test_native_run_verification_failure_does_not_consume_agent_failure_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for #175 (real CLI, real git, mocked Agent process, no real
+    provider/GitHub calls). The Agent PASSes and complies with the handoff contract
+    every time -- it never fails -- but the configured verification command always
+    fails. With `max_verification_failures: 1`, this must escalate to NEEDS_HUMAN via
+    the verification budget alone, with `per_agent_failures` left untouched (a config
+    with `max_agent_failures` set below the number of ticks would previously have been
+    irrelevant to when this escalates, because the buggy code counted verification
+    retries against `task.attempt` -- the exact same counter `max_agent_failures`
+    checked)."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n"
+        "  repo: owner/project\n"
+        "verification:\n"
+        "  commands:\n"
+        "    - 'false'\n"
+        "execution:\n"
+        "  max_verification_failures: 1\n"
+        "  max_agent_failures: 5\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        _update_handoff(request.cwd, issue_number=1, title="Task 1")
+        return ProcessExecutionResult(exit_code=0, stdout=_claude_success_stdout(), stderr="")
+
+    monkeypatch.setattr("subsched.agents.claude.run_process_group", fake_run_process_group)
+
+    result = invoke(
+        repo_dir, "run", "--config", str(config_file), "--issues", "1", "--allow-native"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "NEEDS_HUMAN" in result.output
+    assert "COMPLETE" not in result.output
+
+    tasks = JsonStateStore(repo_dir).load_tasks()
+    task = next(t for t in tasks if t.issue_number == 1)
+    assert task.status is TaskState.NEEDS_HUMAN
+    assert task.per_agent_failures == ()
+    assert task.verification_failures == 1
+
+
 def test_run_excludes_issue_with_confirmed_merged_pr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
