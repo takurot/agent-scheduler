@@ -6,11 +6,27 @@ github:
     - blocked
     - human-only
     - security-sensitive
+  completion:
+    create_pr: true
+    close_issue: false
+
+routing:
+  strategy: capacity-aware
+  provider_capacity:
+    preferred: true
+  local_estimate:
+    proactive_switch: false
 
 execution:
   concurrency: 1
   max_agent_switches: 6
   max_tasks_per_run: 50
+  pause_running_policy: continue
+
+queue:
+  priority:
+    label_scores: {}
+    tie_break: issue_number_asc
 
 # Each command runs directly (not through a shell) inside the task worktree, so it
 # must resolve on PATH there. The default below (bare pytest/ruff) assumes those are

@@ -134,9 +134,30 @@ You can place a `subsched.yaml` in your project root to customize repositories, 
 github:
   repo: owner/project
   mode: all-open # or label: "ai-ready"
+  completion:
+    create_pr: true
+    close_issue: false
+
+routing:
+  strategy: capacity-aware
+  provider_capacity:
+    preferred: true
+  local_estimate:
+    proactive_switch: false
+
+billing:
+  api_fallback: false
+  metered_usage: false
+  unknown_mode: disable
 
 execution:
   concurrency: 1
+  pause_running_policy: continue
+
+queue:
+  priority:
+    label_scores: {}
+    tie_break: issue_number_asc
 
 # Custom test and lint commands for your language. Verification runs each command
 # directly (not through a shell), so it must resolve on PATH inside the task worktree.
@@ -153,6 +174,10 @@ verification:
     # - npm test
     # - npm run lint
 ```
+
+The values shown for `billing.*`, `routing.*`, `pause_running_policy`, `tie_break`, and
+`close_issue` are the only currently supported values. Unsupported alternatives fail during
+configuration loading instead of being accepted and ignored.
 
 ---
 
