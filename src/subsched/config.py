@@ -425,11 +425,17 @@ def _parse_verification_config(raw: Mapping[str, Any]) -> VerificationConfig:
     commands_raw = raw.get("commands", ("pytest", "ruff check ."))
     if not isinstance(commands_raw, (list, tuple)):
         raise ConfigError("verification.commands must be a list of strings")
+    if not commands_raw or any(
+        not isinstance(command, str) or not command.strip() for command in commands_raw
+    ):
+        raise ConfigError(
+            "verification.commands must contain at least one non-blank command"
+        )
     timeout_seconds = _strict_pos_int(
         raw.get("timeout_seconds", 120), "verification.timeout_seconds"
     )
     return VerificationConfig(
-        commands=tuple(str(c) for c in commands_raw),
+        commands=tuple(commands_raw),
         timeout_seconds=timeout_seconds,
     )
 

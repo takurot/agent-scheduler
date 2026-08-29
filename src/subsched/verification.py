@@ -91,6 +91,13 @@ def run_verification(
         if not passed:
             break
 
+    if not gate_results:
+        return VerificationReport(
+            passed=False,
+            gates=(),
+            summary="FAIL (no executable verification commands configured)",
+        )
+
     summary_lines = [
         f"{g.command}: {_gate_summary(g)}" for g in gate_results
     ]

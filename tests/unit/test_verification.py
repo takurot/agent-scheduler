@@ -45,6 +45,63 @@ def test_run_verification_reports_command_not_found_clearly(tmp_path: Path) -> N
     assert "command not found" in report.summary.casefold()
 
 
+@pytest.mark.parametrize("commands", ((), ("   ", "\t")))
+def test_run_verification_fails_when_no_executable_gate_runs(
+    tmp_path: Path, commands: tuple[str, ...]
+) -> None:
+    report = run_verification(tmp_path, commands)
+
+    assert report.passed is False
+    assert report.gates == ()
+    assert report.summary == "FAIL (no executable verification commands configured)"
+
+
+def test_scheduler_does_not_finalize_when_no_verification_gate_runs(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    from subsched.models import (
+        AgentResult,
+        AgentResultKind,
+        Capacity,
+        CapacityState,
+        Issue,
+        TaskState,
+    )
+    from subsched.router import AgentConfig, Router
+    from subsched.scheduler import Scheduler, ScriptedWorker
+    from subsched.storage import JsonStateStore
+
+    store = JsonStateStore(tmp_path / "state.json")
+    scheduler = Scheduler(
+        store=store,
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=ScriptedWorker(
+            {(101, "claude"): (AgentResult(AgentResultKind.PASS),)}
+        ),
+        worktree_root=tmp_path / "worktrees",
+        verification_commands=(),
+        max_verification_failures=1,
+    )
+    scheduler.discover([Issue(number=101, title="Task 101")])
+
+    scheduler.tick(
+        [
+            Capacity(
+                agent="claude",
+                state=CapacityState.AVAILABLE,
+                observed_at=datetime.now(UTC),
+                source="provider",
+                confidence="high",
+            )
+        ]
+    )
+
+    task = scheduler.tasks[0]
+    assert task.status is TaskState.NEEDS_HUMAN
+    assert task.verification_failures == 1
+    assert task.pr is None
+
+
 def test_scheduler_passes_configured_verification_commands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
