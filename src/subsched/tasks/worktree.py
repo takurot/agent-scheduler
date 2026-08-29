@@ -104,7 +104,7 @@ class GitWorktreeAdapter:
                 f"worktree path {resolved} escapes root {self.worktree_root}"
             )
 
-    def _is_registered_worktree(self, path: Path) -> bool:
+    def _registered_worktree_branch(self, path: Path) -> tuple[bool, str | None]:
         result = self.run(
             ["git", "-C", str(self.repo_root), "worktree", "list", "--porcelain"],
             capture_output=True,
@@ -113,13 +113,24 @@ class GitWorktreeAdapter:
             env=git_safe_env(),
         )
         if result.returncode != 0:
-            return False
-        for line in result.stdout.splitlines():
-            if line.startswith("worktree "):
-                registered_path = line[len("worktree ") :].strip()
-                if Path(registered_path).resolve() == path.resolve():
-                    return True
-        return False
+            return False, None
+        for record in result.stdout.split("\n\n"):
+            lines = record.splitlines()
+            worktree_line = next(
+                (line for line in lines if line.startswith("worktree ")), None
+            )
+            if worktree_line is None:
+                continue
+            registered_path = worktree_line[len("worktree ") :].strip()
+            if Path(registered_path).resolve() != path.resolve():
+                continue
+            branch_line = next(
+                (line for line in lines if line.startswith("branch ")), None
+            )
+            if branch_line is None:
+                return True, None
+            return True, branch_line[len("branch ") :].strip()
+        return False, None
 
     def _branch_exists(self, branch: str) -> bool:
         result = self.run(
@@ -152,7 +163,18 @@ class GitWorktreeAdapter:
                 raise WorktreeConflictError(
                     f"path {target_path} exists and is not a directory"
                 )
-            if self._is_registered_worktree(target_path):
+            registered, registered_branch = self._registered_worktree_branch(target_path)
+            if registered:
+                expected_branch = f"refs/heads/{target_branch}"
+                if registered_branch is None:
+                    raise WorktreeConflictError(
+                        f"registered worktree {target_path} is at detached HEAD"
+                    )
+                if registered_branch != expected_branch:
+                    raise WorktreeConflictError(
+                        f"registered worktree {target_path} is on {registered_branch}; "
+                        f"expected branch {target_branch}"
+                    )
                 return WorktreeContext(
                     path=target_path.resolve(),
                     branch=target_branch,

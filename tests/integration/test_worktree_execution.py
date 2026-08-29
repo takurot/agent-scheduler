@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from subsched.tasks.worktree import GitWorktreeAdapter
+from subsched.models import AgentResult, AgentResultKind, Capacity, CapacityState, Issue, TaskState
+from subsched.router import AgentConfig, Router
+from subsched.scheduler import Scheduler, ScriptedWorker
+from subsched.storage import JsonStateStore
+from subsched.tasks.worktree import GitWorktreeAdapter, WorktreeConflictError
 
 
 @pytest.fixture
@@ -58,3 +63,99 @@ def test_worktree_creates_and_preserves_dirty_changes_across_agents(
         check=True,
     )
     assert branch_proc.stdout.strip() == "subsched/issue-101"
+
+
+def test_registered_worktree_on_different_branch_is_rejected(
+    git_repo: tuple[Path, Path],
+) -> None:
+    repo_dir, worktree_root = git_repo
+    adapter = GitWorktreeAdapter(repo_dir, worktree_root)
+    ctx = adapter.prepare_worktree(101)
+    subprocess.run(
+        ["git", "switch", "-c", "manual-maintenance"],
+        cwd=ctx.path,
+        check=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(WorktreeConflictError, match="expected branch subsched/issue-101"):
+        adapter.prepare_worktree(101)
+
+
+def test_registered_worktree_at_detached_head_is_rejected(
+    git_repo: tuple[Path, Path],
+) -> None:
+    repo_dir, worktree_root = git_repo
+    adapter = GitWorktreeAdapter(repo_dir, worktree_root)
+    ctx = adapter.prepare_worktree(101)
+    subprocess.run(
+        ["git", "switch", "--detach"], cwd=ctx.path, check=True, capture_output=True
+    )
+
+    with pytest.raises(WorktreeConflictError, match="detached HEAD"):
+        adapter.prepare_worktree(101)
+
+
+def test_registered_worktree_validates_explicit_custom_branch(
+    git_repo: tuple[Path, Path],
+) -> None:
+    repo_dir, worktree_root = git_repo
+    adapter = GitWorktreeAdapter(repo_dir, worktree_root)
+
+    first = adapter.prepare_worktree(102, branch="custom/issue-102")
+    second = adapter.prepare_worktree(102, branch="custom/issue-102")
+
+    assert second == first
+
+
+def test_scheduler_escalates_worktree_identity_conflict_without_dispatch(
+    git_repo: tuple[Path, Path], tmp_path: Path
+) -> None:
+    repo_dir, worktree_root = git_repo
+    adapter = GitWorktreeAdapter(repo_dir, worktree_root)
+    ctx = adapter.prepare_worktree(101)
+    subprocess.run(
+        ["git", "switch", "-c", "manual-maintenance"],
+        cwd=ctx.path,
+        check=True,
+        capture_output=True,
+    )
+    worker = ScriptedWorker(
+        {(101, "claude"): (AgentResult(AgentResultKind.PASS),)}
+    )
+    store = JsonStateStore(tmp_path / "state")
+    scheduler = Scheduler(
+        store=store,
+        router=Router((AgentConfig("claude", 100),)),
+        worker=worker,
+        worktree_root=worktree_root,
+        worktree_adapter=adapter,
+        push_enabled=True,
+        create_pr_enabled=True,
+        repo="owner/project",
+    )
+    scheduler.discover((Issue(number=101, title="Task 101"),))
+    now = datetime(2026, 8, 29, tzinfo=UTC)
+
+    progressed = scheduler.tick(
+        (
+            Capacity(
+                agent="claude",
+                state=CapacityState.AVAILABLE,
+                observed_at=now,
+                source="provider",
+                confidence="high",
+            ),
+        ),
+        now=now,
+    )
+
+    task = scheduler.tasks[0]
+    assert progressed is True
+    assert task.status is TaskState.NEEDS_HUMAN
+    assert task.needs_human_reason == (
+        "worktree preparation failed: WorktreeConflictError"
+    )
+    assert task.worktree is None
+    assert worker.dispatches == []
+    assert store.load_tasks() == scheduler.tasks

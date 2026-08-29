@@ -35,7 +35,7 @@ from subsched.recovery import (
 from subsched.router import FRESHNESS, Router
 from subsched.storage import JsonStateStore, get_process_start_time
 from subsched.structured_logger import StructuredLogger
-from subsched.tasks.worktree import WorktreeAdapter
+from subsched.tasks.worktree import WorktreeAdapter, WorktreeError
 
 _IN_FLIGHT_RECOVERY_STATES = frozenset({TaskState.DISPATCHED, TaskState.IN_PROGRESS})
 
@@ -399,7 +399,33 @@ class Scheduler:
         lease = self.lease_manager.acquire(task.issue_number, agent, now=current)
         try:
             if self.worktree_adapter is not None:
-                ctx = self.worktree_adapter.prepare_worktree(task.issue_number)
+                try:
+                    ctx = self.worktree_adapter.prepare_worktree(task.issue_number)
+                except WorktreeError as error:
+                    reason = f"worktree preparation failed: {type(error).__name__}"
+                    worktree_escalated = task.transition(
+                        TaskState.NEEDS_HUMAN,
+                        current_agent=None,
+                        now=current,
+                        reason=reason,
+                    )
+                    self.queue = self.queue.replace(worktree_escalated)
+                    self._persist()
+                    self._log(
+                        "task_transition",
+                        level="ERROR",
+                        issue_number=worktree_escalated.issue_number,
+                        agent=agent,
+                        task_id=worktree_escalated.task_id,
+                        message=reason,
+                        data={
+                            "from_state": task.status.value,
+                            "to_state": worktree_escalated.status.value,
+                            "attempt": worktree_escalated.attempt,
+                        },
+                    )
+                    self._backoff_step = 0
+                    return True
                 task = task.with_worktree(str(ctx.path))
                 self.queue = self.queue.replace(task)
             else:
