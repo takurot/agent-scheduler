@@ -986,7 +986,8 @@ Agent単位ではworktreeを作らない。
 既存のtask worktreeを再利用する場合、Gitへの登録pathだけでなく、そのrecordが期待する
 `refs/heads/subsched/issue-N`（明示branch指定時はそのbranch）を指すことをdispatch前に検証する。
 別branchまたはdetached HEADなら自動的にswitch/pushせず、identity conflictとしてfail-closedに
-拒否する。
+拒否する。Schedulerは対象taskをredact済みの理由とともに`NEEDS_HUMAN`へ永続化し、workerを
+dispatchせず、ほかのtaskの処理を継続する。
 
 Issue #103についてClaudeが途中まで編集した場合、
 
