@@ -184,7 +184,8 @@ native実行を開放する変更は、少なくとも次を満たす。
 - Issue本文をdelimiter/schemaで囲んだuntrusted dataとしてpromptへ渡し、Issue由来値をcwd、
   argv、command、environmentへ昇格させない
 - stdout/stderrだけでなくprompt、argv、audit logからもsecretとcredentialを除去する
-- 対象repositoryのAGENTS.mdとCLAUDE.mdにAgent contractがある
+- 対象repositoryのAGENTS.mdとCLAUDE.mdをユーザー管理のread-only inputとして扱い、
+  Scheduler固有のcontractはworker promptと`.ai/` task/handoffへ渡す
 - task fileとsemantic handoffをdispatch前にreadback検証する
 - dirty worktreeを破壊せず別Agentが継続できる
 - API fallback、metered usage、merge、release、deployは無効のままにする
@@ -264,7 +265,7 @@ GitHub write、長時間soak testは通常CIへ混ぜず、明示承認された
 | CLI、default、利用可能なPhase | README、SPEC、`--help` test |
 | task/capacity state、遷移、不変条件 | SPEC、model/transition test |
 | persisted schema、directory layout、migration | SPEC、recovery test、runbook |
-| Agent contract、handoff、checkpoint | SPEC、AGENTS.md、CLAUDE.md、fixture |
+| Scheduler worker contract、handoff、checkpoint | SPEC、worker prompt、RUNBOOK、fixture |
 | 設定schema | SPEC、`examples/scheduler.yaml`、config test |
 | 開発・検証手順 | このWORKFLOW |
 

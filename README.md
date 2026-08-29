@@ -23,6 +23,13 @@
 
 **Only run `--allow-native` against issues and repositories you trust.** Native runs also require `--subscription-billing-verified`; pass it only after independently confirming that each enabled CLI uses subscription billing and that metered/API fallback is disabled. This flag is an operator assertion, not a provider-capacity probe. True OS-level sandboxing (containerized execution, filesystem/network isolation) is a planned hardening item, not yet implemented.
 
+Repository instruction files are user-owned input. `subsched` tells each worker to read an existing
+`AGENTS.md` and `CLAUDE.md`, but never creates, edits, or removes either file. Task scope and
+Scheduler/worker responsibilities are delivered through the generated worker prompt and `.ai/`
+task/handoff state. If repository instructions conflict with the Scheduler's issue, billing,
+permission, or lifecycle boundaries, the worker must stop and report the conflict; existing runtime
+gates remain authoritative.
+
 ---
 
 ## Requirements

@@ -651,8 +651,8 @@ def test_native_run_drives_scheduler_to_ready_for_review_and_opens_pr(
     captured_prompts: list[str] = []
 
     def fake_run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResult:
-        # #145: a compliant Agent updates the handoff before finishing (per
-        # MANAGED_CONTRACT); simulate that here so handoff.continuous's default-on
+        # #145: a compliant Agent updates the handoff before finishing (per the
+        # Scheduler-owned worker prompt); simulate that here so handoff.continuous's default-on
         # readback validation doesn't escalate this otherwise-successful run.
         _update_handoff(request.cwd, issue_number=1, title="Task 1")
         if request.stdin_payload:
@@ -695,6 +695,10 @@ def test_native_run_drives_scheduler_to_ready_for_review_and_opens_pr(
     # an earlier merge, where `captured_prompts` didn't even exist -- restored here.)
     assert captured_prompts
     assert any("- true" in prompt for prompt in captured_prompts)
+
+    task_worktree = repo_dir / ".ai" / "worktrees" / "issue-1"
+    assert not (task_worktree / "AGENTS.md").exists()
+    assert not (task_worktree / "CLAUDE.md").exists()
 
 
 def test_ci_monitoring_promotes_ready_for_review_to_complete(
