@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from subsched.tasks.worktree import GitWorktreeAdapter
+from subsched.tasks.worktree import GitWorktreeAdapter, WorktreeConflictError
 
 
 @pytest.fixture
@@ -58,3 +58,46 @@ def test_worktree_creates_and_preserves_dirty_changes_across_agents(
         check=True,
     )
     assert branch_proc.stdout.strip() == "subsched/issue-101"
+
+
+def test_registered_worktree_on_different_branch_is_rejected(
+    git_repo: tuple[Path, Path],
+) -> None:
+    repo_dir, worktree_root = git_repo
+    adapter = GitWorktreeAdapter(repo_dir, worktree_root)
+    ctx = adapter.prepare_worktree(101)
+    subprocess.run(
+        ["git", "switch", "-c", "manual-maintenance"],
+        cwd=ctx.path,
+        check=True,
+        capture_output=True,
+    )
+
+    with pytest.raises(WorktreeConflictError, match="expected branch subsched/issue-101"):
+        adapter.prepare_worktree(101)
+
+
+def test_registered_worktree_at_detached_head_is_rejected(
+    git_repo: tuple[Path, Path],
+) -> None:
+    repo_dir, worktree_root = git_repo
+    adapter = GitWorktreeAdapter(repo_dir, worktree_root)
+    ctx = adapter.prepare_worktree(101)
+    subprocess.run(
+        ["git", "switch", "--detach"], cwd=ctx.path, check=True, capture_output=True
+    )
+
+    with pytest.raises(WorktreeConflictError, match="detached HEAD"):
+        adapter.prepare_worktree(101)
+
+
+def test_registered_worktree_validates_explicit_custom_branch(
+    git_repo: tuple[Path, Path],
+) -> None:
+    repo_dir, worktree_root = git_repo
+    adapter = GitWorktreeAdapter(repo_dir, worktree_root)
+
+    first = adapter.prepare_worktree(102, branch="custom/issue-102")
+    second = adapter.prepare_worktree(102, branch="custom/issue-102")
+
+    assert second == first
