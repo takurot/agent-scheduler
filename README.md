@@ -182,6 +182,9 @@ verification:
     # - npm run lint
 ```
 
+`verification.commands` must contain at least one non-blank command. An empty list or blank-only
+entry is rejected instead of being treated as a successful verification run.
+
 The values shown for `billing.*`, `routing.*`, `pause_running_policy`, `tie_break`, and
 `close_issue` are the only currently supported values. Unsupported alternatives fail during
 configuration loading instead of being accepted and ignored.

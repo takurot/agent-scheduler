@@ -140,6 +140,26 @@ def test_verification_timeout_seconds_rejects_non_positive(tmp_path: Path) -> No
         load_config(path)
 
 
+@pytest.mark.parametrize(
+    "commands_yaml",
+    (
+        "commands: []",
+        "commands:\n    - '   '",
+    ),
+)
+def test_verification_commands_rejects_no_executable_gate(
+    tmp_path: Path, commands_yaml: str
+) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        f"github:\n  repo: o/r\nverification:\n  {commands_yaml}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="at least one non-blank command"):
+        load_config(path)
+
+
 def test_agent_timeout_seconds_default_and_override(tmp_path: Path) -> None:
     default_path = tmp_path / "default.yaml"
     default_path.write_text("github:\n  repo: o/r\n", encoding="utf-8")

@@ -2000,6 +2000,9 @@ verification:
 `github.completion.close_issue=false`に限定する。未実装の値を受理して無視せず、config load時に
 `ConfigError`でfail-closedに拒否する。
 
+`verification.commands`は1件以上のnon-blank文字列を必須とする。設定境界を経由しない直接の
+verification実行でも、実行可能なgateが0件ならPASSにせずfail-closedにする。
+
 ---
 
 # 55. CLI
