@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from subsched.config import validate_base_branch
 from subsched.contract import bootstrap_task_files
 from subsched.events import Clock, EventSource, EventType, SystemClock
 from subsched.github.checks import CICheckState, PRChecksStatus
@@ -87,7 +88,7 @@ class Scheduler:
         push_enabled: bool = False,
         create_pr_enabled: bool = True,
         repo: str | None = None,
-        base_branch: str = "main",
+        base_branch: str | None = None,
         structured_logger: StructuredLogger | None = None,
         # #145: opt-in (default False, unlike config's own default of True) so every
         # existing direct Scheduler(...) construction in the test suite is unaffected --
@@ -128,7 +129,11 @@ class Scheduler:
         self.push_enabled = push_enabled
         self.create_pr_enabled = create_pr_enabled
         self.repo = repo
-        self.base_branch = base_branch
+        if push_enabled and create_pr_enabled and base_branch is None:
+            raise ValueError("base_branch must be resolved before enabling push/PR")
+        self.base_branch = (
+            validate_base_branch(base_branch) if base_branch is not None else None
+        )
         self.concurrency = concurrency
         if max_agent_failures <= 0:
             raise ValueError("max_agent_failures must be positive")
@@ -660,8 +665,16 @@ class Scheduler:
 
         worktree_dir = Path(verifying.worktree)
         branch_name = f"subsched/issue-{verifying.issue_number}"
+        base_branch = self.base_branch
+        if base_branch is None:
+            return verifying.transition(
+                TaskState.NEEDS_HUMAN,
+                current_agent=agent,
+                now=now,
+                reason="base branch is unresolved; failing closed before git operations",
+            )
 
-        rebase_result = rebase_onto_base(worktree_dir, base_branch=self.base_branch)
+        rebase_result = rebase_onto_base(worktree_dir, base_branch=base_branch)
         after_rebase, _rebase_msg = handle_rebase_outcome(verifying, rebase_result)
         self._log(
             "rebase",
@@ -683,7 +696,8 @@ class Scheduler:
         # bypassing the "issues stay open until manual review" invariant. This never
         # rewrites history; it only inspects and, on any violation (including an
         # inconclusive git failure), fails closed to NEEDS_HUMAN instead of pushing.
-        violations = find_close_keyword_commits(worktree_dir, self.base_branch)
+        remote_base_ref = f"refs/remotes/origin/{base_branch}"
+        violations = find_close_keyword_commits(worktree_dir, remote_base_ref)
         if violations is None or violations:
             if violations is None:
                 reason = (
@@ -717,7 +731,7 @@ class Scheduler:
         pr_result = create_or_get_pull_request(
             verifying,
             branch_name,
-            base=self.base_branch,
+            base=base_branch,
             repo=self.repo,
             verification_summary=verification_summary,
         )

@@ -8,7 +8,7 @@ from collections.abc import Callable
 from enum import StrEnum
 from typing import Any, NamedTuple
 
-from subsched.config import validate_repo
+from subsched.config import ConfigError, validate_base_branch, validate_repo
 from subsched.models import Issue
 
 
@@ -87,6 +87,42 @@ class GitHubCliError(RuntimeError):
 
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def resolve_default_branch(repo: str, *, run: RunCommand | None = None) -> str:
+    validate_repo(repo)
+    argv = [
+        "gh",
+        "repo",
+        "view",
+        repo,
+        "--json",
+        "defaultBranchRef",
+        "--jq",
+        ".defaultBranchRef.name",
+    ]
+    try:
+        runner = run or subprocess.run
+        result = runner(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=_github_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise GitHubCliError("GitHub default branch could not be resolved") from error
+    if result.returncode != 0:
+        kind = _classify_discovery_failure(result.stderr)
+        raise GitHubCliError(
+            "GitHub default branch could not be resolved", kind=kind
+        )
+    try:
+        return validate_base_branch(result.stdout.strip())
+    except ConfigError as error:
+        raise GitHubCliError("GitHub default branch returned an invalid value") from error
+
 
 # Scopes that grant mutation capability (push, PR/issue write, workflow dispatch, org/repo
 # admin). Phase 1 discovery only reads issues, so any of these being present on the active

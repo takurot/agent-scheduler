@@ -59,6 +59,7 @@ def _no_real_merged_pr_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
         "subsched.cli.check_merged_pr_for_issue",
         lambda repo, issue_number, **kwargs: MergedPrCheckResult(kind=MergedPrCheckKind.NONE),
     )
+    monkeypatch.setattr("subsched.cli.resolve_default_branch", lambda repo: "main")
 
 
 def _git(path: Path, *args: str) -> None:
@@ -187,6 +188,103 @@ def test_explicit_issue_reports_truncated_discovery_instead_of_missing(
     assert result.exit_code == 1
     assert "may be truncated" in result.output
     assert "not open or were not found" not in result.output
+
+
+def test_native_run_resolves_default_branch_before_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    resolved: list[str] = []
+    monkeypatch.setattr(
+        "subsched.cli.resolve_default_branch",
+        lambda repo: resolved.append(repo) or "develop",
+    )
+    monkeypatch.setattr(GitHubIssueSource, "list_open", lambda self, repo, **kwargs: ())
+
+    result = invoke(
+        repo_dir,
+        "run",
+        "--repo",
+        "owner/project",
+        "--issues",
+        "all-open",
+        "--allow-native",
+        "--subscription-billing-verified",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert resolved == ["owner/project"]
+
+
+def test_default_branch_resolution_failure_stops_before_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setattr(
+        "subsched.cli.resolve_default_branch",
+        lambda repo: (_ for _ in ()).throw(GitHubCliError("default branch unavailable")),
+    )
+
+    def unexpected_discovery(
+        self: GitHubIssueSource, repo: str, **kwargs: object
+    ) -> tuple[Issue, ...]:
+        raise AssertionError("issue discovery must not run without a resolved base branch")
+
+    monkeypatch.setattr(GitHubIssueSource, "list_open", unexpected_discovery)
+
+    result = invoke(
+        tmp_path,
+        "run",
+        "--repo",
+        "owner/project",
+        "--issues",
+        "all-open",
+        "--allow-native",
+        "--subscription-billing-verified",
+    )
+
+    assert result.exit_code == 1
+    assert "default branch resolution failed" in result.output.casefold()
+    assert not (tmp_path / ".ai" / "scheduler.json").exists()
+
+
+def test_configured_base_branch_skips_default_branch_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    _init_git_repo(repo_dir)
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\n  mode: all-open\n  base_branch: develop\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setattr(
+        "subsched.cli.resolve_default_branch",
+        lambda repo: (_ for _ in ()).throw(AssertionError("resolver must not be called")),
+    )
+    monkeypatch.setattr(GitHubIssueSource, "list_open", lambda self, repo, **kwargs: ())
+
+    result = invoke(
+        repo_dir,
+        "run",
+        "--config",
+        str(config_file),
+        "--allow-native",
+        "--subscription-billing-verified",
+    )
+
+    assert result.exit_code == 0, result.output
 
 
 def test_run_prints_effective_config_summary_before_discovery(tmp_path: Path) -> None:

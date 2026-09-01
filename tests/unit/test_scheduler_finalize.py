@@ -33,7 +33,13 @@ def _available(agent: str) -> Capacity:
     )
 
 
-def _scheduler(tmp_path: Path, *, push_enabled: bool, ci_checker=None) -> Scheduler:
+def _scheduler(
+    tmp_path: Path,
+    *,
+    push_enabled: bool,
+    ci_checker=None,
+    base_branch: str | None = "main",
+) -> Scheduler:
     return Scheduler(
         store=JsonStateStore(tmp_path / "state.json"),
         router=Router([AgentConfig("claude", priority=100)]),
@@ -41,7 +47,7 @@ def _scheduler(tmp_path: Path, *, push_enabled: bool, ci_checker=None) -> Schedu
         worktree_root=tmp_path / "worktrees",
         push_enabled=push_enabled,
         repo="owner/repo",
-        base_branch="main",
+        base_branch=base_branch,
         ci_checker=ci_checker,
     )
 
@@ -65,6 +71,56 @@ def test_push_disabled_completes_without_any_git_or_github_calls(
     task = scheduler.tasks[0]
     assert task.status is TaskState.COMPLETE
     assert task.pr is None
+
+
+def test_scheduler_rejects_push_without_resolved_base_branch(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="base_branch"):
+        _scheduler(tmp_path, push_enabled=True, base_branch=None)
+
+
+def test_non_main_base_is_used_for_rebase_commit_scan_and_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, str] = {}
+
+    def rebase(worktree_dir: Path, base_branch: str, **kwargs: object) -> conflict_mod.RebaseResult:
+        seen["rebase"] = base_branch
+        return conflict_mod.RebaseResult(status=conflict_mod.RebaseStatus.SUCCESS)
+
+    def scan(worktree_dir: Path, base_ref: str, **kwargs: object) -> tuple[()]:
+        seen["scan"] = base_ref
+        return ()
+
+    def create_pr(task: Task, branch_name: str, **kwargs: object) -> pr_mod.PullRequestResult:
+        seen["pr"] = str(kwargs["base"])
+        return pr_mod.PullRequestResult(
+            kind=pr_mod.PullRequestResultKind.SUCCESS,
+            info=pr_mod.PullRequestInfo(
+                number=42, url="https://example.invalid/pull/42", title="t", body="b"
+            ),
+        )
+
+    monkeypatch.setattr(conflict_mod, "rebase_onto_base", rebase)
+    monkeypatch.setattr(pr_mod, "find_close_keyword_commits", scan)
+    monkeypatch.setattr(
+        push_mod,
+        "push_task_branch",
+        lambda worktree_dir, branch_name, **kwargs: push_mod.PushResult(
+            kind=push_mod.PushResultKind.SUCCESS, output="", branch=branch_name
+        ),
+    )
+    monkeypatch.setattr(pr_mod, "create_or_get_pull_request", create_pr)
+
+    scheduler = _scheduler(tmp_path, push_enabled=True, base_branch="develop")
+    scheduler.discover([Issue(number=101, title="Task 101")])
+    scheduler.tick([_available("claude")])
+
+    assert scheduler.tasks[0].status is TaskState.READY_FOR_REVIEW
+    assert seen == {
+        "rebase": "develop",
+        "scan": "refs/remotes/origin/develop",
+        "pr": "develop",
+    }
 
 
 def test_push_enabled_happy_path_reaches_ready_for_review_with_pr_number(

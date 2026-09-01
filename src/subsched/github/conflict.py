@@ -7,6 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from subsched.agents.process import redact_sensitive_command_audit
+from subsched.config import ConfigError, validate_base_branch
 from subsched.gitenv import git_safe_env
 from subsched.models import ALLOWED_TRANSITIONS, Task, TaskState
 
@@ -30,10 +31,41 @@ def rebase_onto_base(
     base_branch: str = "main",
     timeout_seconds: float = 60.0,
 ) -> RebaseResult:
-    """Attempt rebasing worktree branch onto base branch, aborting cleanly on conflict."""
+    """Fetch and rebase onto the latest remote base, aborting cleanly on conflict."""
+    try:
+        validated_base = validate_base_branch(base_branch)
+    except ConfigError as error:
+        return RebaseResult(status=RebaseStatus.FAILURE, output=str(error))
+
+    fetch_argv = ["git", "fetch", "--no-tags", "origin", "--", validated_base]
+    try:
+        fetch_proc = subprocess.run(
+            fetch_argv,
+            cwd=str(worktree_dir),
+            env=git_safe_env(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as err:
+        return RebaseResult(
+            status=RebaseStatus.FAILURE,
+            output=f"fetch execution failed: {err}",
+        )
+
+    if fetch_proc.returncode != 0:
+        return RebaseResult(
+            status=RebaseStatus.FAILURE,
+            output="fetch failed; output hidden",
+        )
+
+    remote_base_ref = f"refs/remotes/origin/{validated_base}"
     try:
         proc = subprocess.run(
-            ["git", "rebase", base_branch],
+            ["git", "rebase", remote_base_ref],
             cwd=str(worktree_dir),
             env=git_safe_env(),
             stdin=subprocess.DEVNULL,
@@ -54,6 +86,12 @@ def rebase_onto_base(
     clean_output = "\n".join(redacted)
 
     if proc.returncode == 0:
+        lowered = clean_output.casefold()
+        if "up to date" in lowered or "up-to-date" in lowered:
+            return RebaseResult(
+                status=RebaseStatus.ALREADY_UP_TO_DATE,
+                output=clean_output,
+            )
         return RebaseResult(status=RebaseStatus.SUCCESS, output=clean_output)
 
     # Check for conflicted files

@@ -9,9 +9,45 @@ from subsched.github.issues import (
     GitHubDiscoveryErrorKind,
     GitHubIssueSource,
     diagnose_token,
+    resolve_default_branch,
 )
 
 FIXTURES = Path(__file__).parent.parent / "fixtures" / "github"
+
+
+def test_resolve_default_branch_uses_fixed_argv_and_validates_output() -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="master\n", stderr="")
+
+    assert resolve_default_branch("owner/project", run=fake_run) == "master"
+    assert calls == [
+        [
+            "gh",
+            "repo",
+            "view",
+            "owner/project",
+            "--json",
+            "defaultBranchRef",
+            "--jq",
+            ".defaultBranchRef.name",
+        ]
+    ]
+
+
+@pytest.mark.parametrize(("returncode", "stdout"), ((1, "main\n"), (0, "--bad\n"), (0, "\n")))
+def test_resolve_default_branch_fails_closed_without_main_fallback(
+    returncode: int, stdout: str
+) -> None:
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr="hidden detail")
+
+    with pytest.raises(GitHubCliError, match="default branch") as error:
+        resolve_default_branch("owner/project", run=fake_run)
+
+    assert "hidden detail" not in str(error.value)
 
 
 def test_github_adapter_uses_argv_and_validates_json(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,5 +1,7 @@
 github:
   repo: owner/project
+  # Optional. Omit to resolve the repository default branch via GitHub.
+  # base_branch: develop
   include_labels:
     - ai-ready
   exclude_labels:
