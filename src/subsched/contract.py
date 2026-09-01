@@ -111,6 +111,8 @@ def build_worker_prompt(task: Task, verification_commands: Sequence[str] = ()) -
         "Use the existing task worktree.",
         "Do not start another GitHub issue.",
         "Do not modify another task worktree.",
+        "Do not reset, clean, overwrite, or delete existing dirty worktree changes.",
+        "Preserve uncommitted changes, untracked files, and prior Agent work.",
         "Do not attempt to merge, create releases, or deploy.",
         "Do not delete Scheduler state, task files, handoffs, or checkpoints.",
         "Do not enable API fallback or metered usage.",

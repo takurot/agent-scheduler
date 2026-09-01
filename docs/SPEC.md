@@ -918,6 +918,8 @@ Scheduler固有のexecution envelopeは、生成するworker promptと`.ai/tasks
 
 - 1 invocation = 1 Issue、既存task worktreeだけを使用する
 - 別Issueや別task worktreeへ移動しない
+- 既存のdirty worktree変更、uncommitted変更、untracked file、前Agentの作業をreset、clean、
+  overwrite、deleteしない
 - meaningful milestoneごとにhandoffを更新する
 - repository verification後にlocal commitを作成する
 - worker自身はpush、PR作成、Issue close、merge、release、deployを行わない

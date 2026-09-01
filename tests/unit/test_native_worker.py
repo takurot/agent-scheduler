@@ -224,6 +224,10 @@ def test_native_worker_includes_configured_verification_commands_in_claude_promp
 
     assert "uv run ruff check ." in prompt
     assert "uv run pytest -q" in prompt
+    assert (
+        "Do not reset, clean, overwrite, or delete existing dirty worktree changes."
+        in prompt
+    )
 
 
 def test_native_worker_includes_configured_verification_commands_in_codex_prompt(
@@ -245,6 +249,10 @@ def test_native_worker_includes_configured_verification_commands_in_codex_prompt
     prompt = stdin_payload.decode("utf-8")
 
     assert "uv run mypy src" in prompt
+    assert (
+        "Do not reset, clean, overwrite, or delete existing dirty worktree changes."
+        in prompt
+    )
 
 
 def test_native_worker_defaults_to_no_verification_commands(tmp_path: Path) -> None:
