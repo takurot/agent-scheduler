@@ -15,6 +15,7 @@ from subsched.models import Task
 # gate (find_close_keyword_commits) so both enforce the exact same auto-close policy
 # (regression test for #140: previously only PR body text was checked).
 CLOSE_KEYWORD_RE = re.compile(r"\b(fix(e[sd])?|close[sd]?|resolve[sd]?)\s*#", re.IGNORECASE)
+MAX_PR_SECTION_CHARS = 16000
 
 
 def _strip_close_keywords(text: str) -> str:
@@ -44,6 +45,13 @@ class PullRequestResult:
 
 def _redact(text: str) -> str:
     return "\n".join(redact_sensitive_command_audit(tuple(text.splitlines())))
+
+
+def _sanitize_pr_section(text: str) -> str:
+    sanitized = _strip_close_keywords(_redact(text))
+    if len(sanitized) > MAX_PR_SECTION_CHARS:
+        return sanitized[:MAX_PR_SECTION_CHARS] + "... [truncated]"
+    return sanitized
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,8 +130,8 @@ def build_pr_body(issue_number: int, summary: str = "", verification_results: st
         if summary.strip()
         else f"Implementation completed for issue #{issue_number}."
     )
-    v_section = _strip_close_keywords(v_raw)
-    s_section = _strip_close_keywords(s_raw)
+    v_section = _sanitize_pr_section(v_raw)
+    s_section = _sanitize_pr_section(s_raw)
     return (
         f"Implements work for #{issue_number}.\n\n"
         f"## Summary\n\n{s_section}\n\n"

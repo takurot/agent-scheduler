@@ -75,6 +75,20 @@ def test_capture_save_and_load_mechanical_checkpoint(tmp_path: Path) -> None:
     assert loaded.failure_classification == "PASS"
 
 
+def test_capture_mechanical_checkpoint_redacts_agent_output(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=str(tmp_path), check=True, capture_output=True)
+    secret = "github_pat_abcdefghijklmnopqrstuvwxyz"
+
+    checkpoint = capture_mechanical_checkpoint(
+        worktree_dir=tmp_path,
+        issue_number=103,
+        agent_result=AgentResult(AgentResultKind.PASS, output=f"agent printed {secret}"),
+    )
+
+    assert checkpoint.last_agent_output == "agent printed [REDACTED]"
+    assert secret not in checkpoint.last_agent_output
+
+
 @_POSIX_ONLY
 def test_save_checkpoint_hardens_directory_and_file_permissions(tmp_path: Path) -> None:
     """Regression test for #143: checkpoint directory/file must be 0700/0600 even under

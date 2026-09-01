@@ -6,7 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from subsched.agents.base import ProcessExecutionRequest
-from subsched.agents.process import COMMON_ENV_ALLOWLIST, filter_environment, run_process_group
+from subsched.agents.process import (
+    COMMON_ENV_ALLOWLIST,
+    filter_environment,
+    redact_sensitive_command_audit,
+    run_process_group,
+)
+
+MAX_VERIFICATION_ERROR_CHARS = 2000
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +38,10 @@ def _gate_summary(gate: GateResult) -> str:
     if gate.passed:
         return "PASS"
     if gate.command_not_found:
-        return f"FAIL (command not found: {gate.stderr})"
+        stderr = redact_sensitive_command_audit((gate.stderr,))[0]
+        if len(stderr) > MAX_VERIFICATION_ERROR_CHARS:
+            stderr = stderr[:MAX_VERIFICATION_ERROR_CHARS] + "... [truncated]"
+        return f"FAIL (command not found: {stderr})"
     return f"FAIL (exit {gate.exit_code})"
 
 
