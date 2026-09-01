@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from subsched.models import Issue, Task
+from subsched.storage import atomic_write_secure_bytes, secure_directory
 
 
 class AgentContractError(RuntimeError):
@@ -18,8 +19,9 @@ def bootstrap_task_files(
     tasks_dir = ai_dir / "tasks"
     handoffs_dir = ai_dir / "handoffs"
 
-    tasks_dir.mkdir(parents=True, exist_ok=True)
-    handoffs_dir.mkdir(parents=True, exist_ok=True)
+    secure_directory(ai_dir)
+    secure_directory(tasks_dir)
+    secure_directory(handoffs_dir)
 
     task_file = tasks_dir / f"{task.issue_number}.md"
     body = issue.body if issue is not None else task.description
@@ -32,9 +34,11 @@ def bootstrap_task_files(
 ## Description
 {body}
 """
-    task_file.write_text(task_content, encoding="utf-8")
+    atomic_write_secure_bytes(task_file, task_content.encode("utf-8"))
 
     handoff_file = handoffs_dir / f"{task.issue_number}.md"
+    if handoff_file.is_symlink():
+        raise OSError(f"refusing to use symlinked handoff file: {handoff_file}")
     if not handoff_file.exists():
         # #145: stamped with the caller's logical `now` (the Scheduler's own dispatch
         # clock) when supplied, not always real wall-clock time -- so a subsequent
@@ -79,7 +83,7 @@ Initial implementation
 
 {timestamp}
 """
-        handoff_file.write_text(handoff_content, encoding="utf-8")
+        atomic_write_secure_bytes(handoff_file, handoff_content.encode("utf-8"))
 
 
 def validate_dispatch_preconditions(worktree_dir: Path, task: Task) -> None:

@@ -297,6 +297,7 @@ class JsonStateStore:
         self.runtime_dir = self.state_dir / "runtime"
         self.quarantine_dir = self.state_dir / "quarantine"
         self.backup_dir = self.state_dir / "backup"
+        self.worktrees_dir = self.state_dir / "worktrees"
         self.path = self.state_dir / "scheduler.json"
         self.lock_file = self.state_dir / "scheduler.lock"
 
@@ -309,6 +310,7 @@ class JsonStateStore:
             self.runtime_dir,
             self.quarantine_dir,
             self.backup_dir,
+            self.worktrees_dir,
         ):
             secure_directory(directory)
 
@@ -424,11 +426,12 @@ class JsonStateStore:
     def _quarantine_corrupt_file(self, reason: str) -> Path | None:
         if not self.path.exists():
             return None
-        self.quarantine_dir.mkdir(parents=True, exist_ok=True)
+        secure_directory(self.quarantine_dir)
         timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
         dest = self.quarantine_dir / f"scheduler-{timestamp}.corrupt.json"
         try:
             os.replace(self.path, dest)
+            os.chmod(dest, 0o600)
             return dest
         except OSError:
             return None

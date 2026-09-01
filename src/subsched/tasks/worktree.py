@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 from subsched.gitenv import git_safe_env
+from subsched.storage import secure_directory
 
 
 class WorktreeError(RuntimeError):
@@ -54,7 +55,11 @@ class GitWorktreeAdapter:
         run: RunCommand = subprocess.run,
     ) -> None:
         self.repo_root = repo_root.resolve()
-        self.worktree_root = worktree_root.resolve()
+        self.worktree_root = worktree_root.absolute()
+        if self.worktree_root.is_symlink():
+            raise WorktreeSecurityError(
+                f"worktree root {self.worktree_root} is a symlink"
+            )
         self.run = run
         self._validate_repo()
 
@@ -157,6 +162,7 @@ class GitWorktreeAdapter:
         target_path = self.get_worktree_path(issue_number)
 
         self.validate_worktree_path(issue_number, target_path)
+        secure_directory(self.worktree_root)
 
         if target_path.exists():
             if not target_path.is_dir():
@@ -183,8 +189,6 @@ class GitWorktreeAdapter:
             raise WorktreeConflictError(
                 f"directory {target_path} exists but is not registered as a git worktree"
             )
-
-        self.worktree_root.mkdir(parents=True, exist_ok=True)
 
         if self._branch_exists(target_branch):
             cmd = [

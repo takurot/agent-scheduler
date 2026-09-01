@@ -45,6 +45,28 @@ def test_corrupt_state_quarantined_and_fails_closed(tmp_path: Path) -> None:
     assert quarantine_files[0].read_text(encoding="utf-8") == "{broken"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file permission bits are not meaningful on Windows"
+)
+def test_corrupt_state_quarantine_is_secured_without_prior_initialization(
+    tmp_path: Path,
+) -> None:
+    import stat
+
+    state_file = tmp_path / ".ai" / "scheduler.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text("{broken", encoding="utf-8")
+    os.chmod(state_file, 0o644)
+
+    with pytest.raises(StateCorruptionError):
+        JsonStateStore(tmp_path).load_tasks()
+
+    quarantine_dir = tmp_path / ".ai" / "quarantine"
+    quarantined = next(quarantine_dir.glob("*.corrupt.json"))
+    assert stat.S_IMODE(quarantine_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(quarantined.stat().st_mode) == 0o600
+
+
 def test_unknown_schema_version_quarantined_and_fails_closed(tmp_path: Path) -> None:
     state_file = tmp_path / ".ai" / "scheduler.json"
     state_file.parent.mkdir(parents=True)
@@ -108,13 +130,29 @@ def test_standard_directory_initialization_and_backup(tmp_path: Path) -> None:
     store = JsonStateStore(tmp_path)
     store.save_tasks(())
 
-    for subdir in ("tasks", "handoffs", "runtime", "quarantine", "backup"):
+    for subdir in ("tasks", "handoffs", "runtime", "quarantine", "backup", "worktrees"):
         assert (tmp_path / ".ai" / subdir).is_dir()
 
     # Second save creates backup
     task = Task.from_issue(Issue(number=1, title="one"))
     store.save_tasks((task,))
     assert (tmp_path / ".ai" / "backup" / "scheduler.bak.json").exists()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file permission bits are not meaningful on Windows"
+)
+def test_state_store_repairs_runtime_directory_permissions(tmp_path: Path) -> None:
+    import stat
+
+    worktrees = tmp_path / ".ai" / "worktrees"
+    worktrees.mkdir(parents=True, mode=0o755)
+    os.chmod(worktrees, 0o755)
+
+    JsonStateStore(tmp_path).init_directories()
+
+    for subdir in ("tasks", "handoffs", "runtime", "quarantine", "backup", "worktrees"):
+        assert stat.S_IMODE((tmp_path / ".ai" / subdir).stat().st_mode) == 0o700
 
 
 @pytest.mark.skipif(
@@ -205,7 +243,7 @@ def test_backup_write_is_atomic_no_leftover_tmp_file(tmp_path: Path) -> None:
     assert json.loads(backup_file.read_text(encoding="utf-8"))["schema_version"] == 1
 
 
-def test_gitignore_covers_backup_and_checkpoint_state(tmp_path: Path) -> None:
+def test_gitignore_covers_runtime_state(tmp_path: Path) -> None:
     """Regression test for #143: .ai/backup/ and .ai/checkpoints/ must be untracked so
     runtime state (which can contain agent output, test results, and changed-file
     lists) never shows up in `git status` or gets accidentally committed."""
@@ -213,6 +251,7 @@ def test_gitignore_covers_backup_and_checkpoint_state(tmp_path: Path) -> None:
     gitignore = (repo_root / ".gitignore").read_text(encoding="utf-8")
     assert ".ai/backup/" in gitignore
     assert ".ai/checkpoints/" in gitignore
+    assert ".ai/quarantine/" in gitignore
 
     subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
     (tmp_path / ".gitignore").write_text(gitignore, encoding="utf-8")
@@ -222,6 +261,9 @@ def test_gitignore_covers_backup_and_checkpoint_state(tmp_path: Path) -> None:
     checkpoints_dir = tmp_path / ".ai" / "checkpoints"
     checkpoints_dir.mkdir(parents=True)
     (checkpoints_dir / "130.json").write_text("{}", encoding="utf-8")
+    quarantine_dir = tmp_path / ".ai" / "quarantine"
+    quarantine_dir.mkdir(parents=True)
+    (quarantine_dir / "scheduler.corrupt.json").write_text("{}", encoding="utf-8")
 
     result = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=all"],
@@ -232,6 +274,7 @@ def test_gitignore_covers_backup_and_checkpoint_state(tmp_path: Path) -> None:
     )
     assert "backup" not in result.stdout
     assert "checkpoints" not in result.stdout
+    assert "quarantine" not in result.stdout
 
 
 def test_capacity_cooldown_round_trip(tmp_path: Path) -> None:
@@ -531,4 +574,3 @@ def test_find_repository_root_strips_git_location_override_env_vars(
     assert isinstance(env, dict)
     for name in GIT_LOCATION_OVERRIDE_VARS:
         assert name not in env
-

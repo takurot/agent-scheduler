@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import os
+import stat
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from subsched.contract import bootstrap_task_files
 from subsched.models import Issue, Task
+
+_POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file permission bits are not meaningful on Windows"
+)
 
 
 def test_bootstrap_task_files_preserves_repository_instructions_byte_for_byte(
@@ -77,6 +86,39 @@ def test_bootstrap_task_files_creates_task_and_handoff(tmp_path: Path) -> None:
 
     assert not (tmp_path / "AGENTS.md").exists()
     assert not (tmp_path / "CLAUDE.md").exists()
+
+
+@_POSIX_ONLY
+def test_bootstrap_task_files_secures_runtime_directories_and_files(tmp_path: Path) -> None:
+    old_umask = os.umask(0o022)
+    try:
+        bootstrap_task_files(
+            tmp_path,
+            Task.from_issue(Issue(number=103, title="Support timeout", body="details")),
+        )
+    finally:
+        os.umask(old_umask)
+
+    for directory in (tmp_path / ".ai", tmp_path / ".ai" / "tasks", tmp_path / ".ai" / "handoffs"):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    for runtime_file in (
+        tmp_path / ".ai" / "tasks" / "103.md",
+        tmp_path / ".ai" / "handoffs" / "103.md",
+    ):
+        assert stat.S_IMODE(runtime_file.stat().st_mode) == 0o600
+
+
+def test_bootstrap_task_files_rejects_symlinked_runtime_directory(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    ai_dir = tmp_path / ".ai"
+    ai_dir.mkdir()
+    (ai_dir / "tasks").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(OSError, match="symlink"):
+        bootstrap_task_files(tmp_path, Task.from_issue(Issue(number=103, title="unsafe")))
+
+    assert list(outside.iterdir()) == []
 
 
 def test_bootstrap_task_files_preserves_existing_handoff(tmp_path: Path) -> None:
