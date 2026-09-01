@@ -8,7 +8,7 @@ from typer.testing import CliRunner, Result
 from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
 from subsched.cli import app
 from subsched.gitenv import git_safe_env
-from subsched.github.issues import GitHubIssueSource
+from subsched.github.issues import GitHubCliError, GitHubDiscoveryErrorKind, GitHubIssueSource
 from subsched.github.pull_requests import (
     MergedPrCheckKind,
     MergedPrCheckResult,
@@ -167,6 +167,26 @@ def test_explicit_issue_dry_run_persists_queue_and_status(tmp_path: Path) -> Non
     assert status.exit_code == 0
     assert "READY" in status.output
     assert "2" in status.output
+
+
+def test_explicit_issue_reports_truncated_discovery_instead_of_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def truncated(
+        self: GitHubIssueSource, repo: str, *, label: str | None = None
+    ) -> tuple[Issue, ...]:
+        raise GitHubCliError(
+            "GitHub issue discovery may be truncated at the configured limit",
+            kind=GitHubDiscoveryErrorKind.RESULT_TRUNCATED,
+        )
+
+    monkeypatch.setattr(GitHubIssueSource, "list_open", truncated)
+
+    result = invoke(tmp_path, "run", "--repo", "owner/project", "--issues", "2000", "--dry-run")
+
+    assert result.exit_code == 1
+    assert "may be truncated" in result.output
+    assert "not open or were not found" not in result.output
 
 
 def test_run_prints_effective_config_summary_before_discovery(tmp_path: Path) -> None:

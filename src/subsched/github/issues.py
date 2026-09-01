@@ -19,6 +19,7 @@ class GitHubDiscoveryErrorKind(StrEnum):
     NOT_AUTHENTICATED = "NOT_AUTHENTICATED"
     PERMISSION_DENIED = "PERMISSION_DENIED"
     NETWORK_ERROR = "NETWORK_ERROR"
+    RESULT_TRUNCATED = "RESULT_TRUNCATED"
     UNKNOWN = "UNKNOWN"
 
 
@@ -34,6 +35,10 @@ _DISCOVERY_ERROR_MESSAGES: dict[GitHubDiscoveryErrorKind, str] = {
     ),
     GitHubDiscoveryErrorKind.NETWORK_ERROR: (
         "network error while contacting GitHub; check connectivity and retry"
+    ),
+    GitHubDiscoveryErrorKind.RESULT_TRUNCATED: (
+        "GitHub issue discovery may be truncated at the configured limit; "
+        "narrow the selection or use a paginated discovery method"
     ),
     GitHubDiscoveryErrorKind.UNKNOWN: "GitHub CLI exited with an error; stderr hidden",
 }
@@ -240,6 +245,9 @@ class GitHubIssueSource:
             payload: Any = json.loads(result.stdout)
             if not isinstance(payload, list):
                 raise TypeError
+            if len(payload) >= limit:
+                kind = GitHubDiscoveryErrorKind.RESULT_TRUNCATED
+                raise GitHubCliError(_DISCOVERY_ERROR_MESSAGES[kind], kind=kind)
             return tuple(self._parse_issue(value) for value in payload)
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
             raise GitHubCliError("GitHub CLI returned an invalid issue payload") from error

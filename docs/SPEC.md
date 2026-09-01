@@ -347,6 +347,9 @@ gh issue list \
 ```
 
 GitHub CLIの `gh issue list` はopen issue取得をサポートし、`--json` で構造化出力を取得できる。
+返却件数が指定した`--limit`以上なら全件取得できたと証明できないため、部分集合を成功として
+task化せず`RESULT_TRUNCATED`としてfail closedに停止する。明示Issue指定でも同じ契約とし、
+存在しないIssueという誤診断ではなく、selectionの絞り込みまたはpaginationが必要だと表示する。
 
 ---
 
