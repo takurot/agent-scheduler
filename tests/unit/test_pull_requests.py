@@ -8,6 +8,7 @@ import pytest
 
 from subsched.gitenv import GIT_LOCATION_OVERRIDE_VARS
 from subsched.github.pull_requests import (
+    MAX_PR_SECTION_CHARS,
     MergedPrCheckKind,
     PullRequestResultKind,
     build_pr_body,
@@ -49,6 +50,33 @@ def test_build_pr_body_avoids_fixes_or_closes() -> None:
     assert "closes #" not in body.lower()
     assert "resolves #" not in body.lower()
     assert "Issue is intentionally left open until review." in body
+
+
+def test_build_pr_body_redacts_all_user_supplied_sections() -> None:
+    secret = "github_pat_abcdefghijklmnopqrstuvwxyz"
+
+    body = build_pr_body(
+        103,
+        summary=f"updated with {secret}",
+        verification_results=f"failed with {secret}",
+    )
+
+    assert body.startswith("Implements work for #103.\n")
+    assert body.count("[REDACTED]") == 2
+    assert secret not in body
+
+
+def test_build_pr_body_truncates_verification_section() -> None:
+    marker = "end-marker"
+
+    body = build_pr_body(
+        103,
+        verification_results="x" * (MAX_PR_SECTION_CHARS + 1) + marker,
+    )
+
+    verification_section = body.split("## Verification\n\n", 1)[1]
+    assert "... [truncated]" in verification_section
+    assert marker not in verification_section
 
 
 def test_lookup_existing_pr_found(monkeypatch: pytest.MonkeyPatch) -> None:

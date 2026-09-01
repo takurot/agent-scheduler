@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from subsched.verification import run_verification
+from subsched.verification import MAX_VERIFICATION_ERROR_CHARS, run_verification
 
 
 def test_run_verification_all_pass(tmp_path: Path) -> None:
@@ -43,6 +43,54 @@ def test_run_verification_reports_command_not_found_clearly(tmp_path: Path) -> N
     assert report.passed is False
     assert report.gates[0].command_not_found is True
     assert "command not found" in report.summary.casefold()
+
+
+def test_run_verification_redacts_command_not_found_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subsched.verification as verification
+    from subsched.agents.base import ProcessExecutionResult
+
+    secret = "github_pat_abcdefghijklmnopqrstuvwxyz"
+    monkeypatch.setattr(
+        verification,
+        "run_process_group",
+        lambda request: ProcessExecutionResult(
+            exit_code=1,
+            stdout="",
+            stderr=f"could not execute {secret}",
+            command_not_found=True,
+        ),
+    )
+
+    report = run_verification(tmp_path, ("missing-command",))
+
+    assert "[REDACTED]" in report.summary
+    assert secret not in report.summary
+
+
+def test_run_verification_truncates_command_not_found_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subsched.verification as verification
+    from subsched.agents.base import ProcessExecutionResult
+
+    marker = "end-marker"
+    monkeypatch.setattr(
+        verification,
+        "run_process_group",
+        lambda request: ProcessExecutionResult(
+            exit_code=1,
+            stdout="",
+            stderr="x" * (MAX_VERIFICATION_ERROR_CHARS + 1) + marker,
+            command_not_found=True,
+        ),
+    )
+
+    report = run_verification(tmp_path, ("missing-command",))
+
+    assert "... [truncated]" in report.summary
+    assert marker not in report.summary
 
 
 @pytest.mark.parametrize("commands", ((), ("   ", "\t")))

@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from subsched.agents.process import redact_sensitive_command_audit
 from subsched.gitenv import git_safe_env
 from subsched.models import AgentResult
 from subsched.storage import atomic_write_secure_bytes, secure_directory
@@ -65,7 +66,7 @@ def capture_mechanical_checkpoint(
     )
     head_commit = _run_git(worktree_dir, ["rev-parse", "HEAD"])
 
-    output = agent_result.output
+    output = redact_sensitive_command_audit((agent_result.output,))[0]
     if len(output.encode("utf-8")) > MAX_CHECKPOINT_OUTPUT_BYTES:
         output = output[:MAX_CHECKPOINT_OUTPUT_BYTES] + "... [truncated]"
 
