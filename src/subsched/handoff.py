@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -7,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from subsched.models import Issue, Task
+from subsched.storage import secure_directory
 
 REQUIRED_HANDOFF_SECTIONS = (
     "## Goal",
@@ -160,11 +162,14 @@ def can_recover_from_checkpoint(
 
 def quarantine_corrupt_handoff(handoff_path: Path) -> Path:
     """Move a corrupted handoff file to quarantine with a timestamp."""
+    if handoff_path.is_symlink():
+        raise OSError(f"refusing to quarantine symlinked handoff: {handoff_path}")
     quarantine_dir = handoff_path.parent / "quarantine"
-    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    secure_directory(quarantine_dir)
     ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     quarantined = quarantine_dir / f"{handoff_path.stem}.corrupt.{ts}.md"
     shutil.move(str(handoff_path), str(quarantined))
+    os.chmod(quarantined, 0o600)
     return quarantined
 
 

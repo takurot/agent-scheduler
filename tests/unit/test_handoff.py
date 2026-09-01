@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import os
+import stat
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from subsched.checkpoint import MechanicalCheckpoint, save_checkpoint
 from subsched.contract import bootstrap_task_files
@@ -41,6 +46,37 @@ def test_quarantine_corrupt_handoff(tmp_path: Path) -> None:
     assert not corrupt_file.exists()
     assert quarantined.exists()
     assert "quarantine" in str(quarantined)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file permission bits are not meaningful on Windows"
+)
+def test_quarantine_corrupt_handoff_secures_directory_and_file(tmp_path: Path) -> None:
+    handoff_dir = tmp_path / ".ai" / "handoffs"
+    handoff_dir.mkdir(parents=True)
+    corrupt_file = handoff_dir / "103.md"
+    corrupt_file.write_text("corrupt", encoding="utf-8")
+    os.chmod(corrupt_file, 0o644)
+
+    quarantined = quarantine_corrupt_handoff(corrupt_file)
+
+    assert stat.S_IMODE(quarantined.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(quarantined.stat().st_mode) == 0o600
+
+
+def test_quarantine_corrupt_handoff_rejects_symlink(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.md"
+    outside.write_text("do not touch", encoding="utf-8")
+    handoff_dir = tmp_path / ".ai" / "handoffs"
+    handoff_dir.mkdir(parents=True)
+    symlink = handoff_dir / "103.md"
+    symlink.symlink_to(outside)
+
+    with pytest.raises(OSError, match="symlink"):
+        quarantine_corrupt_handoff(symlink)
+
+    assert symlink.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "do not touch"
 
 
 def _write_handoff(worktree_dir: Path, issue_number: int, *, title: str, timestamp: str) -> None:

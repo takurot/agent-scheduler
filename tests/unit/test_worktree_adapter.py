@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -106,3 +108,33 @@ def test_all_git_invocations_strip_location_override_env_vars(
         assert isinstance(env, dict), "every git call must pass an explicit env"
         for name in GIT_LOCATION_OVERRIDE_VARS:
             assert name not in env
+
+
+def test_prepare_worktree_repairs_existing_worktree_root_permissions(tmp_path: Path) -> None:
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "rev-parse" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
+        if "show-ref" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    worktree_root = tmp_path / "worktrees"
+    worktree_root.mkdir(mode=0o755)
+    os.chmod(worktree_root, 0o755)
+
+    GitWorktreeAdapter(tmp_path, worktree_root, run=fake_run).prepare_worktree(1)
+
+    assert stat.S_IMODE(worktree_root.stat().st_mode) == 0o700
+
+
+def test_rejects_symlinked_worktree_root(tmp_path: Path) -> None:
+    real_root = tmp_path / "real-worktrees"
+    real_root.mkdir()
+    symlink_root = tmp_path / "worktrees"
+    symlink_root.symlink_to(real_root, target_is_directory=True)
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
+
+    with pytest.raises(WorktreeSecurityError, match=r"worktree root.*symlink"):
+        GitWorktreeAdapter(tmp_path, symlink_root, run=fake_run)

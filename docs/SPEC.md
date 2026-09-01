@@ -957,6 +957,12 @@ timestamp
 `last Agent output`はraw出力をそのまま永続化しない。既知のcredential patternをredactした後、
 上限を超える内容を切り詰めて、0600のcheckpoint fileへ保存する。
 
+`.ai/`配下のruntime state directory（tasks、handoffs、runtime、quarantine、backup、
+checkpoints、worktrees）は0700、runtime fileは0600とする。既存の緩いpermissionは内容を
+削除・変更せず次回利用時に修復する。task/handoffはatomic writeを使い、symlinked directory / file
+を拒否する。quarantineを含むruntime stateはGit管理対象外とし、worktree内のrepository実ファイル
+のpermissionは変更しない。
+
 したがってhandoff：
 
 ```text
