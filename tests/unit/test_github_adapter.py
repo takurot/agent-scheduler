@@ -117,6 +117,21 @@ def test_github_adapter_default_limit_and_custom_limit() -> None:
     assert calls[1][calls[1].index("--limit") + 1] == "250"
 
 
+def test_github_adapter_fails_closed_when_result_reaches_limit() -> None:
+    payload = [
+        {"number": number, "title": str(number), "body": "", "labels": [], "url": "u"}
+        for number in range(1, 4)
+    ]
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+
+    with pytest.raises(GitHubCliError, match="may be truncated") as error:
+        GitHubIssueSource(run=fake_run).list_open("owner/project", limit=3)
+
+    assert error.value.kind is GitHubDiscoveryErrorKind.RESULT_TRUNCATED
+
+
 def test_github_adapter_parses_over_100_issues_without_truncation() -> None:
     """If `gh` is ever asked for and returns >100 issues, parsing itself does not truncate."""
     fixture = json.loads((FIXTURES / "issue-list-over-100.json").read_text())
@@ -324,4 +339,3 @@ def test_parse_issue_handles_malformed_labels() -> None:
     issue2 = GitHubIssueSource._parse_issue(payload_no_list)
     assert issue2.number == 43
     assert issue2.labels == ()
-
