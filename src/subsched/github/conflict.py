@@ -63,11 +63,13 @@ def rebase_onto_base(
         )
 
     remote_base_ref = f"refs/remotes/origin/{validated_base}"
+    rebase_env = git_safe_env()
+    rebase_env["LC_ALL"] = "C"
     try:
         proc = subprocess.run(
             ["git", "rebase", remote_base_ref],
             cwd=str(worktree_dir),
-            env=git_safe_env(),
+            env=rebase_env,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,

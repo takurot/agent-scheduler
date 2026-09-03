@@ -30,7 +30,11 @@ def git_repo_with_branch(tmp_path: Path) -> tuple[Path, Path]:
     subprocess.run(["git", "commit", "-m", "initial commit"], cwd=repo_dir, check=True)
 
     remote_dir = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "--bare", str(remote_dir)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "init", "--bare", "-b", "main", str(remote_dir)],
+        check=True,
+        capture_output=True,
+    )
     subprocess.run(["git", "remote", "add", "origin", str(remote_dir)], cwd=repo_dir, check=True)
     subprocess.run(["git", "push", "-u", "origin", "main"], cwd=repo_dir, check=True)
 
@@ -173,10 +177,16 @@ def test_rebase_reports_already_up_to_date(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls = 0
+    locales: list[str | None] = []
+
+    monkeypatch.setenv("LC_ALL", "ja_JP.UTF-8")
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         nonlocal calls
         calls += 1
+        env = kwargs.get("env")
+        assert isinstance(env, dict)
+        locales.append(env.get("LC_ALL"))
         stdout = "Current branch is up to date.\n" if calls == 2 else ""
         return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
@@ -185,6 +195,7 @@ def test_rebase_reports_already_up_to_date(
     result = rebase_onto_base(tmp_path, base_branch="main")
 
     assert result.status is RebaseStatus.ALREADY_UP_TO_DATE
+    assert locales == ["ja_JP.UTF-8", "C"]
 
 
 def test_rebase_uses_remote_update_when_local_base_is_stale(

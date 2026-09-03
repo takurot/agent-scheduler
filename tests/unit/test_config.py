@@ -122,7 +122,14 @@ verification:
 
 @pytest.mark.parametrize(
     "base_branch",
-    ("--upload-pack=evil", "feature..main", "topic.lock", "bad branch", "@{upstream}"),
+    (
+        "--upload-pack=evil",
+        "/main",
+        "feature..main",
+        "topic.lock",
+        "bad branch",
+        "@{upstream}",
+    ),
 )
 def test_config_rejects_unsafe_base_branch(tmp_path: Path, base_branch: str) -> None:
     path = tmp_path / "scheduler.yaml"

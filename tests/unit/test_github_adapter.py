@@ -37,7 +37,10 @@ def test_resolve_default_branch_uses_fixed_argv_and_validates_output() -> None:
     ]
 
 
-@pytest.mark.parametrize(("returncode", "stdout"), ((1, "main\n"), (0, "--bad\n"), (0, "\n")))
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    ((1, "main\n"), (0, "--bad\n"), (0, "\n"), (0, "null\n")),
+)
 def test_resolve_default_branch_fails_closed_without_main_fallback(
     returncode: int, stdout: str
 ) -> None:

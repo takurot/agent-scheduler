@@ -118,8 +118,11 @@ def resolve_default_branch(repo: str, *, run: RunCommand | None = None) -> str:
         raise GitHubCliError(
             "GitHub default branch could not be resolved", kind=kind
         )
+    raw = result.stdout.strip()
+    if raw in {"", "null"}:
+        raise GitHubCliError("GitHub default branch could not be resolved")
     try:
-        return validate_base_branch(result.stdout.strip())
+        return validate_base_branch(raw)
     except ConfigError as error:
         raise GitHubCliError("GitHub default branch returned an invalid value") from error
 

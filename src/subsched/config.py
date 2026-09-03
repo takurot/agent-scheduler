@@ -62,9 +62,12 @@ def validate_base_branch(branch: Any) -> str:
         raise ConfigError("github.base_branch must be a non-empty safe branch name")
     if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
         raise ConfigError("github.base_branch contains unsafe characters")
-    if ".." in branch or "//" in branch or "@{" in branch or branch.endswith(("/", ".")):
+    if ".." in branch or "//" in branch or branch.endswith(("/", ".")):
         raise ConfigError("github.base_branch is not a valid git branch name")
-    if any(part.startswith(".") or part.endswith(".lock") for part in branch.split("/")):
+    if any(
+        not part or part.startswith(".") or part.endswith(".lock")
+        for part in branch.split("/")
+    ):
         raise ConfigError("github.base_branch is not a valid git branch name")
     return branch
 
