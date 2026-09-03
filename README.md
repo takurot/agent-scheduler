@@ -10,7 +10,7 @@
 - 🌳 **Worktree Isolation**: Creates isolated Git worktrees (`subsched/issue-<number>`) for each task to prevent workspace collision.
 - ⚡ **Reactive Multi-Agent Failover**: Classifies rate-limit results returned by workers and preserves cooldown/reset state for failover. Proactive provider-capacity monitoring is not yet wired.
 - 🛡️ **Automated TDD & Quality Gates**: Enforces test-driven development, running repository verification (`ruff`, `mypy`, `pytest` with $\ge 80\%$ coverage, `pip-audit`) before pull requests.
-- 🔀 **Merge Conflict Protection**: Automatically attempts `git rebase main` and cleanly aborts (`git rebase --abort`) on conflict, safely escalating to `NEEDS_HUMAN`.
+- 🔀 **Merge Conflict Protection**: Resolves the repository default branch, fetches its latest `origin` state, rebases onto that remote-tracking ref, and cleanly aborts on conflict before escalating to `NEEDS_HUMAN`.
 - 📊 **Observability & Metrics**: Tracks autonomous completion rates, task success metrics, structured JSON Lines event logs, and markdown run reports.
 
 ---
@@ -140,6 +140,8 @@ You can place a `subsched.yaml` in your project root to customize repositories, 
 ```yaml
 github:
   repo: owner/project
+  # Optional. Omit to resolve the repository default branch via GitHub.
+  # base_branch: develop
   mode: all-open # or label: "ai-ready"
   completion:
     create_pr: true
@@ -184,6 +186,11 @@ verification:
 
 `verification.commands` must contain at least one non-blank command. An empty list or blank-only
 entry is rejected instead of being treated as a successful verification run.
+
+`github.base_branch` is optional. When PR creation is enabled and it is omitted, `subsched`
+resolves `defaultBranchRef` with `gh repo view`. Resolution failure or an unsafe branch name
+fails closed; it never falls back implicitly to `main`. Before rebase, `subsched` fetches the
+resolved branch from `origin` and rebases onto the remote-tracking ref.
 
 The values shown for `billing.*`, `routing.*`, `pause_running_policy`, `tie_break`, and
 `close_issue` are the only currently supported values. Unsupported alternatives fail during

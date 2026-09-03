@@ -1299,15 +1299,13 @@ separate branch
 
 により作業衝突を防ぐ。
 
-PR merge conflictは、
+push / PR作成前に、設定済み`github.base_branch`、または`gh repo view`で解決した
+`defaultBranchRef.name`を検証する。未設定時の解決失敗・空値・不正なbranch名を`main`へfallback
+せず、git操作前にfail closedに停止する。
 
-```text
-NEEDS_REBASE
-```
-
-として別状態にする。
-
-自動rebaseは後続Phase。
+解決済みbranchについて`git fetch origin <base>`を実行し、成功した場合だけ
+`refs/remotes/origin/<base>`へrebaseする。fetch失敗時はrebase・push・PR作成へ進まない。
+rebase conflictは`git rebase --abort`でworktreeを復旧し、`NEEDS_HUMAN`へ遷移する。
 
 ---
 
@@ -1423,7 +1421,8 @@ PR bodyは公開境界であるため、SummaryとVerificationの両方へsecret
 PR body側のsanitizeだけでは不十分である。Workerがローカルcommitへ`Fixes #N`/`Closes #N`/
 `Resolves #N`（大小文字・活用形を問わない）を書いた場合、merge方式によってはPR body経由
 せずGitHubの自動close挙動を誘発しうる。`Scheduler._finalize_verified_task()`はpush前に
-`base_branch..HEAD`の新規commit messageを全文検査し、該当keywordを検出した場合はpush/PR
+`refs/remotes/origin/<base_branch>..HEAD`の新規commit messageを全文検査し、該当keywordを
+検出した場合はpush/PR
 adapterを呼ばずNEEDS_HUMANへfail closedする（commit historyは書き換えない）。PR body
 sanitizer（`_strip_close_keywords`）と同じ正規表現ポリシーを共有する。Worker promptにも同じ
 禁止事項を明記するが、対象repositoryの`AGENTS.md`/`CLAUDE.md`は変更しない。
@@ -1943,6 +1942,9 @@ eligible issues attempted
 github:
 
   repo: takurot/project
+
+  # optional; omitted means resolve defaultBranchRef via GitHub
+  base_branch: main
 
   mode: label
 

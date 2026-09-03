@@ -55,6 +55,23 @@ def validate_repo(repo: str) -> str:
     return repo
 
 
+def validate_base_branch(branch: Any) -> str:
+    if not isinstance(branch, str) or not branch or len(branch) > 255:
+        raise ConfigError("github.base_branch must be a non-empty safe branch name")
+    if branch == "@" or branch.startswith("-"):
+        raise ConfigError("github.base_branch must be a non-empty safe branch name")
+    if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch):
+        raise ConfigError("github.base_branch contains unsafe characters")
+    if ".." in branch or "//" in branch or branch.endswith(("/", ".")):
+        raise ConfigError("github.base_branch is not a valid git branch name")
+    if any(
+        not part or part.startswith(".") or part.endswith(".lock")
+        for part in branch.split("/")
+    ):
+        raise ConfigError("github.base_branch is not a valid git branch name")
+    return branch
+
+
 @dataclass(frozen=True, slots=True)
 class GitHubCompletionConfig:
     create_pr: bool = True
@@ -64,6 +81,7 @@ class GitHubCompletionConfig:
 @dataclass(frozen=True, slots=True)
 class GitHubConfig:
     repo: str | None = None
+    base_branch: str | None = None
     mode: str = "label"
     include_labels: tuple[str, ...] = ("ai-ready",)
     exclude_labels: tuple[str, ...] = ("blocked", "human-only", "security-sensitive")
@@ -171,7 +189,15 @@ ROOT_KEYS = frozenset(
 
 SECTION_KEYS: dict[str, frozenset[str]] = {
     "github": frozenset(
-        {"repo", "mode", "include_labels", "exclude_labels", "completion", "issues"}
+        {
+            "repo",
+            "base_branch",
+            "mode",
+            "include_labels",
+            "exclude_labels",
+            "completion",
+            "issues",
+        }
     ),
     "routing": frozenset({"strategy", "provider_capacity", "local_estimate"}),
     "billing": frozenset({"api_fallback", "metered_usage", "unknown_mode"}),
@@ -220,6 +246,10 @@ def _parse_github_config(raw: Mapping[str, Any]) -> GitHubConfig:
 
     repo_val = raw.get("repo")
     repo = validate_repo(repo_val) if repo_val is not None else None
+    base_branch_val = raw.get("base_branch")
+    base_branch = (
+        validate_base_branch(base_branch_val) if base_branch_val is not None else None
+    )
     mode = str(raw.get("mode", "label"))
     if mode not in {"label", "all-open", "list"}:
         raise ConfigError(f"invalid github.mode: {mode}")
@@ -255,6 +285,7 @@ def _parse_github_config(raw: Mapping[str, Any]) -> GitHubConfig:
 
     return GitHubConfig(
         repo=repo,
+        base_branch=base_branch,
         mode=mode,
         include_labels=tuple(str(x) for x in inc_labels),
         exclude_labels=tuple(str(x) for x in exc_labels),

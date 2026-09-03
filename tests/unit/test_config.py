@@ -27,6 +27,7 @@ def test_config_loads_example_yaml() -> None:
     config = load_config(example_path)
 
     assert config.github.repo == "owner/project"
+    assert config.github.base_branch is None
     assert config.github.include_labels == ("ai-ready",)
     assert config.github.exclude_labels == ("blocked", "human-only", "security-sensitive")
     assert config.execution.concurrency == 1
@@ -47,6 +48,7 @@ def test_config_loads_all_spec_sections(tmp_path: Path) -> None:
     yaml_content = """
 github:
   repo: takurot/project
+  base_branch: develop
   mode: label
   include_labels:
     - ai-ready
@@ -106,6 +108,7 @@ verification:
     config = load_config(path)
 
     assert config.github.repo == "takurot/project"
+    assert config.github.base_branch == "develop"
     assert config.agents["claude"].priority == 100
     assert config.agents["codex"].priority == 90
     assert config.routing.strategy == "capacity-aware"
@@ -115,6 +118,28 @@ verification:
     assert config.queue.priority.tie_break == "issue_number_asc"
     assert config.verification.commands == ("pytest", "ruff check .")
     assert config.verification.timeout_seconds == 120
+
+
+@pytest.mark.parametrize(
+    "base_branch",
+    (
+        "--upload-pack=evil",
+        "/main",
+        "feature..main",
+        "topic.lock",
+        "bad branch",
+        "@{upstream}",
+    ),
+)
+def test_config_rejects_unsafe_base_branch(tmp_path: Path, base_branch: str) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        f"github:\n  repo: o/r\n  base_branch: {base_branch!r}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match=r"github\.base_branch"):
+        load_config(path)
 
 
 def test_verification_timeout_seconds_default_and_override(tmp_path: Path) -> None:

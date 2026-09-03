@@ -133,6 +133,7 @@ def test_scheduler_escalates_worktree_identity_conflict_without_dispatch(
         push_enabled=True,
         create_pr_enabled=True,
         repo="owner/project",
+        base_branch="main",
     )
     scheduler.discover((Issue(number=101, title="Task 101"),))
     now = datetime(2026, 8, 29, tzinfo=UTC)

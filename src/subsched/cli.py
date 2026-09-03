@@ -26,7 +26,12 @@ from subsched.config import (
     validate_repo,
 )
 from subsched.github.checks import fetch_pr_checks
-from subsched.github.issues import GitHubCliError, GitHubIssueSource, diagnose_token
+from subsched.github.issues import (
+    GitHubCliError,
+    GitHubIssueSource,
+    diagnose_token,
+    resolve_default_branch,
+)
 from subsched.github.pull_requests import check_merged_pr_for_issue
 from subsched.models import Capacity, TaskState
 from subsched.router import AgentConfig, Router
@@ -389,6 +394,14 @@ def run(
         f"close_issue={cfg.github.completion.close_issue}"
     )
 
+    base_branch = cfg.github.base_branch
+    if effective_push and base_branch is None:
+        try:
+            base_branch = resolve_default_branch(resolved_repo)
+        except GitHubCliError as error:
+            typer.echo(f"GitHub default branch resolution failed: {error}", err=True)
+            raise typer.Exit(1) from error
+
     requested: frozenset[int] | None = None
     if resolved_issues is not None and resolved_issues != "all-open":
         requested = frozenset(_parse_issue_numbers(resolved_issues))
@@ -464,6 +477,7 @@ def run(
             push_enabled=not dry_run,
             create_pr_enabled=cfg.github.completion.create_pr,
             repo=resolved_repo,
+            base_branch=base_branch,
             structured_logger=structured_logger,
             # #145: gives handoff.continuous an actual runtime meaning (readback
             # validation at every worker-end boundary) instead of remaining a
