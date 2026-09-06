@@ -38,7 +38,9 @@ from subsched.storage import JsonStateStore, get_process_start_time
 from subsched.structured_logger import StructuredLogger
 from subsched.tasks.worktree import WorktreeAdapter, WorktreeError
 
-_IN_FLIGHT_RECOVERY_STATES = frozenset({TaskState.DISPATCHED, TaskState.IN_PROGRESS})
+_IN_FLIGHT_RECOVERY_STATES = frozenset(
+    {TaskState.DISPATCHED, TaskState.IN_PROGRESS, TaskState.VERIFYING}
+)
 
 
 class Worker(Protocol):
@@ -209,13 +211,14 @@ class Scheduler:
         )
 
     def _reconcile_recovery(self) -> None:
-        """#164: reconcile every DISPATCHED/IN_PROGRESS task against its recorded
-        process before the lease manager re-registers it. `reconcile_task_recovery`'s
-        own RETRY result is not queueable by itself -- nothing else in this class
-        transitions RETRY -> READY, it is always resolved by its caller in the same
-        step -- so the crash is recorded against the dispatched Agent and resolved here
-        into READY or NEEDS_HUMAN using the same per-agent-failure threshold
-        `_handle_result` uses for a live agent failure.
+        """#164, #203: reconcile every DISPATCHED/IN_PROGRESS/VERIFYING task against its
+        recorded process or checkpoint before the lease manager re-registers it.
+        `reconcile_task_recovery`'s own RETRY result is not queueable by itself --
+        nothing else in this class transitions RETRY -> READY, it is always resolved by
+        its caller in the same step -- so the crash is recorded against the dispatched
+        Agent and resolved here into READY or NEEDS_HUMAN using the same per-agent-failure
+        threshold `_handle_result` uses for a live agent failure. An interrupted VERIFYING
+        task is reconciled via _reconcile_verifying_task into a safe resumable state.
         """
         in_flight = [
             task for task in self.queue.tasks if task.status in _IN_FLIGHT_RECOVERY_STATES
@@ -223,54 +226,58 @@ class Scheduler:
         changed = False
         for task in in_flight:
             from_state = task.status
-            if (
-                task.current_agent is not None
-                and task.last_dispatched_agent is not None
-                and task.current_agent != task.last_dispatched_agent
-            ):
-                recovery_agent = None
-                recovery_agent_error = "dispatched Agent identity inconsistent"
+            if task.status is TaskState.VERIFYING:
+                resolved, reason = self._reconcile_verifying_task(task)
             else:
-                recovery_agent = task.current_agent or task.last_dispatched_agent
-                recovery_agent_error = "dispatched Agent identity missing"
-            if task.worktree is None:
-                # No worktree recorded at all: there is no process record, no handoff,
-                # and no way to verify what happened. Fail-closed rather than resume
-                # blindly. Routed through recovery.escalate_to_needs_human (not a plain
-                # .transition() call) because DISPATCHED cannot transition directly to
-                # NEEDS_HUMAN -- see ALLOWED_TRANSITIONS in models.py.
-                reason = "no worktree recorded for in-flight task; escalated to NEEDS_HUMAN"
-                resolved = escalate_to_needs_human(task, reason)
-            else:
-                reconciled, reason = reconcile_task_recovery(Path(task.worktree), task)
-                if reconciled.status is TaskState.RETRY:
-                    if recovery_agent is None:
-                        reason = (
-                            f"{reason}; {recovery_agent_error}; "
-                            "escalated to NEEDS_HUMAN"
-                        )
-                        resolved = reconciled.transition(TaskState.NEEDS_HUMAN, reason=reason)
-                    else:
-                        failures_dict = dict(reconciled.per_agent_failures)
-                        failures_dict[recovery_agent] = failures_dict.get(recovery_agent, 0) + 1
-                        agent_failure_count = failures_dict[recovery_agent]
-                        reconciled = replace(
-                            reconciled,
-                            per_agent_failures=tuple(sorted(failures_dict.items())),
-                        )
-                        next_state = (
-                            TaskState.NEEDS_HUMAN
-                            if agent_failure_count >= self.max_agent_failures
-                            else TaskState.READY
-                        )
-                        resolved = reconciled.transition(next_state, reason=reason)
+                if (
+                    task.current_agent is not None
+                    and task.last_dispatched_agent is not None
+                    and task.current_agent != task.last_dispatched_agent
+                ):
+                    recovery_agent = None
+                    recovery_agent_error = "dispatched Agent identity inconsistent"
                 else:
-                    resolved = reconciled
+                    recovery_agent = task.current_agent or task.last_dispatched_agent
+                    recovery_agent_error = "dispatched Agent identity missing"
+                if task.worktree is None:
+                    # No worktree recorded at all: there is no process record, no handoff,
+                    # and no way to verify what happened. Fail-closed rather than resume
+                    # blindly. Routed through recovery.escalate_to_needs_human (not a plain
+                    # .transition() call) because DISPATCHED cannot transition directly to
+                    # NEEDS_HUMAN -- see ALLOWED_TRANSITIONS in models.py.
+                    reason = "no worktree recorded for in-flight task; escalated to NEEDS_HUMAN"
+                    resolved = escalate_to_needs_human(task, reason)
+                else:
+                    reconciled, reason = reconcile_task_recovery(Path(task.worktree), task)
+                    if reconciled.status is TaskState.RETRY:
+                        if recovery_agent is None:
+                            reason = (
+                                f"{reason}; {recovery_agent_error}; "
+                                "escalated to NEEDS_HUMAN"
+                            )
+                            resolved = reconciled.transition(TaskState.NEEDS_HUMAN, reason=reason)
+                        else:
+                            failures_dict = dict(reconciled.per_agent_failures)
+                            failures_dict[recovery_agent] = failures_dict.get(recovery_agent, 0) + 1
+                            agent_failure_count = failures_dict[recovery_agent]
+                            reconciled = replace(
+                                reconciled,
+                                per_agent_failures=tuple(sorted(failures_dict.items())),
+                            )
+                            next_state = (
+                                TaskState.NEEDS_HUMAN
+                                if agent_failure_count >= self.max_agent_failures
+                                else TaskState.READY
+                            )
+                            resolved = reconciled.transition(next_state, reason=reason)
+                    else:
+                        resolved = reconciled
 
             if resolved.status is from_state:
                 continue
             changed = True
             self.queue = self.queue.replace(resolved)
+
             self._log(
                 "recovery",
                 issue_number=resolved.issue_number,
@@ -280,6 +287,64 @@ class Scheduler:
             )
         if changed:
             self._persist()
+
+    def _reconcile_verifying_task(self, task: Task) -> tuple[Task, str]:
+        """#203: reconcile an interrupted VERIFYING task on startup.
+        If a PR already exists, advance to READY_FOR_REVIEW without duplicating side effects.
+        Otherwise, if worktree/handoff are valid, return the task to READY (or escalate
+        to NEEDS_HUMAN if the attempt threshold is reached) so the task is not stranded.
+        Fail closed to NEEDS_HUMAN if worktree or handoff is invalid.
+        """
+        if task.worktree is None:
+            reason = "no worktree recorded for verifying task; escalated to NEEDS_HUMAN"
+            return task.transition(TaskState.NEEDS_HUMAN, reason=reason), reason
+
+        worktree_dir = Path(task.worktree)
+        if not worktree_dir.exists() or not worktree_dir.is_dir() or worktree_dir.is_symlink():
+            reason = "worktree invalid or missing for verifying task; escalated to NEEDS_HUMAN"
+            return task.transition(TaskState.NEEDS_HUMAN, reason=reason), reason
+
+        from subsched.handoff import reconstruct_or_quarantine_handoff
+
+        handoff_ok = reconstruct_or_quarantine_handoff(worktree_dir, task)
+        if not handoff_ok:
+            reason = (
+                "handoff was corrupted and quarantined for verifying task; escalated to NEEDS_HUMAN"
+            )
+            return task.transition(TaskState.NEEDS_HUMAN, reason=reason), reason
+
+        # If push and PR creation are enabled and a repo is configured,
+        # check if a remote PR was already created before interruption.
+        if self.push_enabled and self.create_pr_enabled and self.repo is not None:
+            from subsched.github.pull_requests import lookup_existing_pr
+
+            branch_name = f"subsched/issue-{task.issue_number}"
+            existing_pr = lookup_existing_pr(branch_name, repo=self.repo)
+            if existing_pr is not None:
+                with_pr = replace(task, pr=existing_pr.number)
+                reason = (
+                    f"interrupted verifying task already has PR #{existing_pr.number}; "
+                    "recovered to READY_FOR_REVIEW"
+                )
+                pr_ready = with_pr.transition(TaskState.PR_READY, reason=reason)
+                ready_for_review = pr_ready.transition(
+                    TaskState.READY_FOR_REVIEW, reason=reason
+                )
+                return ready_for_review, reason
+
+        # Otherwise, verification was interrupted; recover to READY (or
+        # NEEDS_HUMAN if attempt limit exceeded).
+        reason = "verification interrupted before completion; recovered to READY"
+        retry = task.transition(
+            TaskState.RETRY, current_agent=None, increment_attempt=True, reason=reason
+        )
+        next_state = (
+            TaskState.NEEDS_HUMAN
+            if retry.attempt >= self.max_agent_failures
+            else TaskState.READY
+        )
+        return retry.transition(next_state, reason=reason), reason
+
 
     def discover(
         self, issues: Iterable[Issue], *, exclude_labels: frozenset[str] = frozenset()
