@@ -12,6 +12,15 @@ github:
     create_pr: true
     close_issue: false
 
+# Supported agents: claude, codex. At least one agent must remain enabled.
+agents:
+  claude:
+    enabled: true
+    priority: 100
+  codex:
+    enabled: true
+    priority: 90
+
 routing:
   strategy: capacity-aware
   provider_capacity:

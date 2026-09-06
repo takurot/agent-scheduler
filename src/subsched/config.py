@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from subsched.agents import SUPPORTED_AGENTS
+
 
 class ConfigError(ValueError):
     pass
@@ -303,6 +305,12 @@ def _parse_agents_config(raw: Any) -> dict[str, AgentSettings]:
         raise ConfigError("agents must be a mapping")
     agents: dict[str, AgentSettings] = {}
     for name, item in raw.items():
+        if name not in SUPPORTED_AGENTS:
+            supported = ", ".join(f"'{a}'" for a in sorted(SUPPORTED_AGENTS))
+            raise ConfigError(
+                f"unsupported agent {name!r} in agents configuration; "
+                f"supported agents: {supported}"
+            )
         if not isinstance(item, dict):
             raise ConfigError(f"agents.{name} must be a mapping")
         extras = set(item) - {"enabled", "priority"}
@@ -311,6 +319,10 @@ def _parse_agents_config(raw: Any) -> dict[str, AgentSettings]:
         enabled = _strict_bool(item.get("enabled", True), f"agents.{name}.enabled")
         priority = _strict_pos_int(item.get("priority", 100), f"agents.{name}.priority", min_val=0)
         agents[str(name)] = AgentSettings(enabled=enabled, priority=priority)
+
+    if not any(s.enabled for s in agents.values()):
+        raise ConfigError("all agents are disabled; at least one agent must be enabled")
+
     return agents
 
 
