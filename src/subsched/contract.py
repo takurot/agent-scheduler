@@ -156,6 +156,11 @@ def build_worker_prompt(task: Task, verification_commands: Sequence[str] = ()) -
             "\"issue #N\" instead. A commit message containing one blocks push and PR",
             "creation entirely.",
             "",
+            "When you have finished, provide your final response matching the result schema:",
+            '{"result": "pass", "summary": "<brief summary>"}',
+            "or if the task cannot be completed:",
+            '{"result": "failure", "summary": "<reason for failure>"}',
+            "",
             "Leave the worktree in a recoverable state.",
         ]
     )

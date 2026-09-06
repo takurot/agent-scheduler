@@ -289,3 +289,56 @@ def test_native_worker_applies_configured_agent_timeout(tmp_path: Path) -> None:
 
     worker.run(task, "codex")
     assert mock_codex.execute.call_args[0][0].timeout_seconds == 900.0
+
+
+def test_native_worker_codex_requests_output_schema_and_mentions_schema_in_prompt(
+    tmp_path: Path,
+) -> None:
+    """#205: NativeWorker executing Codex must supply --output-schema in argv with a valid
+    schema file and include the final result schema contract in the prompt."""
+    import json
+
+    mock_codex = MagicMock()
+    mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(codex_agent=mock_codex, subscription_billing_verified=True)
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "codex")
+
+    req = mock_codex.execute.call_args[0][0]
+    assert "--output-schema" in req.argv
+    schema_idx = req.argv.index("--output-schema")
+    schema_path = Path(req.argv[schema_idx + 1])
+    assert schema_path.is_file()
+
+    schema_data = json.loads(schema_path.read_text(encoding="utf-8"))
+    assert schema_data.get("required") == ["result", "summary"]
+
+    prompt = req.stdin_payload.decode("utf-8")
+    assert '{"result"' in prompt
+
+
+def test_native_worker_codex_accepts_configured_output_schema(tmp_path: Path) -> None:
+    """#205: Configured codex_output_schema is passed to Codex argv."""
+    mock_codex = MagicMock()
+    mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    custom_schema = tmp_path / "custom.schema.json"
+    custom_schema.write_text('{"type": "object"}', encoding="utf-8")
+
+    worker = NativeWorker(
+        codex_agent=mock_codex,
+        codex_output_schema=custom_schema,
+        subscription_billing_verified=True,
+    )
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "codex")
+
+    req = mock_codex.execute.call_args[0][0]
+    schema_idx = req.argv.index("--output-schema")
+    assert req.argv[schema_idx + 1] == str(custom_schema)
+
