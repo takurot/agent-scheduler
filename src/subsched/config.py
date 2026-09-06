@@ -255,10 +255,16 @@ def _parse_github_config(raw: Mapping[str, Any]) -> GitHubConfig:
         raise ConfigError(f"invalid github.mode: {mode}")
 
     inc_labels = raw.get("include_labels", ("ai-ready",))
-    if not isinstance(inc_labels, (list, tuple)):
+    if not isinstance(inc_labels, (list, tuple)) or any(
+        not isinstance(x, str) or not x.strip() for x in inc_labels
+    ):
         raise ConfigError("github.include_labels must be a list of strings")
+    if mode == "label" and not inc_labels:
+        raise ConfigError("github.include_labels must not be empty when github.mode is 'label'")
     exc_labels = raw.get("exclude_labels", ("blocked", "human-only", "security-sensitive"))
-    if not isinstance(exc_labels, (list, tuple)):
+    if not isinstance(exc_labels, (list, tuple)) or any(
+        not isinstance(x, str) or not x.strip() for x in exc_labels
+    ):
         raise ConfigError("github.exclude_labels must be a list of strings")
 
     # #144: github.mode == "list" previously had no field to actually carry the Issue
