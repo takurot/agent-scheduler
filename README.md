@@ -35,6 +35,7 @@ gates remain authoritative.
 ## Requirements
 
 - Python `>=3.12`
+- **Supported OS**: Linux and macOS (Windows is unsupported due to POSIX process group session, signal handling, and filesystem isolation requirements)
 - [`uv`](https://docs.astral.sh/uv/)
 - Git `>=2.40`
 - GitHub CLI (`gh`)

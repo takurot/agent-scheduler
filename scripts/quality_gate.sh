@@ -7,10 +7,11 @@ uv run ruff check .
 echo "=== Running Mypy type checker ==="
 uv run mypy src
 
-echo "=== Running Pytest with Coverage Quality Gate (>=80%) ==="
-uv run pytest --cov=subsched --cov-report=term-missing --cov-fail-under=80
+echo "=== Running Pytest with Coverage Quality Gate (>=80% line, >=80% branch) ==="
+uv run pytest --cov=subsched --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=80
+uv run python scripts/check_branch_coverage.py coverage.json
 
 echo "=== Running Dependency Vulnerability Audit ==="
-uv export --frozen --no-hashes --no-emit-project | uvx pip-audit -r /dev/stdin
+uv run pip-audit
 
 echo "=== All Quality Gates Passed! ==="
