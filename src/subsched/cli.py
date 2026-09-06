@@ -644,6 +644,31 @@ def status(
                 # config value, not per-task state) -- this is the durable Task-level
                 # runtime budget's start point, since first dispatch.
                 typer.echo(f"        task runtime since: {t.run_started_at.isoformat()}")
+    else:
+        upcoming = [t for t in tasks if t.status not in (TaskState.COMPLETE, TaskState.CANCELLED)]
+        if upcoming:
+            typer.echo("\nUpcoming Tasks:")
+            for t in upcoming[:3]:
+                pr_str = f" [PR #{t.pr}]" if t.pr else ""
+                agent_str = f" (agent: {t.current_agent})" if t.current_agent else ""
+                prefix = f"  #{t.issue_number:<4} {t.status.value:<18} {t.title}"
+                typer.echo(f"{prefix}{pr_str}{agent_str}")
+            if len(upcoming) > 3:
+                typer.echo(f"  ... and {len(upcoming) - 3} more task(s)")
+
+    try:
+        capacities = context.store.load_capacities()
+    except StateCorruptionError:
+        capacities = ()
+    if capacities:
+        typer.echo("\nCapacity & Cooldown:")
+        for cap in capacities:
+            reset_str = f" (resets at {cap.reset_at.isoformat()})" if cap.reset_at else ""
+            summary = (
+                f"  {cap.agent} ({cap.scope}): {cap.state.value} "
+                f"[{cap.used_percentage:.1f}% used]{reset_str}"
+            )
+            typer.echo(summary)
 
 
 @app.command()
@@ -718,6 +743,10 @@ def doctor() -> None:
                     "gh token scope is broader than required for read-only issue discovery: "
                     f"{', '.join(diagnosis.broad_scopes)}"
                 )
+                typer.echo(
+                    "  Note: Under the read-only credential isolation policy, issue discovery only "
+                    "requires minimal read scopes to prevent accidental modification."
+                )
         else:
             typer.echo("gh token scope could not be determined (not authenticated)")
     if missing:
@@ -753,10 +782,13 @@ def metrics(
     if report_file is not None:
         try:
             report_file.write_text(report_text, encoding="utf-8")
+            typer.echo(f"Report saved to {report_file}")
         except OSError as error:
             typer.echo(f"Failed to write report to {report_file}: {error}", err=True)
 
     if json_output:
         typer.echo(json.dumps(calculated.to_dict(), indent=2))
     else:
+        if not tasks:
+            typer.echo("No tasks recorded yet. Run 'subsched run' to discover and execute tasks.\n")
         typer.echo(report_text)
