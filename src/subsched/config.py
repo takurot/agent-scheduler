@@ -128,7 +128,7 @@ class ExecutionConfig:
     max_agent_switches: int = 6
     max_agent_failures: int = 2
     max_verification_failures: int = 2
-    max_task_runtime: str = "6h"
+    max_task_runtime: str | int = "6h"
     max_tasks_per_run: int = 50
     pause_running_policy: str = "continue"
     agent_timeout_seconds: int = 300
@@ -396,6 +396,10 @@ def _parse_execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
     )
     max_tasks = _strict_pos_int(raw.get("max_tasks_per_run", 50), "execution.max_tasks_per_run")
     runtime = raw.get("max_task_runtime", "6h")
+    if not (isinstance(runtime, int) and not isinstance(runtime, bool)) and not isinstance(
+        runtime, str
+    ):
+        raise ConfigError("execution.max_task_runtime must be a string or integer")
     parse_duration(runtime)
     policy = str(raw.get("pause_running_policy", "continue"))
     if policy in {"abort", "cancel"}:
@@ -417,7 +421,7 @@ def _parse_execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
         max_agent_switches=max_switches,
         max_agent_failures=max_failures,
         max_verification_failures=max_verification_failures,
-        max_task_runtime=str(runtime),
+        max_task_runtime=runtime,
         max_tasks_per_run=max_tasks,
         pause_running_policy=policy,
         agent_timeout_seconds=agent_timeout_seconds,
