@@ -118,6 +118,16 @@ def _resolve_intent(
                 resolved_issues = intent.issues
             if intent.label and resolved_label is None and resolved_issues is None:
                 resolved_label = intent.label
+
+            parsed_parts: list[str] = []
+            if intent.repo:
+                parsed_parts.append(f"repo='{intent.repo}'")
+            if intent.label:
+                parsed_parts.append(f"label='{intent.label}'")
+            if intent.issues:
+                parsed_parts.append(f"issues='{intent.issues}'")
+            if parsed_parts:
+                typer.echo(f"Parsed intent: {', '.join(parsed_parts)}")
         except ConfigError as error:
             raise typer.BadParameter(str(error)) from error
 
