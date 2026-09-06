@@ -480,3 +480,156 @@ def test_pause_running_policy_continue_is_accepted(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert load_config(path).execution.pause_running_policy == "continue"
+
+
+def test_parse_duration_error_branches() -> None:
+    with pytest.raises(ConfigError, match="duration must be a positive integer"):
+        parse_duration(-5)
+    with pytest.raises(ConfigError, match="duration must be a non-empty string or integer"):
+        parse_duration("")
+    with pytest.raises(ConfigError, match="duration must be a non-empty string or integer"):
+        parse_duration(None)  # type: ignore[arg-type]
+    with pytest.raises(ConfigError, match="duration amount must be positive"):
+        parse_duration("0s")
+
+
+def test_strict_bool_and_repo_and_branch_validators() -> None:
+    from subsched.config import _strict_bool, validate_base_branch, validate_repo
+
+    with pytest.raises(ConfigError, match="field must be a boolean"):
+        _strict_bool("not-a-bool", "field")
+
+    with pytest.raises(ConfigError, match="repo must use owner/name format"):
+        validate_repo("not-owner-repo")
+    with pytest.raises(ConfigError, match="repo must use owner/name format"):
+        validate_repo("../..")
+
+    with pytest.raises(ConfigError, match="safe branch name"):
+        validate_base_branch("")
+    with pytest.raises(ConfigError, match="safe branch name"):
+        validate_base_branch(123)
+    with pytest.raises(ConfigError, match="safe branch name"):
+        validate_base_branch("@")
+    with pytest.raises(ConfigError, match="safe branch name"):
+        validate_base_branch("a" * 256)
+    with pytest.raises(ConfigError, match="unsafe characters"):
+        validate_base_branch("branch;injection")
+    with pytest.raises(ConfigError, match="not a valid git branch name"):
+        validate_base_branch("branch..name")
+    with pytest.raises(ConfigError, match="not a valid git branch name"):
+        validate_base_branch("branch/name.lock")
+
+
+def test_parse_natural_language_instruction_label_option() -> None:
+    intent = parse_natural_language_instruction("run tasks --label bug")
+    assert intent.label == "bug"
+
+
+
+def test_parse_github_config_error_branches(tmp_path: Path) -> None:
+    def write_cfg(content: str) -> Path:
+        p = tmp_path / f"cfg_{hash(content)}.yaml"
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    with pytest.raises(ConfigError, match=r"github\.completion must be a mapping"):
+        load_config(write_cfg("github:\n  repo: o/r\n  completion: not-a-map\n"))
+
+    with pytest.raises(ConfigError, match=r"unknown github\.completion keys"):
+        load_config(write_cfg("github:\n  repo: o/r\n  completion:\n    extra_key: true\n"))
+
+    with pytest.raises(ConfigError, match=r"invalid github\.mode"):
+        load_config(write_cfg("github:\n  repo: o/r\n  mode: unsupported-mode\n"))
+
+    with pytest.raises(ConfigError, match=r"github\.include_labels must be a list"):
+        load_config(write_cfg("github:\n  repo: o/r\n  include_labels: not-a-list\n"))
+
+    with pytest.raises(ConfigError, match=r"github\.exclude_labels must be a list"):
+        load_config(write_cfg("github:\n  repo: o/r\n  exclude_labels: not-a-list\n"))
+
+    with pytest.raises(ConfigError, match=r"github\.issues must be a list"):
+        load_config(write_cfg("github:\n  repo: o/r\n  mode: list\n  issues: not-a-list\n"))
+
+
+def test_parse_agents_config_error_branches(tmp_path: Path) -> None:
+    def write_cfg(content: str) -> Path:
+        p = tmp_path / f"cfg_{hash(content)}.yaml"
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    with pytest.raises(ConfigError, match="agents must be a mapping"):
+        load_config(write_cfg("github:\n  repo: o/r\nagents: not-a-map\n"))
+
+    with pytest.raises(ConfigError, match=r"agents\.codex must be a mapping"):
+        load_config(write_cfg("github:\n  repo: o/r\nagents:\n  codex: not-a-map\n"))
+
+    with pytest.raises(ConfigError, match=r"unknown agents\.codex keys"):
+        load_config(write_cfg("github:\n  repo: o/r\nagents:\n  codex:\n    unknown_key: 1\n"))
+
+
+def test_parse_routing_and_execution_error_branches(tmp_path: Path) -> None:
+    def write_cfg(content: str) -> Path:
+        p = tmp_path / f"cfg_{hash(content)}.yaml"
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    with pytest.raises(ConfigError, match=r"routing\.provider_capacity must be a mapping"):
+        load_config(write_cfg("github:\n  repo: o/r\nrouting:\n  provider_capacity: not-map\n"))
+
+    with pytest.raises(ConfigError, match=r"unknown routing\.provider_capacity keys"):
+        load_config(
+            write_cfg("github:\n  repo: o/r\nrouting:\n  provider_capacity:\n    extra: 1\n")
+        )
+
+    with pytest.raises(ConfigError, match=r"routing\.local_estimate must be a mapping"):
+        load_config(write_cfg("github:\n  repo: o/r\nrouting:\n  local_estimate: not-map\n"))
+
+    with pytest.raises(ConfigError, match=r"unknown routing\.local_estimate keys"):
+        load_config(
+            write_cfg("github:\n  repo: o/r\nrouting:\n  local_estimate:\n    extra: 1\n")
+        )
+
+    with pytest.raises(ConfigError, match=r"invalid execution\.pause_running_policy"):
+        load_config(
+            write_cfg(
+                "github:\n  repo: o/r\nexecution:\n  pause_running_policy: invalid_policy\n"
+            )
+        )
+
+
+def test_parse_queue_and_verification_and_root_error_branches(tmp_path: Path) -> None:
+    def write_cfg(content: str) -> Path:
+        p = tmp_path / f"cfg_{hash(content)}.yaml"
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    with pytest.raises(ConfigError, match=r"queue\.priority must be a mapping"):
+        load_config(write_cfg("github:\n  repo: o/r\nqueue:\n  priority: not-map\n"))
+
+    with pytest.raises(ConfigError, match=r"unknown queue\.priority keys"):
+        load_config(write_cfg("github:\n  repo: o/r\nqueue:\n  priority:\n    extra: 1\n"))
+
+    with pytest.raises(ConfigError, match=r"queue\.priority\.label_scores must be a mapping"):
+        load_config(
+            write_cfg("github:\n  repo: o/r\nqueue:\n  priority:\n    label_scores: not-map\n")
+        )
+
+    with pytest.raises(ConfigError, match=r"verification\.commands must be a list"):
+        load_config(write_cfg("github:\n  repo: o/r\nverification:\n  commands: not-list\n"))
+
+    with pytest.raises(ConfigError, match="cannot read config"):
+        load_config(tmp_path / "non_existent_file.yaml")
+
+    with pytest.raises(ConfigError, match="config root must be a mapping"):
+        load_config(write_cfg("- item1\n- item2\n"))
+
+    with pytest.raises(ConfigError, match="github must be a mapping"):
+        load_config(write_cfg("github: not-a-map\n"))
+
+    with pytest.raises(ConfigError, match="unknown github keys"):
+        load_config(write_cfg("github:\n  repo: o/r\n  unknown_field: 1\n"))
+
+    with pytest.raises(ConfigError, match="instruction must not be empty"):
+        parse_natural_language_instruction("")
+    with pytest.raises(ConfigError, match="instruction must not be empty"):
+        parse_natural_language_instruction("   ")
