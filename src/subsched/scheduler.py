@@ -155,6 +155,8 @@ class Scheduler:
             CapacityState.COOLDOWN_WEEKLY,
             CapacityState.COOLDOWN_MODEL,
             CapacityState.RATE_LIMITED_TEMPORARY,
+            CapacityState.AUTH_ERROR,
+            CapacityState.DISABLED_BILLING,
         }
         if any(capacity.state not in allowed_cooldowns for capacity in persisted_capacities):
             raise ValueError("persisted capacity must be a scheduler cooldown blocker")
@@ -529,7 +531,7 @@ class Scheduler:
                     self._backoff_step = 0
                     return True
 
-            self._handle_result(running, agent, result, current)
+            self._handle_result(running, agent, result, current, effective_capacities=effective)
         finally:
             self.lease_manager.release(task.issue_number, nonce=lease.nonce)
         self._effective_capacities(supplied, current)
@@ -578,7 +580,12 @@ class Scheduler:
                 and cap.source == "provider"
                 and cap.confidence == "high"
             ):
-                self._cooldowns.pop(agent, None)
+                existing_cap = self._cooldowns.get(agent)
+                if existing_cap is None or existing_cap.state not in {
+                    CapacityState.AUTH_ERROR,
+                    CapacityState.DISABLED_BILLING,
+                }:
+                    self._cooldowns.pop(agent, None)
         self._effective_capacities(supplied, current)
         if self.router.select(supplied.values(), now=current) is not None:
             self._release_waiting_tasks(current)
@@ -773,6 +780,10 @@ class Scheduler:
             AgentResultKind.CAPACITY_SESSION,
             AgentResultKind.CAPACITY_WEEKLY,
             AgentResultKind.CAPACITY_TEMPORARY,
+            AgentResultKind.AUTH_ERROR,
+            AgentResultKind.BILLING_ERROR,
+            AgentResultKind.UNKNOWN_BILLING,
+            AgentResultKind.PERMISSION_DENIED,
             AgentResultKind.TIMEOUT,
         }
     )
@@ -829,7 +840,35 @@ class Scheduler:
             TaskState.NEEDS_HUMAN, current_agent=agent, now=dispatched_at, reason=readback.reason
         )
 
-    def _handle_result(self, task: Task, agent: str, result: AgentResult, now: datetime) -> None:
+    def _has_available_alternative_agent(
+        self,
+        exclude_agent: str,
+        effective_capacities: dict[str, Capacity] | None,
+        now: datetime,
+    ) -> bool:
+        if effective_capacities is not None:
+            candidates = [
+                c
+                for c in effective_capacities.values()
+                if c.agent != exclude_agent and not self.lease_manager.is_agent_busy(c.agent)
+            ]
+            return self.router.select(candidates, now=now) is not None
+        candidates = [
+            c
+            for c in self._cooldowns.values()
+            if c.agent != exclude_agent and not self.lease_manager.is_agent_busy(c.agent)
+        ]
+        return self.router.select(candidates, now=now) is not None
+
+    def _handle_result(
+        self,
+        task: Task,
+        agent: str,
+        result: AgentResult,
+        now: datetime,
+        *,
+        effective_capacities: dict[str, Capacity] | None = None,
+    ) -> None:
         if result.kind is AgentResultKind.PASS:
             verifying = task.transition(TaskState.VERIFYING, current_agent=agent, now=now)
             self.queue = self.queue.replace(verifying)
@@ -927,17 +966,25 @@ class Scheduler:
                 if result.kind is AgentResultKind.CAPACITY_SESSION
                 else CapacityState.COOLDOWN_WEEKLY
             )
-            self._cooldowns = {
-                **self._cooldowns,
-                agent: Capacity(
-                    agent=agent,
-                    state=state,
-                    reset_at=result.reset_at,
-                    observed_at=now,
-                    source="structured_result",
-                    confidence="high",
-                ),
-            }
+            from subsched.capacity.base import BLOCKER_SEVERITY
+
+            existing_cap = self._cooldowns.get(agent)
+            should_update_cooldown = (
+                existing_cap is None
+                or BLOCKER_SEVERITY.get(state, 0) >= BLOCKER_SEVERITY.get(existing_cap.state, 0)
+            )
+            if should_update_cooldown:
+                self._cooldowns = {
+                    **self._cooldowns,
+                    agent: Capacity(
+                        agent=agent,
+                        state=state,
+                        reset_at=result.reset_at,
+                        observed_at=now,
+                        source="structured_result",
+                        confidence="high",
+                    ),
+                }
             new_capacity_events = task.capacity_events + 1
             switched = replace(
                 task,
@@ -973,6 +1020,105 @@ class Scheduler:
                         "to_state": TaskState.READY.value,
                         "capacity_state": state.value,
                         "attempt": task.attempt,
+                    },
+                )
+        elif result.kind is AgentResultKind.PERMISSION_DENIED:
+            reason = f"permission denied: {result.output or 'agent reported PERMISSION_DENIED'}"
+            final = task.transition(
+                TaskState.NEEDS_HUMAN, current_agent=None, now=now, reason=reason
+            )
+            self.queue = self.queue.replace(final)
+            self._log(
+                "task_transition",
+                level="ERROR",
+                issue_number=final.issue_number,
+                agent=agent,
+                task_id=final.task_id,
+                message=reason,
+                data={
+                    "from_state": task.status.value,
+                    "to_state": final.status.value,
+                    "attempt": final.attempt,
+                    "result_kind": result.kind.value,
+                },
+            )
+        elif result.kind in {
+            AgentResultKind.AUTH_ERROR,
+            AgentResultKind.BILLING_ERROR,
+            AgentResultKind.UNKNOWN_BILLING,
+        }:
+            target_state = (
+                CapacityState.AUTH_ERROR
+                if result.kind is AgentResultKind.AUTH_ERROR
+                else CapacityState.DISABLED_BILLING
+            )
+            from subsched.capacity.base import BLOCKER_SEVERITY
+
+            existing_cap = self._cooldowns.get(agent)
+            should_update_cooldown = (
+                existing_cap is None
+                or BLOCKER_SEVERITY.get(target_state, 0)
+                >= BLOCKER_SEVERITY.get(existing_cap.state, 0)
+            )
+            if should_update_cooldown:
+                self._cooldowns = {
+                    **self._cooldowns,
+                    agent: Capacity(
+                        agent=agent,
+                        state=target_state,
+                        reset_at=None,
+                        observed_at=now,
+                        source="structured_result",
+                        confidence="high",
+                    ),
+                }
+            if self._has_available_alternative_agent(
+                exclude_agent=agent,
+                effective_capacities=effective_capacities,
+                now=now,
+            ):
+                self.queue = self.queue.requeue_after_capacity_event(task.issue_number)
+                self._log(
+                    "task_transition",
+                    level="WARN",
+                    issue_number=task.issue_number,
+                    agent=agent,
+                    task_id=task.task_id,
+                    data={
+                        "from_state": task.status.value,
+                        "to_state": TaskState.READY.value,
+                        "capacity_state": target_state.value,
+                        "failover": True,
+                        "attempt": task.attempt,
+                    },
+                )
+            else:
+                error_label = (
+                    "auth error"
+                    if result.kind is AgentResultKind.AUTH_ERROR
+                    else "billing error"
+                )
+                reason = f"{error_label} for agent '{agent}': no alternative agent available"
+                final = task.transition(
+                    TaskState.NEEDS_HUMAN,
+                    current_agent=None,
+                    now=now,
+                    reason=reason,
+                )
+                self.queue = self.queue.replace(final)
+                self._log(
+                    "task_transition",
+                    level="ERROR",
+                    issue_number=final.issue_number,
+                    agent=agent,
+                    task_id=final.task_id,
+                    message=reason,
+                    data={
+                        "from_state": task.status.value,
+                        "to_state": final.status.value,
+                        "capacity_state": target_state.value,
+                        "failover": False,
+                        "attempt": final.attempt,
                     },
                 )
         else:
