@@ -691,6 +691,70 @@ class Scheduler:
             # reason is already attached to after_rebase.needs_human_reason.
             return after_rebase
 
+        # #202: rerun verification gates on the post-rebase tree before push/PR,
+        # and record checkpoint evidence for the resulting commit SHA.
+        from subsched.checkpoint import capture_mechanical_checkpoint, save_checkpoint
+        from subsched.verification import run_verification
+
+        self._log(
+            "verification_start",
+            issue_number=verifying.issue_number,
+            agent=agent,
+            task_id=verifying.task_id,
+            data={
+                "commands": len(self.verification_commands),
+                "attempt": verifying.attempt,
+                "post_rebase": True,
+            },
+        )
+        post_rebase_report = run_verification(
+            worktree_dir,
+            self.verification_commands,
+            timeout_seconds=self.verification_timeout_seconds,
+        )
+        self._log(
+            "gate_result",
+            issue_number=verifying.issue_number,
+            agent=agent,
+            task_id=verifying.task_id,
+            data={
+                "passed": post_rebase_report.passed,
+                "attempt": verifying.attempt,
+                "post_rebase": True,
+            },
+        )
+        result_kind = (
+            AgentResultKind.PASS if post_rebase_report.passed else AgentResultKind.FAILURE
+        )
+        cp = capture_mechanical_checkpoint(
+            worktree_dir,
+            verifying.issue_number,
+            AgentResult(result_kind),
+            exit_code=0 if post_rebase_report.passed else 1,
+            test_results=post_rebase_report.summary,
+        )
+        save_checkpoint(worktree_dir, cp)
+
+        if not post_rebase_report.passed:
+            new_verification_failures = verifying.verification_failures + 1
+            retry = verifying.transition(
+                TaskState.RETRY,
+                current_agent=None,
+                increment_attempt=True,
+                now=now,
+                reason=f"post-rebase verification failed: {post_rebase_report.summary}",
+            )
+            retry = replace(retry, verification_failures=new_verification_failures)
+            next_state = (
+                TaskState.NEEDS_HUMAN
+                if new_verification_failures >= self.max_verification_failures
+                else TaskState.READY
+            )
+            return retry.transition(next_state, now=now)
+
+        verification_summary = post_rebase_report.summary
+
+
         # #140: never push a commit whose message contains a GitHub auto-close keyword
         # (Fixes/Closes/Resolves #N) -- that would let a merge auto-close the issue,
         # bypassing the "issues stay open until manual review" invariant. This never
