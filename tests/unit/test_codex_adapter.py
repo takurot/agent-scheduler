@@ -94,6 +94,41 @@ def test_saved_cli_metadata_records_required_live_flags() -> None:
         assert flag in help_output
 
 
+def test_parse_codex_cli_metadata_success() -> None:
+    from subsched.agents.codex import parse_codex_cli_metadata
+
+    version = _fixture("cli-version.txt")
+    help_output = _fixture("cli-exec-help.txt")
+
+    meta = parse_codex_cli_metadata(version_output=version, help_output=help_output)
+    assert meta.version == "0.147.0"
+    assert meta.supports_json_output is True
+    assert meta.supports_output_schema is True
+    assert meta.supports_sandbox is True
+    assert meta.supports_ephemeral is True
+    assert meta.supports_strict_config is True
+    assert meta.supports_ignore_rules is True
+    assert meta.supports_ignore_user_config is True
+    assert meta.supports_ask_for_approval is True
+
+
+def test_parse_codex_cli_metadata_rejects_missing_required_flag() -> None:
+    from subsched.agents.codex import CodexCliMetadataError, parse_codex_cli_metadata
+
+    version = _fixture("cli-version.txt")
+    with pytest.raises(CodexCliMetadataError, match="required Codex CLI flags are missing"):
+        parse_codex_cli_metadata(version_output=version, help_output="--json --sandbox")
+
+
+def test_parse_codex_cli_metadata_rejects_unrecognized_version() -> None:
+    from subsched.agents.codex import CodexCliMetadataError, parse_codex_cli_metadata
+
+    help_output = _fixture("cli-exec-help.txt")
+    with pytest.raises(CodexCliMetadataError, match="unrecognized Codex CLI version"):
+        parse_codex_cli_metadata(version_output="invalid version string", help_output=help_output)
+
+
+
 @pytest.mark.parametrize(
     ("fixture", "kind", "output"),
     [
@@ -966,3 +1001,142 @@ def test_codex_lifecycle_and_io_edge_cases() -> None:
     _read_bounded_output(FakeProcWithStdoutError(), 1024, out_q)  # type: ignore[arg-type]
     _, _, read_failed = out_q.get()
     assert read_failed is True
+
+
+def test_parse_codex_jsonl_accepts_documented_tool_lifecycle_events() -> None:
+    """#205: Codex JSONL stream containing documented command/file tool events must be
+    accepted and parse the final structured agent_message as PASS."""
+    final_json = json.dumps({"result": "pass", "summary": "Implemented change and verified"})
+    events = [
+        {"type": "thread.started", "thread_id": "thread-audit"},
+        {"type": "turn.started"},
+        {
+            "type": "item.started",
+            "item": {
+                "id": "item_cmd_1",
+                "type": "command_execution",
+                "command": "git status --short",
+                "status": "in_progress",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_cmd_1",
+                "type": "command_execution",
+                "command": "git status --short",
+                "aggregated_output": "",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.started",
+            "item": {
+                "id": "item_file_1",
+                "type": "file_change",
+                "path": "src/module.py",
+                "status": "in_progress",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_file_1",
+                "type": "file_change",
+                "path": "src/module.py",
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_msg_final",
+                "type": "agent_message",
+                "text": final_json,
+            },
+        },
+        {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 50}},
+    ]
+    payload = "\n".join(json.dumps(e) for e in events)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.PASS
+    assert res.output == "codex completed"
+
+
+def test_parse_codex_jsonl_rejects_plain_text_final_message() -> None:
+    """#205: When final agent message is prose instead of required JSON schema, fail closed."""
+    events = [
+        {"type": "thread.started", "thread_id": "thread-audit"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_1",
+                "type": "agent_message",
+                "text": "I implemented the changes and all tests pass.",
+            },
+        },
+        {"type": "turn.completed", "usage": {}},
+    ]
+    payload = "\n".join(json.dumps(e) for e in events)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.FAILURE
+    assert res.output == "codex event stream malformed"
+
+
+def test_parse_codex_jsonl_rejects_unclosed_item_lifecycle() -> None:
+    """#205: If item.started is not completed before turn.completed, stream is malformed."""
+    events = [
+        {"type": "thread.started", "thread_id": "thread-audit"},
+        {"type": "turn.started"},
+        {
+            "type": "item.started",
+            "item": {
+                "id": "item_cmd_1",
+                "type": "command_execution",
+                "command": "pytest",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_msg_final",
+                "type": "agent_message",
+                "text": json.dumps({"result": "pass", "summary": "Done"}),
+            },
+        },
+        {"type": "turn.completed", "usage": {}},
+    ]
+    payload = "\n".join(json.dumps(e) for e in events)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.FAILURE
+    assert res.output == "codex event stream malformed"
+
+
+def test_parse_codex_jsonl_rejects_unknown_item_type() -> None:
+    """#205: Unknown item type must fail closed as malformed."""
+    events = [
+        {"type": "thread.started", "thread_id": "thread-audit"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_unknown",
+                "type": "unrecognized_future_tool",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_msg_final",
+                "type": "agent_message",
+                "text": json.dumps({"result": "pass", "summary": "Done"}),
+            },
+        },
+        {"type": "turn.completed", "usage": {}},
+    ]
+    payload = "\n".join(json.dumps(e) for e in events)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.FAILURE
+    assert res.output == "codex event stream malformed"

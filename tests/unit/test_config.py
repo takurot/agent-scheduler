@@ -455,6 +455,45 @@ def test_parse_natural_language_instruction() -> None:
     intent3 = parse_natural_language_instruction("issue #101, #103を実行")
     assert intent3.issues == "101,103"
 
+    # Japanese label expressions (#98)
+    intent_jp_label = parse_natural_language_instruction(
+        "takurot/agent-schedulerのai-readyラベルのissueを実行"
+    )
+    assert intent_jp_label.repo == "takurot/agent-scheduler"
+    assert intent_jp_label.label == "ai-ready"
+    assert intent_jp_label.issues is None
+
+    intent_jp_colon = parse_natural_language_instruction(
+        "takurot/agent-schedulerのラベル: bugのissueを実行"
+    )
+    assert intent_jp_colon.repo == "takurot/agent-scheduler"
+    assert intent_jp_colon.label == "bug"
+    assert intent_jp_colon.issues is None
+
+    intent_jp_full_colon = parse_natural_language_instruction(
+        "takurot/agent-schedulerのラベル\uff1abugのissueを実行"
+    )
+    assert intent_jp_full_colon.repo == "takurot/agent-scheduler"
+    assert intent_jp_full_colon.label == "bug"
+
+    # Repo name digits must not be misidentified as issue numbers (#98)
+    intent_repo_digit = parse_natural_language_instruction("owner/repo2のissueを実行")
+    assert intent_repo_digit.repo == "owner/repo2"
+    assert intent_repo_digit.issues is None
+
+    intent_repo_digit_with_issue = parse_natural_language_instruction(
+        "owner/repo2のissue #42を実行"
+    )
+    assert intent_repo_digit_with_issue.repo == "owner/repo2"
+    assert intent_repo_digit_with_issue.issues == "42"
+
+    intent_repo_and_label_digit = parse_natural_language_instruction(
+        "owner/repo2のv2-readyラベルのissueを実行"
+    )
+    assert intent_repo_and_label_digit.repo == "owner/repo2"
+    assert intent_repo_and_label_digit.label == "v2-ready"
+    assert intent_repo_and_label_digit.issues is None
+
 
 @pytest.mark.parametrize("policy", ["abort", "cancel"])
 def test_pause_running_policy_rejects_unimplemented_values(

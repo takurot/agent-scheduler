@@ -440,6 +440,10 @@ github:
     - security-sensitive
 ```
 
+ラベルフィルタリングセマンティクス：
+- `include_labels`: AND条件（指定された全ラベルを持つIssueのみを探索対象とする）
+- `exclude_labels`: OR条件（指定されたラベルのいずれか1つでも持つIssueは除外する。`security-sensitive` は常に除外）
+
 ---
 
 # 12. Issue Task Model
@@ -804,7 +808,7 @@ agents:
     priority: 90
 ```
 
-これは設定可能。
+これは設定可能。サポート対象エージェントは `claude` および `codex`。未知のエージェント名は設定読み込み時に fail-fast する。また、少なくとも 1 つのエージェントが enabled でなければならない。
 
 ---
 

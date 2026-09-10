@@ -141,13 +141,36 @@ def build_pr_body(issue_number: int, summary: str = "", verification_results: st
     )
 
 
+class ExistingPrCheckKind(StrEnum):
+    NONE = "NONE"
+    CONFIRMED = "CONFIRMED"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+@dataclass(frozen=True, slots=True)
+class ExistingPrCheckResult:
+    kind: ExistingPrCheckKind
+    info: PullRequestInfo | None = None
+    reason: str = ""
+
+
 def lookup_existing_pr(
     branch_name: str,
+    issue_number: int | None = None,
+    base: str = "main",
     repo: str | None = None,
     env: dict[str, str] | None = None,
     timeout_seconds: float = 30.0,
-) -> PullRequestInfo | None:
-    """Lookup if an open PR already exists for this branch to ensure idempotency."""
+) -> ExistingPrCheckResult:
+    """Lookup if an open PR already exists for this branch to ensure idempotency.
+
+    Untrusted-schema handling: PR data from GitHub is validated before reuse.
+    Only an open PR whose headRefName matches branch_name, whose baseRefName matches
+    the expected base branch, and whose body starts with the Scheduler-generated
+    "Implements work for #N." prefix (when issue_number is provided) is CONFIRMED.
+    Multiple candidates, branch/base mismatch, missing/wrong prefix, or gh failures
+    are AMBIGUOUS and fail closed to avoid adopting an unrelated or manual PR (#188).
+    """
     argv = [
         "gh",
         "pr",
@@ -157,7 +180,9 @@ def lookup_existing_pr(
         "--state",
         "open",
         "--json",
-        "number,url,title,body",
+        "number,url,title,body,headRefName,baseRefName",
+        "--limit",
+        "10",
     ]
     if repo:
         argv.extend(["--repo", repo])
@@ -172,20 +197,96 @@ def lookup_existing_pr(
             env=env,
             check=False,
         )
-        if res.returncode != 0:
-            return None
-        data = json.loads(res.stdout)
-        if not data or not isinstance(data, list):
-            return None
-        item = data[0]
-        return PullRequestInfo(
-            number=int(item["number"]),
-            url=str(item["url"]),
-            title=str(item["title"]),
-            body=str(item.get("body", "")),
+    except (OSError, subprocess.TimeoutExpired) as err:
+        return ExistingPrCheckResult(
+            kind=ExistingPrCheckKind.AMBIGUOUS,
+            reason=f"could not query existing PRs for {branch_name} (invocation failed: {err})",
         )
-    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, ValueError):
-        return None
+    if res.returncode != 0:
+        err_msg = res.stderr.strip()
+        return ExistingPrCheckResult(
+            kind=ExistingPrCheckKind.AMBIGUOUS,
+            reason=_redact(
+                f"could not query existing PRs for {branch_name} "
+                f"(gh exited {res.returncode}: {err_msg})"
+            ),
+        )
+    try:
+        data = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        return ExistingPrCheckResult(
+            kind=ExistingPrCheckKind.AMBIGUOUS,
+            reason=f"could not query existing PRs for {branch_name} (unparseable gh output)",
+        )
+    if not isinstance(data, list):
+        return ExistingPrCheckResult(
+            kind=ExistingPrCheckKind.AMBIGUOUS,
+            reason=f"could not query existing PRs for {branch_name} (invalid gh output structure)",
+        )
+    if not data:
+        return ExistingPrCheckResult(kind=ExistingPrCheckKind.NONE)
+
+    if len(data) > 1:
+        numbers = [str(item.get("number", "?")) for item in data if isinstance(item, dict)]
+        return ExistingPrCheckResult(
+            kind=ExistingPrCheckKind.AMBIGUOUS,
+            reason=(
+                f"multiple open PRs found for branch {branch_name} ({', '.join(numbers)}); "
+                "review manually before reusing"
+            ),
+        )
+
+    item = data[0]
+    if not isinstance(item, dict):
+        return ExistingPrCheckResult(
+            kind=ExistingPrCheckKind.AMBIGUOUS,
+            reason=f"could not verify existing PR for {branch_name} (malformed item)",
+        )
+
+    try:
+        number = int(item["number"])
+        url = str(item["url"])
+        title = str(item["title"])
+        body = str(item.get("body", ""))
+        head_ref = str(item.get("headRefName", ""))
+        base_ref = str(item.get("baseRefName", ""))
+    except (KeyError, TypeError, ValueError) as err:
+        return ExistingPrCheckResult(
+            kind=ExistingPrCheckKind.AMBIGUOUS,
+            reason=f"could not verify existing PR for {branch_name} (malformed payload: {err})",
+        )
+
+    if head_ref != branch_name:
+        return ExistingPrCheckResult(
+            kind=ExistingPrCheckKind.AMBIGUOUS,
+            reason=(
+                f"existing PR #{number} headRefName '{head_ref}' does not match "
+                f"expected '{branch_name}'"
+            ),
+        )
+
+    if base_ref != base:
+        return ExistingPrCheckResult(
+            kind=ExistingPrCheckKind.AMBIGUOUS,
+            reason=(
+                f"existing PR #{number} targets base branch '{base_ref}', "
+                f"expected '{base}'"
+            ),
+        )
+
+    if issue_number is not None:
+        expected_prefix = f"Implements work for #{issue_number}."
+        if not body.startswith(expected_prefix):
+            return ExistingPrCheckResult(
+                kind=ExistingPrCheckKind.AMBIGUOUS,
+                reason=(
+                    f"existing PR #{number} body does not start with expected prefix "
+                    f"'{expected_prefix}'"
+                ),
+            )
+
+    info = PullRequestInfo(number=number, url=url, title=title, body=body)
+    return ExistingPrCheckResult(kind=ExistingPrCheckKind.CONFIRMED, info=info)
 
 
 class MergedPrCheckKind(StrEnum):
@@ -322,9 +423,29 @@ def create_or_get_pull_request(
     `output` describing *why* creation failed (regression test for #128: this was
     previously discarded, making a resulting NEEDS_HUMAN escalation unexplainable).
     """
-    existing = lookup_existing_pr(branch_name, repo=repo, env=env, timeout_seconds=timeout_seconds)
-    if existing is not None:
-        return PullRequestResult(kind=PullRequestResultKind.SUCCESS, info=existing)
+    check = lookup_existing_pr(
+        branch_name,
+        issue_number=task.issue_number,
+        base=base,
+        repo=repo,
+        env=env,
+        timeout_seconds=timeout_seconds,
+    )
+    if check.kind is ExistingPrCheckKind.CONFIRMED:
+        if check.info is None:
+            return PullRequestResult(
+                kind=PullRequestResultKind.FAILURE,
+                info=None,
+                output=_redact(f"existing PR confirmed but info missing: {check.reason}"),
+            )
+        return PullRequestResult(kind=PullRequestResultKind.SUCCESS, info=check.info)
+
+    if check.kind is ExistingPrCheckKind.AMBIGUOUS:
+        return PullRequestResult(
+            kind=PullRequestResultKind.FAILURE,
+            info=None,
+            output=_redact(f"existing PR verification failed: {check.reason}"),
+        )
 
     body = build_pr_body(
         issue_number=task.issue_number,
