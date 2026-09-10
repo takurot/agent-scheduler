@@ -440,6 +440,10 @@ github:
     - security-sensitive
 ```
 
+ラベルフィルタリングセマンティクス：
+- `include_labels`: AND条件（指定された全ラベルを持つIssueのみを探索対象とする）
+- `exclude_labels`: OR条件（指定されたラベルのいずれか1つでも持つIssueは除外する。`security-sensitive` は常に除外）
+
 ---
 
 # 12. Issue Task Model

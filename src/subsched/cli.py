@@ -95,6 +95,7 @@ class ResolvedIntent:
     label: str | None
     # "all-open", a comma-separated issue-number string, or None (only when label is set).
     issues: str | None
+    labels: tuple[str, ...] = ()
 
 
 def _resolve_intent(
@@ -137,6 +138,12 @@ def _resolve_intent(
     if resolved_label is not None and resolved_issues is not None:
         raise typer.BadParameter("select exactly one of --label or --issues")
 
+    resolved_labels: tuple[str, ...] = ()
+    if resolved_label is not None:
+        resolved_labels = tuple(
+            item.strip() for item in resolved_label.split(",") if item.strip()
+        )
+
     if resolved_label is None and resolved_issues is None:
         # CLI --label/--issues (and natural-language query) are already applied above and
         # take precedence over config -- this branch only runs when neither was given, so
@@ -146,7 +153,8 @@ def _resolve_intent(
         elif cfg.github.mode == "list" and cfg.github.issues:
             resolved_issues = ",".join(str(n) for n in cfg.github.issues)
         elif cfg.github.mode == "label" and cfg.github.include_labels:
-            resolved_label = cfg.github.include_labels[0]
+            resolved_labels = tuple(cfg.github.include_labels)
+            resolved_label = ", ".join(resolved_labels)
         else:
             raise typer.BadParameter("select exactly one of --label or --issues")
 
@@ -156,7 +164,13 @@ def _resolve_intent(
     if resolved_issues is not None and resolved_issues != "all-open":
         _parse_issue_numbers(resolved_issues)
 
-    return ResolvedIntent(cfg=cfg, repo=resolved_repo, label=resolved_label, issues=resolved_issues)
+    return ResolvedIntent(
+        cfg=cfg,
+        repo=resolved_repo,
+        label=resolved_label,
+        issues=resolved_issues,
+        labels=resolved_labels,
+    )
 
 
 def _format_effective_config_summary(
@@ -168,7 +182,12 @@ def _format_effective_config_summary(
     discovery or state mutation happens (#144). Never includes Issue body, agent output,
     or credentials; every value here is already validated config/CLI input.
     """
-    if intent.label is not None:
+    if intent.labels:
+        if len(intent.labels) > 1:
+            selection = f"labels={', '.join(intent.labels)}"
+        else:
+            selection = f"label={intent.labels[0]}"
+    elif intent.label is not None:
         selection = f"label={intent.label}"
     elif intent.issues == "all-open":
         selection = "all-open"
@@ -406,14 +425,22 @@ def run(
     if resolved_issues is not None and resolved_issues != "all-open":
         requested = frozenset(_parse_issue_numbers(resolved_issues))
     try:
-        open_issues = GitHubIssueSource().list_open(resolved_repo, label=resolved_label)
+        if len(intent.labels) > 1:
+            open_issues = GitHubIssueSource().list_open(resolved_repo, labels=intent.labels)
+        elif resolved_label is not None:
+            open_issues = GitHubIssueSource().list_open(resolved_repo, label=resolved_label)
+        else:
+            open_issues = GitHubIssueSource().list_open(resolved_repo)
     except GitHubCliError as error:
         typer.echo(f"GitHub discovery failed: {error}", err=True)
         raise typer.Exit(1) from error
 
     exclude_labels = frozenset(cfg.github.exclude_labels)
     discovered = tuple(
-        issue for issue in open_issues if (requested is None or issue.number in requested)
+        issue
+        for issue in open_issues
+        if (requested is None or issue.number in requested)
+        and (not intent.labels or all(item in issue.labels for item in intent.labels))
     )
     if requested is not None:
         missing = requested - {issue.number for issue in open_issues}
