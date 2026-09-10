@@ -11,7 +11,13 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    name: verify (${{ matrix.os }}, python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.12"]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -23,3 +29,17 @@ jobs:
       - run: uv run mypy src
       - run: uv run pytest --cov=subsched --cov-report=term-missing --cov-fail-under=80
       - run: uv export --frozen --no-hashes --no-emit-project | uvx pip-audit -r /dev/stdin
+
+  all-checks:
+    name: all-checks
+    runs-on: ubuntu-latest
+    needs: [verify]
+    if: always()
+    steps:
+      - name: Verify all checks passed
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "CI verify jobs failed or were cancelled"
+            exit 1
+          fi
+          echo "All CI verify jobs succeeded"
