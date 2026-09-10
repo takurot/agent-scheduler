@@ -13,6 +13,7 @@ from typing import Annotated
 
 import typer
 
+from subsched.agents import SUPPORTED_AGENTS
 from subsched.agents.claude import ClaudeBillingMode, ClaudeExecutionPolicy
 from subsched.agents.native import NativeWorker
 from subsched.capacity.claude import ClaudeCapacitySensor
@@ -389,9 +390,20 @@ def run(
                 err=True,
             )
             raise typer.Exit(2)
-        missing_cmds = [
-            cmd for cmd in ("git", "gh", "claude", "codex") if shutil.which(cmd) is None
+
+        # #189: only enabled agents are required in native pre-flight check
+        enabled_agents = [
+            name for name, s in cfg.agents.items() if s.enabled and name in SUPPORTED_AGENTS
         ]
+        if not enabled_agents:
+            typer.echo(
+                "Native execution blocked: no agents are enabled in configuration.",
+                err=True,
+            )
+            raise typer.Exit(2)
+
+        required_cmds = ("git", "gh", *enabled_agents)
+        missing_cmds = [cmd for cmd in required_cmds if shutil.which(cmd) is None]
         if missing_cmds:
             joined = ", ".join(missing_cmds)
             typer.echo(
@@ -539,23 +551,40 @@ def run(
         structured_logger.log("run_end", data={"run_id": run_id, "additions": additions_count})
         return
 
-    claude_sensor = ClaudeCapacitySensor(
-        ClaudeExecutionPolicy(
-            live_probe_opt_in=True,
-            billing_mode=(
-                ClaudeBillingMode.SUBSCRIPTION_VERIFIED
-                if subscription_billing_verified
-                else ClaudeBillingMode.UNKNOWN
-            ),
+    # #189: only instantiate and probe sensors for enabled agents
+    claude_enabled = cfg.agents.get("claude", None)
+    codex_enabled = cfg.agents.get("codex", None)
+
+    claude_sensor = (
+        ClaudeCapacitySensor(
+            ClaudeExecutionPolicy(
+                live_probe_opt_in=True,
+                billing_mode=(
+                    ClaudeBillingMode.SUBSCRIPTION_VERIFIED
+                    if subscription_billing_verified
+                    else ClaudeBillingMode.UNKNOWN
+                ),
+            )
         )
+        if claude_enabled and claude_enabled.enabled
+        else None
     )
-    codex_sensor = CodexCapacitySensor(
-        allow_live=True,
-        subscription_billing_verified=subscription_billing_verified,
+    codex_sensor = (
+        CodexCapacitySensor(
+            allow_live=True,
+            subscription_billing_verified=subscription_billing_verified,
+        )
+        if codex_enabled and codex_enabled.enabled
+        else None
     )
 
     def capacity_supplier() -> tuple[Capacity, ...]:
-        return (*claude_sensor.observe("claude"), *codex_sensor.observe("codex"))
+        observations: list[Capacity] = []
+        if claude_sensor is not None:
+            observations.extend(claude_sensor.observe("claude"))
+        if codex_sensor is not None:
+            observations.extend(codex_sensor.observe("codex"))
+        return tuple(observations)
 
     try:
         watch_timed_out = _run_watch_loop(
@@ -732,7 +761,7 @@ def doctor() -> None:
     Reads the locally cached `gh` auth state to report token scopes; never prints the token
     value and never invokes Claude or Codex, so no Agent capacity is consumed.
     """
-    commands = ("git", "gh", "claude", "codex")
+    commands = ("git", "gh", *SUPPORTED_AGENTS)
     missing = tuple(command for command in commands if shutil.which(command) is None)
     for command in commands:
         typer.echo(f"{command:<8} {'FOUND' if command not in missing else 'MISSING'}")
