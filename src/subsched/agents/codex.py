@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import signal
 import subprocess
 import threading
@@ -20,6 +21,60 @@ from subsched.models import AgentResult, AgentResultKind
 
 class CodexProbeSafetyError(RuntimeError):
     """Raised before execution when the live-provider safety gate is not satisfied."""
+
+
+class CodexCliMetadataError(ValueError):
+    """Raised when installed Codex CLI capabilities or metadata are incompatible."""
+
+
+@dataclass(frozen=True, slots=True)
+class CodexCliMetadata:
+    version: str
+    supports_json_output: bool
+    supports_output_schema: bool
+    supports_sandbox: bool
+    supports_ephemeral: bool
+    supports_strict_config: bool
+    supports_ignore_rules: bool
+    supports_ignore_user_config: bool
+    supports_ask_for_approval: bool
+
+
+REQUIRED_CODEX_HEADLESS_FLAGS = frozenset(
+    {
+        "--json",
+        "--ask-for-approval",
+        "--output-schema",
+        "--sandbox",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--strict-config",
+    }
+)
+
+
+def parse_codex_cli_metadata(*, version_output: str, help_output: str) -> CodexCliMetadata:
+    version_match = re.search(r"(\d+\.\d+\.\d+)", version_output)
+    if version_match is None:
+        raise CodexCliMetadataError("unrecognized Codex CLI version")
+    missing = sorted(flag for flag in REQUIRED_CODEX_HEADLESS_FLAGS if flag not in help_output)
+    if missing:
+        raise CodexCliMetadataError(
+            f"required Codex CLI flags are missing: {', '.join(missing)}"
+        )
+    return CodexCliMetadata(
+        version=version_match.group(1),
+        supports_json_output=True,
+        supports_output_schema=True,
+        supports_sandbox=True,
+        supports_ephemeral=True,
+        supports_strict_config=True,
+        supports_ignore_rules=True,
+        supports_ignore_user_config=True,
+        supports_ask_for_approval=True,
+    )
+
 
 
 @dataclass(frozen=True, slots=True)

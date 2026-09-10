@@ -61,6 +61,33 @@ def _no_real_merged_pr_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr("subsched.cli.resolve_default_branch", lambda repo: "main")
 
+    def _fake_preflight(
+        *,
+        enabled_agents: tuple[str, ...] = ("claude", "codex"),
+        write_policy_requires_auth: bool = False,
+        **kwargs: object,
+    ) -> object:
+        import shutil
+
+        from subsched.preflight import PreflightCheckResult, PreflightReport
+
+        targets = ["git", "gh"]
+        for agent in enabled_agents:
+            if agent not in targets:
+                targets.append(agent)
+        checks = []
+        failures = []
+        for name in targets:
+            found = shutil.which(name) is not None
+            checks.append(PreflightCheckResult(name=name, found=found, compatible=found))
+            if not found:
+                failures.append(f"missing {name}")
+        return PreflightReport(
+            checks=tuple(checks), passed=len(failures) == 0, failure_reasons=tuple(failures)
+        )
+
+    monkeypatch.setattr("subsched.cli.validate_native_preflight", _fake_preflight)
+
 
 def _git(path: Path, *args: str) -> None:
     subprocess.run(

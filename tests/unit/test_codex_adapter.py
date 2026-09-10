@@ -93,6 +93,41 @@ def test_saved_cli_metadata_records_required_live_flags() -> None:
         assert flag in help_output
 
 
+def test_parse_codex_cli_metadata_success() -> None:
+    from subsched.agents.codex import parse_codex_cli_metadata
+
+    version = _fixture("cli-version.txt")
+    help_output = _fixture("cli-exec-help.txt")
+
+    meta = parse_codex_cli_metadata(version_output=version, help_output=help_output)
+    assert meta.version == "0.147.0"
+    assert meta.supports_json_output is True
+    assert meta.supports_output_schema is True
+    assert meta.supports_sandbox is True
+    assert meta.supports_ephemeral is True
+    assert meta.supports_strict_config is True
+    assert meta.supports_ignore_rules is True
+    assert meta.supports_ignore_user_config is True
+    assert meta.supports_ask_for_approval is True
+
+
+def test_parse_codex_cli_metadata_rejects_missing_required_flag() -> None:
+    from subsched.agents.codex import CodexCliMetadataError, parse_codex_cli_metadata
+
+    version = _fixture("cli-version.txt")
+    with pytest.raises(CodexCliMetadataError, match="required Codex CLI flags are missing"):
+        parse_codex_cli_metadata(version_output=version, help_output="--json --sandbox")
+
+
+def test_parse_codex_cli_metadata_rejects_unrecognized_version() -> None:
+    from subsched.agents.codex import CodexCliMetadataError, parse_codex_cli_metadata
+
+    help_output = _fixture("cli-exec-help.txt")
+    with pytest.raises(CodexCliMetadataError, match="unrecognized Codex CLI version"):
+        parse_codex_cli_metadata(version_output="invalid version string", help_output=help_output)
+
+
+
 @pytest.mark.parametrize(
     ("fixture", "kind", "output"),
     [

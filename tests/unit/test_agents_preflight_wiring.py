@@ -10,6 +10,7 @@ from subsched.agents import SUPPORTED_AGENTS
 from subsched.cli import app
 from subsched.config import ConfigError, load_config
 from subsched.github.issues import GitHubIssueSource
+from subsched.preflight import PreflightCheckResult, PreflightReport
 
 runner = CliRunner()
 
@@ -77,13 +78,13 @@ agents:
         encoding="utf-8",
     )
 
-    # Simulate: git, gh, claude exist; codex is MISSING
-    def fake_which(cmd: str) -> str | None:
-        if cmd in ("git", "gh", "claude"):
-            return f"/usr/bin/{cmd}"
-        return None
+    observed_agents: list[tuple[str, ...]] = []
 
-    monkeypatch.setattr(shutil, "which", fake_which)
+    def fake_preflight(*, enabled_agents, **kwargs):
+        observed_agents.append(enabled_agents)
+        return PreflightReport(checks=(), passed=True, failure_reasons=())
+
+    monkeypatch.setattr("subsched.cli.validate_native_preflight", fake_preflight)
     monkeypatch.setattr(GitHubIssueSource, "list_open", lambda self, repo, **kwargs: ())
 
     res = runner.invoke(
@@ -98,6 +99,7 @@ agents:
     )
     assert res.exit_code == 0, res.output
     assert "Pre-flight safety checks passed" in res.output
+    assert observed_agents == [("claude",)]
 
 
 def test_native_preflight_succeeds_when_disabled_claude_missing(
@@ -120,13 +122,13 @@ agents:
         encoding="utf-8",
     )
 
-    # Simulate: git, gh, codex exist; claude is MISSING
-    def fake_which(cmd: str) -> str | None:
-        if cmd in ("git", "gh", "codex"):
-            return f"/usr/bin/{cmd}"
-        return None
+    observed_agents: list[tuple[str, ...]] = []
 
-    monkeypatch.setattr(shutil, "which", fake_which)
+    def fake_preflight(*, enabled_agents, **kwargs):
+        observed_agents.append(enabled_agents)
+        return PreflightReport(checks=(), passed=True, failure_reasons=())
+
+    monkeypatch.setattr("subsched.cli.validate_native_preflight", fake_preflight)
     monkeypatch.setattr(GitHubIssueSource, "list_open", lambda self, repo, **kwargs: ())
 
     res = runner.invoke(
@@ -141,6 +143,7 @@ agents:
     )
     assert res.exit_code == 0, res.output
     assert "Pre-flight safety checks passed" in res.output
+    assert observed_agents == [("codex",)]
 
 
 def test_native_preflight_fails_when_enabled_agent_missing(
@@ -163,13 +166,15 @@ agents:
         encoding="utf-8",
     )
 
-    # Simulate: git, gh exist; claude is MISSING
-    def fake_which(cmd: str) -> str | None:
-        if cmd in ("git", "gh"):
-            return f"/usr/bin/{cmd}"
-        return None
-
-    monkeypatch.setattr(shutil, "which", fake_which)
+    failing_report = PreflightReport(
+        checks=(PreflightCheckResult("claude", found=False),),
+        passed=False,
+        failure_reasons=("missing commands: claude",),
+    )
+    monkeypatch.setattr(
+        "subsched.cli.validate_native_preflight",
+        lambda *args, **kwargs: failing_report,
+    )
 
     res = runner.invoke(
         app,
@@ -206,6 +211,10 @@ agents:
     )
 
     monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setattr(
+        "subsched.cli.validate_native_preflight",
+        lambda *args, **kwargs: PreflightReport(checks=(), passed=True, failure_reasons=()),
+    )
     monkeypatch.setattr(GitHubIssueSource, "list_open", lambda self, repo, **kwargs: ())
 
     observed_agents: list[str] = []

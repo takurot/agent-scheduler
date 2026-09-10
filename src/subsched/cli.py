@@ -3,7 +3,6 @@ from __future__ import annotations
 import functools
 import re
 import secrets
-import shutil
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -35,6 +34,7 @@ from subsched.github.issues import (
 )
 from subsched.github.pull_requests import check_merged_pr_for_issue
 from subsched.models import Capacity, TaskState
+from subsched.preflight import validate_native_preflight
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler
 from subsched.storage import (
@@ -402,9 +402,13 @@ def run(
             raise typer.Exit(2)
 
         # #189: only enabled agents are required in native pre-flight check
-        enabled_agents = [
-            name for name, s in cfg.agents.items() if s.enabled and name in SUPPORTED_AGENTS
-        ]
+        enabled_agents = (
+            tuple(
+                name for name, s in cfg.agents.items() if s.enabled and name in SUPPORTED_AGENTS
+            )
+            if cfg.agents
+            else tuple(SUPPORTED_AGENTS)
+        )
         if not enabled_agents:
             typer.echo(
                 "Native execution blocked: no agents are enabled in configuration.",
@@ -412,16 +416,29 @@ def run(
             )
             raise typer.Exit(2)
 
-        required_cmds = ("git", "gh", *enabled_agents)
-        missing_cmds = [cmd for cmd in required_cmds if shutil.which(cmd) is None]
-        if missing_cmds:
-            joined = ", ".join(missing_cmds)
-            typer.echo(
-                f"Native execution pre-flight doctor check failed; missing commands: {joined}",
-                err=True,
-            )
+        effective_push = not dry_run and cfg.github.completion.create_pr
+        report = validate_native_preflight(
+            enabled_agents=enabled_agents,
+            write_policy_requires_auth=effective_push,
+        )
+        if not report.passed:
+            missing_names = [c.name for c in report.checks if not c.found]
+            if missing_names:
+                joined = ", ".join(missing_names)
+                typer.echo(
+                    f"Native execution pre-flight doctor check failed; missing commands: {joined}",
+                    err=True,
+                )
+            for failure in report.failure_reasons:
+                if not missing_names or not any(name in failure for name in missing_names):
+                    typer.echo(
+                        f"Native execution pre-flight doctor check failed: {failure}",
+                        err=True,
+                    )
             raise typer.Exit(2)
-        typer.echo("Pre-flight safety checks passed: subscription verified, API fallback disabled.")
+        typer.echo(
+            "Pre-flight safety checks passed: subscription verified, API fallback disabled."
+        )
 
     # push must reflect Scheduler._finalize_verified_task()'s actual gate: create_pr=false
     # takes the same no-git-writes-at-all path as push_enabled=False (see docs/SPEC.md
@@ -805,11 +822,17 @@ def doctor() -> None:
     Reads the locally cached `gh` auth state to report token scopes; never prints the token
     value and never invokes Claude or Codex, so no Agent capacity is consumed.
     """
-    commands = ("git", "gh", *SUPPORTED_AGENTS)
-    missing = tuple(command for command in commands if shutil.which(command) is None)
-    for command in commands:
-        typer.echo(f"{command:<8} {'FOUND' if command not in missing else 'MISSING'}")
-    if "gh" not in missing:
+    report = validate_native_preflight(
+        enabled_agents=tuple(SUPPORTED_AGENTS),
+        write_policy_requires_auth=False,
+    )
+    for check in report.checks:
+        typer.echo(f"{check.name:<8} {'FOUND' if check.found else 'MISSING'}")
+        if check.found and not check.compatible and check.error:
+            typer.echo(f"  compatibility error: {check.error}")
+
+    gh_check = report.get("gh")
+    if gh_check and gh_check.found:
         diagnosis = diagnose_token()
         if diagnosis.authenticated:
             typer.echo(f"gh token scopes: {', '.join(diagnosis.scopes) or '(none)'}")
@@ -824,7 +847,8 @@ def doctor() -> None:
                 )
         else:
             typer.echo("gh token scope could not be determined (not authenticated)")
-    if missing:
+
+    if not report.passed:
         raise typer.Exit(1)
     typer.echo("Native workers remain disabled until Phase 2 assumptions are validated")
 
