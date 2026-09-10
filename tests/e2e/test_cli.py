@@ -614,6 +614,15 @@ def test_cli_runs_with_natural_language_query(tmp_path: Path) -> None:
     assert "4 issue(s) discovered" in result.output
 
 
+def test_cli_runs_with_natural_language_query_echoes_parsed_intent(tmp_path: Path) -> None:
+    result = invoke(
+        tmp_path, "run", "owner/projectのai-readyラベルのissueを実行", "--dry-run"
+    )
+    assert result.exit_code == 0, result.output
+    assert "Parsed intent: repo='owner/project', label='ai-ready'" in result.output
+
+
+
 def test_cli_runs_with_config_file(tmp_path: Path) -> None:
     config_file = tmp_path / "scheduler.yaml"
     config_file.write_text(

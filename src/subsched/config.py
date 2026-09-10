@@ -552,24 +552,37 @@ def parse_natural_language_instruction(instruction: str) -> NaturalLanguageInten
         raise ConfigError("instruction must not be empty")
     text = instruction.strip()
     repo: str | None = None
+    remaining_text = text
     repo_match = re.search(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", text)
     if repo_match:
         repo = repo_match.group(1)
+        remaining_text = text[:repo_match.start()] + " " + text[repo_match.end():]
+
+    label: str | None = None
+    label_patterns = [
+        r"--label(?:=|\s+)([A-Za-z0-9_.-]+)",
+        r"(?:ラベル|label)[:\uff1a\s]+([A-Za-z0-9_.-]+)",
+        r"(?:ラベル|label)[はが]([A-Za-z0-9_.-]+)",
+        r"([A-Za-z0-9_.-]+)ラベル",
+    ]
+    for pattern in label_patterns:
+        label_match = re.search(pattern, remaining_text)
+        if label_match:
+            label = label_match.group(1).strip()
+            remaining_text = (
+                remaining_text[:label_match.start()] + " " + remaining_text[label_match.end():]
+            )
+            break
 
     issues: str | None = None
     all_open_pattern = (
         r"(?i)(open\s*issue[s]?をすべて|全件|all[\s-]open|all open issues|すべて実行)"
     )
-    if re.search(all_open_pattern, text):
+    if re.search(all_open_pattern, remaining_text):
         issues = "all-open"
     else:
-        issue_nums = re.findall(r"#?(\d+)", text)
+        issue_nums = re.findall(r"#?(\d+)", remaining_text)
         if issue_nums:
             issues = ",".join(issue_nums)
-
-    label: str | None = None
-    label_match = re.search(r"--label\s+([A-Za-z0-9_.-]+)|label[:\s]+([A-Za-z0-9_.-]+)", text)
-    if label_match:
-        label = label_match.group(1) or label_match.group(2)
 
     return NaturalLanguageIntent(repo=repo, issues=issues, label=label)
