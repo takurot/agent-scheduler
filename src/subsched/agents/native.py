@@ -6,7 +6,7 @@ from pathlib import Path
 
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.claude import ClaudeAgent, ClaudeBillingMode, ClaudeExecutionPolicy
-from subsched.agents.codex import CodexAgent
+from subsched.agents.codex import CodexAgent, ensure_codex_output_schema
 from subsched.contract import build_worker_prompt, validate_dispatch_preconditions
 from subsched.models import AgentResult, AgentResultKind, Task
 from subsched.structured_logger import StructuredLogger
@@ -37,6 +37,7 @@ class NativeWorker:
         # falls back to a generic "see docs/WORKFLOW.md or pyproject.toml" line when empty.
         verification_commands: Sequence[str] = (),
         subscription_billing_verified: bool = False,
+        codex_output_schema: Path | None = None,
     ) -> None:
         if type(subscription_billing_verified) is not bool:
             raise TypeError("subscription billing verification must be a boolean")
@@ -58,6 +59,7 @@ class NativeWorker:
         self.agent_timeout_seconds = agent_timeout_seconds
         self.structured_logger = structured_logger
         self.verification_commands = tuple(verification_commands)
+        self.codex_output_schema = codex_output_schema
 
     def _heartbeat(self, task: Task, agent: str) -> Callable[[float], None] | None:
         logger = self.structured_logger
@@ -125,6 +127,10 @@ class NativeWorker:
             )
             return self.claude_agent.execute(req)
         elif agent == "codex":
+            schema_path = self.codex_output_schema or (
+                worktree_path / ".ai" / "codex-output.schema.json"
+            )
+            ensure_codex_output_schema(schema_path)
             req = ProcessExecutionRequest(
                 argv=(
                     "codex",
@@ -135,6 +141,10 @@ class NativeWorker:
                     "--ignore-user-config",
                     "--ignore-rules",
                     "--json",
+                    "--output-schema",
+                    str(schema_path),
+                    "-C",
+                    str(worktree_path),
                     "--sandbox",
                     "workspace-write",
                     "--ephemeral",
