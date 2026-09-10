@@ -85,6 +85,8 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
         {
             TaskState.DISPATCHED,
             TaskState.WAITING_CAPACITY,
+            TaskState.WAITING_DEPENDENCY,
+            TaskState.BLOCKED,
             # #137: a READY task whose execution.max_task_runtime budget has already
             # been exhausted by prior attempts must be expired to NEEDS_HUMAN before
             # ever being redispatched, not silently dispatched again.

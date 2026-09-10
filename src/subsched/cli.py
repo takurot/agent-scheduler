@@ -532,8 +532,17 @@ def run(
         raise typer.Exit(1) from error
 
     before_count = len(scheduler.tasks)
+    is_complete_snapshot = (
+        resolved_issues == "all-open"
+        and resolved_label is None
+        and getattr(cfg.github, "include_labels", ()) == ()
+    )
     try:
-        scheduler.discover(discovered, exclude_labels=exclude_labels)
+        scheduler.discover(
+            discovered,
+            exclude_labels=exclude_labels,
+            snapshot_complete=is_complete_snapshot,
+        )
     except ValueError as error:
         typer.echo(f"Task limit exceeded ({cfg.execution.max_tasks_per_run})", err=True)
         raise typer.Exit(2) from error

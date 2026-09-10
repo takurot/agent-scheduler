@@ -24,6 +24,7 @@ from subsched.models import (
     Task,
     TaskState,
     detect_dependency_cycles,
+    parse_dependencies,
 )
 from subsched.queue import TaskQueue
 from subsched.recovery import (
@@ -347,14 +348,82 @@ class Scheduler:
 
 
     def discover(
-        self, issues: Iterable[Issue], *, exclude_labels: frozenset[str] = frozenset()
+        self,
+        issues: Iterable[Issue],
+        *,
+        exclude_labels: frozenset[str] = frozenset(),
+        snapshot_complete: bool = False,
     ) -> None:
         effective_exclude = frozenset({"security-sensitive"}).union(exclude_labels)
-        existing = {task.issue_number for task in self.tasks}
+        issues_list = list(issues)
+        issues_by_number = {issue.number: issue for issue in issues_list}
+        existing_numbers = {task.issue_number for task in self.tasks}
+
+        # #185: Reconcile persisted non-terminal tasks against current GitHub issue state
+        reconciled_tasks: list[Task] = []
+        for task in self.tasks:
+            # Terminal states (COMPLETE, FAILED, CANCELLED) are immutable historical records
+            if task.status in (TaskState.COMPLETE, TaskState.FAILED, TaskState.CANCELLED):
+                reconciled_tasks.append(task)
+                continue
+
+            # In-flight tasks are guarded by leases/worktrees and not mutated silently
+            if task.status in _IN_FLIGHT_RECOVERY_STATES:
+                reconciled_tasks.append(task)
+                continue
+
+            # Case 1: Issue is missing from snapshot
+            if task.issue_number not in issues_by_number:
+                if snapshot_complete and task.status is not TaskState.NEEDS_HUMAN:
+                    reason = "issue missing from complete GitHub snapshot"
+                    task = task.transition(TaskState.NEEDS_HUMAN, reason=reason)
+                reconciled_tasks.append(task)
+                continue
+
+            # Case 2: Issue exists in snapshot
+            issue = issues_by_number[task.issue_number]
+            new_deps = parse_dependencies(issue.body)
+            # Deterministically refresh safe metadata (title, body, labels, dependencies)
+            task = replace(
+                task,
+                title=issue.title,
+                description=issue.body,
+                labels=issue.labels,
+                dependencies=new_deps,
+            )
+
+            # Check newly excluded labels
+            if effective_exclude.intersection(issue.labels):
+                if task.status is not TaskState.NEEDS_HUMAN:
+                    reason = "issue is no longer eligible: excluded label"
+                    task = task.transition(TaskState.NEEDS_HUMAN, reason=reason)
+                reconciled_tasks.append(task)
+                continue
+
+            # Re-evaluate dependency state transitions
+            if task.issue_number in new_deps:
+                if task.status is not TaskState.BLOCKED:
+                    task = task.transition(TaskState.BLOCKED, reason="self-dependency detected")
+            elif task.status is TaskState.READY and new_deps:
+                task = task.transition(TaskState.WAITING_DEPENDENCY)
+            elif (
+                task.status in (TaskState.WAITING_DEPENDENCY, TaskState.BLOCKED)
+                and not new_deps
+            ):
+                task = task.transition(TaskState.READY)
+
+            reconciled_tasks.append(task)
+
+        # Update queue with reconciled existing tasks
+        new_queue = replace(self.queue, tasks=tuple(reconciled_tasks))
+
         candidates = [
             issue
-            for issue in issues
-            if issue.number not in existing and not effective_exclude.intersection(issue.labels)
+            for issue in issues_list
+            if (
+                issue.number not in existing_numbers
+                and not effective_exclude.intersection(issue.labels)
+            )
         ]
 
         additions: list[Task] = []
@@ -387,9 +456,9 @@ class Scheduler:
             additions.append(Task.from_issue(issue))
 
         self.discovery_notes = tuple(notes)
-        if len(self.tasks) + len(additions) > self.max_tasks:
+        if len(new_queue.tasks) + len(additions) > self.max_tasks:
             raise ValueError(f"task limit exceeded ({self.max_tasks})")
-        new_queue = self.queue.append(additions)
+        new_queue = new_queue.append(additions)
         cycles = detect_dependency_cycles(new_queue.tasks)
         if cycles:
             updated_tasks = tuple(
@@ -400,6 +469,7 @@ class Scheduler:
             )
             new_queue = replace(new_queue, tasks=updated_tasks)
         self.queue = new_queue
+        self._release_dependencies(self.clock.now())
         self._persist()
         self._log(
             "discovery",
