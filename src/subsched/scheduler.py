@@ -1050,32 +1050,63 @@ class Scheduler:
                         "attempt": final.attempt,
                     },
                 )
-        elif result.kind in {AgentResultKind.CAPACITY_SESSION, AgentResultKind.CAPACITY_WEEKLY}:
-            state = (
-                CapacityState.COOLDOWN_SESSION
-                if result.kind is AgentResultKind.CAPACITY_SESSION
-                else CapacityState.COOLDOWN_WEEKLY
+        elif result.kind in {
+            AgentResultKind.CAPACITY_SESSION,
+            AgentResultKind.CAPACITY_WEEKLY,
+            AgentResultKind.CAPACITY_TEMPORARY,
+        }:
+            if result.kind is AgentResultKind.CAPACITY_SESSION:
+                state = CapacityState.COOLDOWN_SESSION
+            elif result.kind is AgentResultKind.CAPACITY_WEEKLY:
+                state = CapacityState.COOLDOWN_WEEKLY
+            else:
+                state = CapacityState.RATE_LIMITED_TEMPORARY
+
+            # #174: use explicit reset_at or bounded backoff (60s) for temporary capacity
+            reset_at = result.reset_at or (
+                now + timedelta(seconds=60)
+                if state is CapacityState.RATE_LIMITED_TEMPORARY
+                else None
             )
-            self._cooldowns = {
-                **self._cooldowns,
-                agent: Capacity(
-                    agent=agent,
-                    state=state,
-                    reset_at=result.reset_at,
-                    observed_at=now,
-                    source="structured_result",
-                    confidence="high",
-                ),
-            }
+
+            from subsched.capacity.base import BLOCKER_SEVERITY
+
+            existing_cap = self._cooldowns.get(agent)
+            should_update_cooldown = (
+                existing_cap is None
+                or BLOCKER_SEVERITY.get(state, 0) >= BLOCKER_SEVERITY.get(existing_cap.state, 0)
+            )
+            if should_update_cooldown:
+                self._cooldowns = {
+                    **self._cooldowns,
+                    agent: Capacity(
+                        agent=agent,
+                        state=state,
+                        reset_at=reset_at,
+                        observed_at=now,
+                        source="structured_result",
+                        confidence="high",
+                    ),
+                }
+
             new_capacity_events = task.capacity_events + 1
+            # #174: CAPACITY_TEMPORARY is a transient saturation event rather than
+            # a session/weekly quota cutoff, so it does not increment agent_switches
+            # and does not escalate to NEEDS_HUMAN on repeated occurrences.
+            new_agent_switches = (
+                task.agent_switches
+                if result.kind is AgentResultKind.CAPACITY_TEMPORARY
+                else task.agent_switches + 1
+            )
             switched = replace(
                 task,
-                agent_switches=task.agent_switches + 1,
+                agent_switches=new_agent_switches,
                 capacity_events=new_capacity_events,
             )
             self.queue = self.queue.replace(switched)
             if switched.agent_switches >= self.max_agent_switches:
                 waiting = switched.transition(TaskState.WAITING_CAPACITY, current_agent=None)
+
                 final_capacity_task = waiting.transition(TaskState.NEEDS_HUMAN, current_agent=None)
                 self.queue = self.queue.replace(final_capacity_task)
                 self._log(
