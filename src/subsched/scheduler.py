@@ -317,14 +317,25 @@ class Scheduler:
         # If push and PR creation are enabled and a repo is configured,
         # check if a remote PR was already created before interruption.
         if self.push_enabled and self.create_pr_enabled and self.repo is not None:
-            from subsched.github.pull_requests import lookup_existing_pr
+            from subsched.github.pull_requests import (
+                ExistingPrCheckKind,
+                lookup_existing_pr,
+            )
 
             branch_name = f"subsched/issue-{task.issue_number}"
-            existing_pr = lookup_existing_pr(branch_name, repo=self.repo)
-            if existing_pr is not None:
-                with_pr = replace(task, pr=existing_pr.number)
+            existing_pr = lookup_existing_pr(
+                branch_name,
+                issue_number=task.issue_number,
+                base=self.base_branch or "main",
+                repo=self.repo,
+            )
+            if (
+                existing_pr.kind is ExistingPrCheckKind.CONFIRMED
+                and existing_pr.info is not None
+            ):
+                with_pr = replace(task, pr=existing_pr.info.number)
                 reason = (
-                    f"interrupted verifying task already has PR #{existing_pr.number}; "
+                    f"interrupted verifying task already has PR #{existing_pr.info.number}; "
                     "recovered to READY_FOR_REVIEW"
                 )
                 pr_ready = with_pr.transition(TaskState.PR_READY, reason=reason)
