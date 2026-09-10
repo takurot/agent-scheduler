@@ -9,6 +9,7 @@ import pytest
 from subsched.gitenv import GIT_LOCATION_OVERRIDE_VARS
 from subsched.github.pull_requests import (
     MAX_PR_SECTION_CHARS,
+    ExistingPrCheckKind,
     MergedPrCheckKind,
     PullRequestResultKind,
     build_pr_body,
@@ -85,7 +86,9 @@ def test_lookup_existing_pr_found(monkeypatch: pytest.MonkeyPatch) -> None:
             "number": 66,
             "url": "https://github.com/takurot/agent-scheduler/pull/66",
             "title": "Verification runner (#26)",
-            "body": "Implements work for #26",
+            "body": "Implements work for #26.\n\n## Summary\n...",
+            "headRefName": "issue/26-verification-runner",
+            "baseRefName": "main",
         }
     ])
     monkeypatch.setattr(
@@ -93,10 +96,11 @@ def test_lookup_existing_pr_found(monkeypatch: pytest.MonkeyPatch) -> None:
         "run",
         lambda *a, **k: subprocess.CompletedProcess(["gh"], 0, stdout=fake_json, stderr=""),
     )
-    pr = lookup_existing_pr("issue/26-verification-runner")
-    assert pr is not None
-    assert pr.number == 66
-    assert "/pull/66" in pr.url
+    result = lookup_existing_pr("issue/26-verification-runner", issue_number=26, base="main")
+    assert result.kind is ExistingPrCheckKind.CONFIRMED
+    assert result.info is not None
+    assert result.info.number == 66
+    assert "/pull/66" in result.info.url
 
 
 def test_create_or_get_pull_request_creates_when_not_found(monkeypatch: pytest.MonkeyPatch) -> None:

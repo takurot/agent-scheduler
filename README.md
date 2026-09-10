@@ -2,6 +2,12 @@
 
 `subsched` is a deterministic, subscription-aware coding agent scheduler that turns GitHub Issues into a durable task queue and routes tasks to coding agents (Claude Code, OpenAI Codex) with zero metered API fallback.
 
+> [!NOTE]
+> **Package & Command Mapping**:
+> - **PyPI package**: `agent-scheduler` (`pip install agent-scheduler`)
+> - **Python import**: `subsched` (`import subsched`)
+> - **CLI command**: `subsched` (primary) or `agent-scheduler` (alias)
+
 ---
 
 ## Key Features
@@ -34,11 +40,14 @@ gates remain authoritative.
 
 ## Requirements
 
-- Python `>=3.12`
-- [`uv`](https://docs.astral.sh/uv/)
-- Git `>=2.40`
-- GitHub CLI (`gh`)
-- Coding agent CLI tools: `claude` and/or `codex`
+> [!IMPORTANT]
+> **Python `>=3.12` is strictly required.** Earlier Python versions are unsupported.
+
+- **Python**: `>=3.12`
+- **Package Manager**: [`uv`](https://docs.astral.sh/uv/) (recommended)
+- **Git**: `>=2.40`
+- **GitHub CLI**: `gh` (authenticated)
+- **Coding agent CLI tools**: `claude` (Claude Code) and/or `codex` (OpenAI Codex)
 
 ---
 
