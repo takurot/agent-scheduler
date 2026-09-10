@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 import time
@@ -12,7 +13,7 @@ from typing import Any, Protocol
 
 from subsched.config import validate_base_branch
 from subsched.contract import bootstrap_task_files
-from subsched.events import Clock, EventSource, EventType, SystemClock
+from subsched.events import Clock, Event, EventSource, EventType, SystemClock
 from subsched.github.checks import CICheckState, PRChecksStatus
 from subsched.github.pull_requests import MergedPrCheckKind, MergedPrCheckResult
 from subsched.models import (
@@ -39,9 +40,55 @@ from subsched.storage import JsonStateStore, get_process_start_time
 from subsched.structured_logger import StructuredLogger
 from subsched.tasks.worktree import WorktreeAdapter, WorktreeError
 
+logger = logging.getLogger(__name__)
+
 _IN_FLIGHT_RECOVERY_STATES = frozenset(
     {TaskState.DISPATCHED, TaskState.IN_PROGRESS, TaskState.VERIFYING}
 )
+_ALLOWED_COOLDOWNS = frozenset(
+    {
+        CapacityState.COOLDOWN_SESSION,
+        CapacityState.COOLDOWN_WEEKLY,
+        CapacityState.COOLDOWN_MODEL,
+        CapacityState.RATE_LIMITED_TEMPORARY,
+        CapacityState.AUTH_ERROR,
+        CapacityState.DISABLED_BILLING,
+    }
+)
+
+
+def _parse_capacity_item(item: Any) -> Capacity | None:
+    if isinstance(item, Capacity):
+        return item
+    if isinstance(item, dict):
+        try:
+            kwargs = dict(item)
+            if "state" in kwargs and isinstance(kwargs["state"], str):
+                kwargs["state"] = CapacityState(kwargs["state"])
+            if "observed_at" in kwargs and isinstance(kwargs["observed_at"], str):
+                kwargs["observed_at"] = datetime.fromisoformat(kwargs["observed_at"])
+            if "reset_at" in kwargs and isinstance(kwargs["reset_at"], str):
+                kwargs["reset_at"] = datetime.fromisoformat(kwargs["reset_at"])
+            return Capacity(**kwargs)
+        except (ValueError, TypeError, KeyError):
+            return None
+    return None
+
+
+def _extract_capacities_from_payload(payload: dict[str, Any]) -> list[Capacity]:
+    items: list[Capacity] = []
+    if "capacities" in payload:
+        raw_list = payload["capacities"]
+        if isinstance(raw_list, Iterable) and not isinstance(raw_list, (str, bytes)):
+            for item in raw_list:
+                parsed = _parse_capacity_item(item)
+                if parsed is not None:
+                    items.append(parsed)
+    if "capacity" in payload:
+        parsed = _parse_capacity_item(payload["capacity"])
+        if parsed is not None:
+            items.append(parsed)
+    return items
 
 
 class Worker(Protocol):
@@ -153,15 +200,7 @@ class Scheduler:
         self.lease_manager = LeaseManager(max_concurrency=concurrency)
         self.queue = TaskQueue(store.load_tasks(), label_scores=label_scores)
         persisted_capacities = store.load_capacities()
-        allowed_cooldowns = {
-            CapacityState.COOLDOWN_SESSION,
-            CapacityState.COOLDOWN_WEEKLY,
-            CapacityState.COOLDOWN_MODEL,
-            CapacityState.RATE_LIMITED_TEMPORARY,
-            CapacityState.AUTH_ERROR,
-            CapacityState.DISABLED_BILLING,
-        }
-        if any(capacity.state not in allowed_cooldowns for capacity in persisted_capacities):
+        if any(capacity.state not in _ALLOWED_COOLDOWNS for capacity in persisted_capacities):
             raise ValueError("persisted capacity must be a scheduler cooldown blocker")
         self._cooldowns = {capacity.agent: capacity for capacity in persisted_capacities}
         # #164: resolve any task still DISPATCHED/IN_PROGRESS from a prior process
@@ -492,6 +531,173 @@ class Scheduler:
             },
         )
 
+    def _handle_event(
+        self,
+        event: Event,
+        current: datetime,
+        event_capacities: dict[str, Capacity],
+    ) -> None:
+        if event.event_type == EventType.PAUSE:
+            self.store.set_paused(True)
+            self._log("event_received", data={"event_type": event.event_type.value})
+        elif event.event_type == EventType.RESUME:
+            self.store.set_paused(False)
+            self._log("event_received", data={"event_type": event.event_type.value})
+        elif event.event_type == EventType.CAPACITY_PROBE:
+            extracted = _extract_capacities_from_payload(event.payload)
+            if not extracted:
+                logger.warning("CAPACITY_PROBE event missing capacity payload: %s", event)
+                self._log(
+                    "event_unhandled_payload",
+                    level="WARNING",
+                    message="CAPACITY_PROBE event missing capacity payload",
+                    data={"payload": event.payload},
+                )
+            else:
+                for cap in extracted:
+                    event_capacities[cap.agent] = cap
+                    if cap.state in _ALLOWED_COOLDOWNS:
+                        self._cooldowns[cap.agent] = cap
+                self._persist()
+                self._log(
+                    "event_received",
+                    data={
+                        "event_type": event.event_type.value,
+                        "agents": list(event_capacities.keys()),
+                    },
+                )
+        elif event.event_type == EventType.CAPACITY_RESET:
+            extracted = _extract_capacities_from_payload(event.payload)
+            target_agent: str | None = event.payload.get("agent")
+            if extracted:
+                for cap in extracted:
+                    event_capacities[cap.agent] = cap
+
+            agents_to_check: list[str] = (
+                [target_agent] if target_agent is not None else list(self._cooldowns.keys())
+            )
+            for agent in agents_to_check:
+                cooldown = self._cooldowns.get(agent)
+                probe = event_capacities.get(agent)
+                if cooldown is not None:
+                    reset_at = cooldown.reset_at
+                    has_fresh_available_probe = (
+                        reset_at is not None
+                        and probe is not None
+                        and current >= reset_at
+                        and probe.state is CapacityState.AVAILABLE
+                        and probe.source == "provider"
+                        and probe.confidence == "high"
+                        and probe.observed_at >= reset_at
+                        and timedelta(0) <= current - probe.observed_at <= FRESHNESS
+                    )
+                    if has_fresh_available_probe:
+                        self._cooldowns.pop(agent, None)
+                        self._backoff_step = 0
+                        self._log(
+                            "capacity_reset_cleared",
+                            agent=agent,
+                            message="cooldown cleared via fresh provider probe",
+                        )
+                    else:
+                        self._backoff_step = 0
+                        logger.warning(
+                            "CAPACITY_RESET received for agent %s without fresh "
+                            "high-confidence provider probe; cooldown retained",
+                            agent,
+                        )
+                        self._log(
+                            "capacity_reset_unverified",
+                            level="WARNING",
+                            agent=agent,
+                            message=(
+                                "CAPACITY_RESET received without fresh high-confidence "
+                                "provider probe; cooldown retained"
+                            ),
+                            data={"payload": event.payload},
+                        )
+            self._persist()
+        elif event.event_type == EventType.TASK_COMPLETED:
+            issue_number = event.payload.get("issue_number")
+            task_id = event.payload.get("task_id")
+            if issue_number is None and task_id is None:
+                logger.warning("TASK_COMPLETED event missing issue_number and task_id: %s", event)
+                self._log(
+                    "event_unhandled_payload",
+                    level="WARNING",
+                    message="TASK_COMPLETED missing issue_number and task_id",
+                )
+                return
+
+            matching: list[Task] = []
+            if issue_number is not None:
+                matching = [t for t in self.tasks if t.issue_number == issue_number]
+            elif task_id is not None:
+                matching = [t for t in self.tasks if t.task_id == task_id]
+
+            if not matching:
+                logger.warning(
+                    "TASK_COMPLETED event for unknown task: issue=%s, task_id=%s",
+                    issue_number,
+                    task_id,
+                )
+                self._log(
+                    "event_unhandled_payload",
+                    level="WARNING",
+                    message="TASK_COMPLETED task not found",
+                    data={"issue_number": issue_number, "task_id": task_id},
+                )
+                return
+
+            task = matching[0]
+            if task.status is TaskState.COMPLETE:
+                self._log(
+                    "task_already_complete",
+                    issue_number=task.issue_number,
+                    message="TASK_COMPLETED event received for already complete task",
+                )
+                return
+
+            if task.status is TaskState.READY_FOR_REVIEW:
+                updated = task.transition(
+                    TaskState.COMPLETE, current_agent=task.current_agent, now=current
+                )
+                self.queue = self.queue.replace(updated)
+                self._release_dependencies(current)
+                self._persist()
+                self._log(
+                    "task_transition",
+                    issue_number=task.issue_number,
+                    agent=task.current_agent,
+                    task_id=task.task_id,
+                    message="completed via TASK_COMPLETED event",
+                    data={
+                        "from_state": task.status.value,
+                        "to_state": TaskState.COMPLETE.value,
+                    },
+                )
+            else:
+                logger.warning(
+                    "TASK_COMPLETED cannot transition task #%d from %s to COMPLETE",
+                    task.issue_number,
+                    task.status.value,
+                )
+                self._log(
+                    "event_invalid_transition",
+                    level="WARNING",
+                    issue_number=task.issue_number,
+                    message=f"TASK_COMPLETED cannot transition task from {task.status.value}",
+                    data={"from_state": task.status.value},
+                )
+        else:
+            logger.warning("Unhandled or unsupported event type: %s", event.event_type)
+            self._log(
+                "event_unsupported",
+                level="WARNING",
+                message=f"unhandled or unsupported event type: {event.event_type}",
+                data={"event_type": str(event.event_type), "payload": event.payload},
+            )
+
     def tick(
         self,
         capacities: Iterable[Capacity] = (),
@@ -500,12 +706,10 @@ class Scheduler:
     ) -> bool:
         current = now or self.clock.now()
 
+        event_capacities: dict[str, Capacity] = {}
         for source in self.event_sources:
             for event in source.poll(current):
-                if event.event_type == EventType.PAUSE:
-                    self.store.set_paused(True)
-                elif event.event_type == EventType.RESUME:
-                    self.store.set_paused(False)
+                self._handle_event(event, current, event_capacities)
 
         # Pause stops new dispatch only. Existing PR CI remains observable so a bounded
         # --watch run can finish tracking already-running work while paused (#166).
@@ -517,6 +721,7 @@ class Scheduler:
         self._expire_overrun_tasks(current)
 
         supplied = {capacity.agent: capacity for capacity in capacities}
+        supplied.update(event_capacities)
         effective = self._effective_capacities(supplied, current)
         if self.router.select(effective.values(), now=current) is not None:
             self._release_waiting_tasks(current)
