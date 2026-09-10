@@ -44,6 +44,7 @@ gates remain authoritative.
 > **Python `>=3.12` is strictly required.** Earlier Python versions are unsupported.
 
 - **Python**: `>=3.12`
+- **Supported OS**: Linux and macOS (Windows is unsupported due to POSIX process group session, signal handling, and filesystem isolation requirements)
 - **Package Manager**: [`uv`](https://docs.astral.sh/uv/) (recommended)
 - **Git**: `>=2.40`
 - **GitHub CLI**: `gh` (authenticated)
