@@ -542,6 +542,7 @@ def run(
             max_tasks=cfg.execution.max_tasks_per_run,
             push_enabled=not dry_run,
             create_pr_enabled=cfg.github.completion.create_pr,
+            close_issue_enabled=cfg.github.completion.close_issue,
             repo=resolved_repo,
             base_branch=base_branch,
             structured_logger=structured_logger,

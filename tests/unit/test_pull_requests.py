@@ -53,6 +53,22 @@ def test_build_pr_body_avoids_fixes_or_closes() -> None:
     assert "Issue is intentionally left open until review." in body
 
 
+def test_build_pr_body_with_close_issue_true() -> None:
+    body = build_pr_body(
+        103,
+        summary="Fixes #5 and Closes #6 bug",
+        verification_results="Resolves #7 passed",
+        close_issue=True,
+    )
+    assert "Implements work for #103" in body
+    # User-supplied sections must still sanitize auto-close keywords
+    assert "fixes #" not in body.lower()
+    assert "resolves #" not in body.lower()
+    # But the Scheduler-appended footer explicitly includes Closes #103.
+    assert "Closes #103." in body
+    assert "Issue is intentionally left open until review." not in body
+
+
 def test_build_pr_body_redacts_all_user_supplied_sections() -> None:
     secret = "github_pat_abcdefghijklmnopqrstuvwxyz"
 
@@ -121,6 +137,28 @@ def test_create_or_get_pull_request_creates_when_not_found(monkeypatch: pytest.M
     assert result.info is not None
     assert result.info.number == 68
     assert len(calls) == 2
+
+
+def test_create_or_get_pull_request_with_close_issue(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if "list" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="[]", stderr="")
+        return subprocess.CompletedProcess(
+            argv, 0, stdout="https://github.com/takurot/agent-scheduler/pull/69\n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    task = Task.from_issue(Issue(number=103, title="Support timeout"))
+    result = create_or_get_pull_request(task, "issue/103-timeout", close_issue=True)
+    assert result.kind is PullRequestResultKind.SUCCESS
+    create_call = next(c for c in calls if "create" in c)
+    body_idx = create_call.index("--body") + 1
+    body_arg = create_call[body_idx]
+    assert "Closes #103." in body_arg
+    assert "Issue is intentionally left open until review." not in body_arg
 
 
 def test_create_or_get_pull_request_returns_failure_with_output_on_failure(

@@ -39,6 +39,7 @@ def _scheduler(
     push_enabled: bool,
     ci_checker=None,
     base_branch: str | None = "main",
+    close_issue_enabled: bool = False,
 ) -> Scheduler:
     return Scheduler(
         store=JsonStateStore(tmp_path / "state.json"),
@@ -46,6 +47,7 @@ def _scheduler(
         worker=ScriptedWorker({(101, "claude"): (AgentResult(AgentResultKind.PASS),)}),
         worktree_root=tmp_path / "worktrees",
         push_enabled=push_enabled,
+        close_issue_enabled=close_issue_enabled,
         repo="owner/repo",
         base_branch=base_branch,
         ci_checker=ci_checker,
@@ -121,6 +123,50 @@ def test_non_main_base_is_used_for_rebase_commit_scan_and_pr(
         "scan": "refs/remotes/origin/develop",
         "pr": "develop",
     }
+
+
+def test_push_enabled_with_close_issue_true_passes_flag_to_create_pr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured_kwargs: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        conflict_mod,
+        "rebase_onto_base",
+        lambda worktree_dir, base_branch="main", **kw: conflict_mod.RebaseResult(
+            status=conflict_mod.RebaseStatus.SUCCESS
+        ),
+    )
+    monkeypatch.setattr(
+        pr_mod,
+        "find_close_keyword_commits",
+        lambda worktree_dir, base_branch="main", **kw: (),
+    )
+    monkeypatch.setattr(
+        push_mod,
+        "push_task_branch",
+        lambda worktree_dir, branch_name, **kwargs: push_mod.PushResult(
+            kind=push_mod.PushResultKind.SUCCESS, output="", branch=branch_name
+        ),
+    )
+
+    def create_pr(task, branch_name, **kwargs):
+        captured_kwargs.update(kwargs)
+        return pr_mod.PullRequestResult(
+            kind=pr_mod.PullRequestResultKind.SUCCESS,
+            info=pr_mod.PullRequestInfo(
+                number=101, url="https://github.com/o/r/pull/101", title="t", body="b"
+            ),
+        )
+
+    monkeypatch.setattr(pr_mod, "create_or_get_pull_request", create_pr)
+
+    scheduler = _scheduler(tmp_path, push_enabled=True, close_issue_enabled=True)
+    scheduler.discover([Issue(number=101, title="Task 101")])
+    scheduler.tick([_available("claude")])
+
+    assert scheduler.tasks[0].status is TaskState.READY_FOR_REVIEW
+    assert captured_kwargs.get("close_issue") is True
 
 
 def test_push_enabled_happy_path_reaches_ready_for_review_with_pr_number(
