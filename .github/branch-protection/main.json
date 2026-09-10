@@ -25,7 +25,7 @@
       "type": "required_status_checks",
       "parameters": {
         "required_status_checks": [
-          { "context": "verify" }
+          { "context": "all-checks" }
         ],
         "strict_required_status_checks_policy": true
       }

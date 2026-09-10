@@ -217,12 +217,10 @@ push/PR機能はnative worker権限と分離する。PR本文は`Implements work
 
 ```bash
 uv lock --check
-uv export --frozen --no-hashes --no-emit-project | uvx pip-audit -r /dev/stdin
+uv run pip-audit
 ```
 
-上記audit commandは現CIとの一致を優先した暫定形である。`pip-audit`をdev dependencyとして
-`uv.lock`へ固定した後は、local/CIとも`uv run pip-audit`へ切り替える。未固定のaudit toolを
-実行する際も不要なcredentialをenvironmentへ渡さない。
+`pip-audit` は dev dependency として `uv.lock` へ固定されており、local/CI とも `uv run pip-audit` で実行する。未固定の audit tool を実行する際も不要な credential を environment へ渡さない。
 
 脆弱性を無視してgateを通さない。修正版がない場合は影響、到達可能性、暫定対策をIssue
 またはPRへ記録する。
@@ -235,22 +233,12 @@ PR前にCIと同じコマンドを実行する。
 uv sync --frozen --extra dev
 uv run ruff check .
 uv run mypy src
-uv run pytest --cov=subsched --cov-report=term-missing --cov-fail-under=80
-uv export --frozen --no-hashes --no-emit-project | uvx pip-audit -r /dev/stdin
+uv run pytest --cov=subsched --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=80
+uv run python scripts/check_branch_coverage.py coverage.json
+uv run pip-audit
 ```
 
-総合coverageは80%以上を維持する。branch-only coverageのCI gateが導入されるまでは、
-CIがbranch-only no-regressionを自動判定していると表現しない。必要なPRではpytest後に
-coverage JSONの`covered_branches / num_branches`を確認し、PRへ値を記録する。
-
-```bash
-uv run coverage json -o /tmp/subsched-coverage.json
-uv run python -c 'import json; d=json.load(open("/tmp/subsched-coverage.json"))["totals"]; print(d["covered_branches"] / d["num_branches"] * 100)'
-```
-
-H4完了前はbase branchのPR/CI記録と手動比較し、初期baseline 72.30%以上かつbase比で低下
-させない。H4で同じ計算をlocal/CIへ実装した後は、base比で低下させず80%以上を自動強制
-する。branchが0本の場合の定義もH4で固定する。
+総合 coverage（line）および branch coverage（`covered_branches / num_branches`）の双方で 80% 以上を維持する。CI は line coverage（`--cov-fail-under=80`）および branch coverage（`scripts/check_branch_coverage.py`、branch が 0 本の場合は 100% 扱い）の閾値を自動強制する。
 
 全suiteの前に対象testだけを実行してよいが、PR前には全gateを実行する。live provider、
 GitHub write、長時間soak testは通常CIへ混ぜず、明示承認された隔離環境で実行結果を
@@ -337,9 +325,9 @@ HEAD、upstreamをcredentialを表示しないread-only commandで確認する�
 またはtaskから明示的に許可された場合だけ実行し、force pushは使用しない。mainへの反映は
 PR、review、green CIを経由し、可能ならGitHub branch protectionでCIをrequired checkにする。
 default branchのruleset定義は`.github/branch-protection/main.json`にあり、`scripts/
-apply-branch-protection.sh`（デフォルトはdry-run、`--apply`で実行）でGitHub repository
-ruleset APIへ適用する。これはrepositoryの権限境界を変更する操作のため、admin権限を持つ
-maintainerが手動で実行する。Agentは自動実行しない。
+apply-branch-protection.sh`（デフォルトはdry-run、`--apply`で実行、`--ruleset-id`や`--repo`
+での指定・上書き対応）でGitHub repository ruleset APIへ適用する。これはrepositoryの
+権限境界を変更する操作のため、admin権限を持つmaintainerが手動で実行する。Agentは自動実行しない。
 
 初期repository文書やCIを導入するbootstrapに限り、ユーザーが対象ファイルとmainへの直接
 pushを明示した場合は例外を認める。通常のIssue実装、code、state schema、dependency変更

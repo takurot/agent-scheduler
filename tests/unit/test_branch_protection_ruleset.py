@@ -42,17 +42,20 @@ def test_ruleset_requires_pull_requests() -> None:
     assert _rule(ruleset, "pull_request") is not None
 
 
-def test_ruleset_requires_the_ci_verify_check() -> None:
+def test_ruleset_requires_the_ci_all_checks_gate() -> None:
     ruleset = _load_ruleset()
     rule = _rule(ruleset, "required_status_checks")
     assert rule is not None
 
     contexts = {check["context"] for check in rule["parameters"]["required_status_checks"]}
-    assert "verify" in contexts
+    assert "all-checks" in contexts
 
     ci_workflow = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
-    assert "verify" in ci_workflow["jobs"], (
-        "required_status_checks context must match the CI job name in ci.yml"
+    assert "all-checks" in ci_workflow["jobs"], (
+        "required_status_checks context must match the aggregate CI job name in ci.yml"
+    )
+    assert "verify" in ci_workflow["jobs"]["all-checks"].get("needs", []), (
+        "all-checks gate job must depend on verify job(s)"
     )
 
 
@@ -61,10 +64,40 @@ def test_ruleset_avoids_broad_bypass_actors() -> None:
     assert ruleset.get("bypass_actors", []) == []
 
 
-def test_apply_script_targets_the_ruleset_file_and_repo() -> None:
+def test_apply_script_exists_and_supports_dry_run() -> None:
+    assert _APPLY_SCRIPT.is_file(), "apply-branch-protection.sh must exist"
     script = _APPLY_SCRIPT.read_text(encoding="utf-8")
     assert "main.json" in script
-    assert "takurot/agent-scheduler" in script
     assert re.search(r"--apply", script), "script must require an explicit --apply flag"
-    # Default (no --apply) path must not call the mutating gh api methods.
     assert "apply=false" in script
+
+
+def test_apply_script_dynamic_repo_resolution_and_override() -> None:
+    assert _APPLY_SCRIPT.is_file()
+    script = _APPLY_SCRIPT.read_text(encoding="utf-8")
+    # Must resolve repo dynamically via gh repo view or allow override via --repo
+    assert "nameWithOwner" in script
+    assert "--repo" in script
+    # Must NOT have repo_slug hardcoded unconditionally
+    assert 'repo_slug="takurot/agent-scheduler"' not in script
+
+
+def test_apply_script_supports_ruleset_id_and_detection() -> None:
+    assert _APPLY_SCRIPT.is_file()
+    script = _APPLY_SCRIPT.read_text(encoding="utf-8")
+    # Must support --ruleset-id option
+    assert "--ruleset-id" in script
+    # Must support PUT when updating existing ruleset
+    assert "PUT" in script
+    # Must support POST when creating new ruleset
+    assert "POST" in script
+
+
+def test_ci_workflow_has_aggregate_all_checks_job() -> None:
+    ci_workflow = yaml.safe_load(_CI_WORKFLOW.read_text(encoding="utf-8"))
+    jobs = ci_workflow.get("jobs", {})
+    assert "all-checks" in jobs
+    assert "verify" in jobs
+    aggregate_job = jobs["all-checks"]
+    assert "needs" in aggregate_job
+    assert "verify" in aggregate_job["needs"]

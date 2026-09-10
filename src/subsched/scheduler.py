@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 import time
@@ -12,7 +13,7 @@ from typing import Any, Protocol
 
 from subsched.config import validate_base_branch
 from subsched.contract import bootstrap_task_files
-from subsched.events import Clock, EventSource, EventType, SystemClock
+from subsched.events import Clock, Event, EventSource, EventType, SystemClock
 from subsched.github.checks import CICheckState, PRChecksStatus
 from subsched.github.pull_requests import MergedPrCheckKind, MergedPrCheckResult
 from subsched.models import (
@@ -24,6 +25,7 @@ from subsched.models import (
     Task,
     TaskState,
     detect_dependency_cycles,
+    parse_dependencies,
 )
 from subsched.queue import TaskQueue
 from subsched.recovery import (
@@ -38,7 +40,55 @@ from subsched.storage import JsonStateStore, get_process_start_time
 from subsched.structured_logger import StructuredLogger
 from subsched.tasks.worktree import WorktreeAdapter, WorktreeError
 
-_IN_FLIGHT_RECOVERY_STATES = frozenset({TaskState.DISPATCHED, TaskState.IN_PROGRESS})
+logger = logging.getLogger(__name__)
+
+_IN_FLIGHT_RECOVERY_STATES = frozenset(
+    {TaskState.DISPATCHED, TaskState.IN_PROGRESS, TaskState.VERIFYING}
+)
+_ALLOWED_COOLDOWNS = frozenset(
+    {
+        CapacityState.COOLDOWN_SESSION,
+        CapacityState.COOLDOWN_WEEKLY,
+        CapacityState.COOLDOWN_MODEL,
+        CapacityState.RATE_LIMITED_TEMPORARY,
+        CapacityState.AUTH_ERROR,
+        CapacityState.DISABLED_BILLING,
+    }
+)
+
+
+def _parse_capacity_item(item: Any) -> Capacity | None:
+    if isinstance(item, Capacity):
+        return item
+    if isinstance(item, dict):
+        try:
+            kwargs = dict(item)
+            if "state" in kwargs and isinstance(kwargs["state"], str):
+                kwargs["state"] = CapacityState(kwargs["state"])
+            if "observed_at" in kwargs and isinstance(kwargs["observed_at"], str):
+                kwargs["observed_at"] = datetime.fromisoformat(kwargs["observed_at"])
+            if "reset_at" in kwargs and isinstance(kwargs["reset_at"], str):
+                kwargs["reset_at"] = datetime.fromisoformat(kwargs["reset_at"])
+            return Capacity(**kwargs)
+        except (ValueError, TypeError, KeyError):
+            return None
+    return None
+
+
+def _extract_capacities_from_payload(payload: dict[str, Any]) -> list[Capacity]:
+    items: list[Capacity] = []
+    if "capacities" in payload:
+        raw_list = payload["capacities"]
+        if isinstance(raw_list, Iterable) and not isinstance(raw_list, (str, bytes)):
+            for item in raw_list:
+                parsed = _parse_capacity_item(item)
+                if parsed is not None:
+                    items.append(parsed)
+    if "capacity" in payload:
+        parsed = _parse_capacity_item(payload["capacity"])
+        if parsed is not None:
+            items.append(parsed)
+    return items
 
 
 class Worker(Protocol):
@@ -150,13 +200,7 @@ class Scheduler:
         self.lease_manager = LeaseManager(max_concurrency=concurrency)
         self.queue = TaskQueue(store.load_tasks(), label_scores=label_scores)
         persisted_capacities = store.load_capacities()
-        allowed_cooldowns = {
-            CapacityState.COOLDOWN_SESSION,
-            CapacityState.COOLDOWN_WEEKLY,
-            CapacityState.COOLDOWN_MODEL,
-            CapacityState.RATE_LIMITED_TEMPORARY,
-        }
-        if any(capacity.state not in allowed_cooldowns for capacity in persisted_capacities):
+        if any(capacity.state not in _ALLOWED_COOLDOWNS for capacity in persisted_capacities):
             raise ValueError("persisted capacity must be a scheduler cooldown blocker")
         self._cooldowns = {capacity.agent: capacity for capacity in persisted_capacities}
         # #164: resolve any task still DISPATCHED/IN_PROGRESS from a prior process
@@ -209,13 +253,14 @@ class Scheduler:
         )
 
     def _reconcile_recovery(self) -> None:
-        """#164: reconcile every DISPATCHED/IN_PROGRESS task against its recorded
-        process before the lease manager re-registers it. `reconcile_task_recovery`'s
-        own RETRY result is not queueable by itself -- nothing else in this class
-        transitions RETRY -> READY, it is always resolved by its caller in the same
-        step -- so the crash is recorded against the dispatched Agent and resolved here
-        into READY or NEEDS_HUMAN using the same per-agent-failure threshold
-        `_handle_result` uses for a live agent failure.
+        """#164, #203: reconcile every DISPATCHED/IN_PROGRESS/VERIFYING task against its
+        recorded process or checkpoint before the lease manager re-registers it.
+        `reconcile_task_recovery`'s own RETRY result is not queueable by itself --
+        nothing else in this class transitions RETRY -> READY, it is always resolved by
+        its caller in the same step -- so the crash is recorded against the dispatched
+        Agent and resolved here into READY or NEEDS_HUMAN using the same per-agent-failure
+        threshold `_handle_result` uses for a live agent failure. An interrupted VERIFYING
+        task is reconciled via _reconcile_verifying_task into a safe resumable state.
         """
         in_flight = [
             task for task in self.queue.tasks if task.status in _IN_FLIGHT_RECOVERY_STATES
@@ -223,54 +268,58 @@ class Scheduler:
         changed = False
         for task in in_flight:
             from_state = task.status
-            if (
-                task.current_agent is not None
-                and task.last_dispatched_agent is not None
-                and task.current_agent != task.last_dispatched_agent
-            ):
-                recovery_agent = None
-                recovery_agent_error = "dispatched Agent identity inconsistent"
+            if task.status is TaskState.VERIFYING:
+                resolved, reason = self._reconcile_verifying_task(task)
             else:
-                recovery_agent = task.current_agent or task.last_dispatched_agent
-                recovery_agent_error = "dispatched Agent identity missing"
-            if task.worktree is None:
-                # No worktree recorded at all: there is no process record, no handoff,
-                # and no way to verify what happened. Fail-closed rather than resume
-                # blindly. Routed through recovery.escalate_to_needs_human (not a plain
-                # .transition() call) because DISPATCHED cannot transition directly to
-                # NEEDS_HUMAN -- see ALLOWED_TRANSITIONS in models.py.
-                reason = "no worktree recorded for in-flight task; escalated to NEEDS_HUMAN"
-                resolved = escalate_to_needs_human(task, reason)
-            else:
-                reconciled, reason = reconcile_task_recovery(Path(task.worktree), task)
-                if reconciled.status is TaskState.RETRY:
-                    if recovery_agent is None:
-                        reason = (
-                            f"{reason}; {recovery_agent_error}; "
-                            "escalated to NEEDS_HUMAN"
-                        )
-                        resolved = reconciled.transition(TaskState.NEEDS_HUMAN, reason=reason)
-                    else:
-                        failures_dict = dict(reconciled.per_agent_failures)
-                        failures_dict[recovery_agent] = failures_dict.get(recovery_agent, 0) + 1
-                        agent_failure_count = failures_dict[recovery_agent]
-                        reconciled = replace(
-                            reconciled,
-                            per_agent_failures=tuple(sorted(failures_dict.items())),
-                        )
-                        next_state = (
-                            TaskState.NEEDS_HUMAN
-                            if agent_failure_count >= self.max_agent_failures
-                            else TaskState.READY
-                        )
-                        resolved = reconciled.transition(next_state, reason=reason)
+                if (
+                    task.current_agent is not None
+                    and task.last_dispatched_agent is not None
+                    and task.current_agent != task.last_dispatched_agent
+                ):
+                    recovery_agent = None
+                    recovery_agent_error = "dispatched Agent identity inconsistent"
                 else:
-                    resolved = reconciled
+                    recovery_agent = task.current_agent or task.last_dispatched_agent
+                    recovery_agent_error = "dispatched Agent identity missing"
+                if task.worktree is None:
+                    # No worktree recorded at all: there is no process record, no handoff,
+                    # and no way to verify what happened. Fail-closed rather than resume
+                    # blindly. Routed through recovery.escalate_to_needs_human (not a plain
+                    # .transition() call) because DISPATCHED cannot transition directly to
+                    # NEEDS_HUMAN -- see ALLOWED_TRANSITIONS in models.py.
+                    reason = "no worktree recorded for in-flight task; escalated to NEEDS_HUMAN"
+                    resolved = escalate_to_needs_human(task, reason)
+                else:
+                    reconciled, reason = reconcile_task_recovery(Path(task.worktree), task)
+                    if reconciled.status is TaskState.RETRY:
+                        if recovery_agent is None:
+                            reason = (
+                                f"{reason}; {recovery_agent_error}; "
+                                "escalated to NEEDS_HUMAN"
+                            )
+                            resolved = reconciled.transition(TaskState.NEEDS_HUMAN, reason=reason)
+                        else:
+                            failures_dict = dict(reconciled.per_agent_failures)
+                            failures_dict[recovery_agent] = failures_dict.get(recovery_agent, 0) + 1
+                            agent_failure_count = failures_dict[recovery_agent]
+                            reconciled = replace(
+                                reconciled,
+                                per_agent_failures=tuple(sorted(failures_dict.items())),
+                            )
+                            next_state = (
+                                TaskState.NEEDS_HUMAN
+                                if agent_failure_count >= self.max_agent_failures
+                                else TaskState.READY
+                            )
+                            resolved = reconciled.transition(next_state, reason=reason)
+                    else:
+                        resolved = reconciled
 
             if resolved.status is from_state:
                 continue
             changed = True
             self.queue = self.queue.replace(resolved)
+
             self._log(
                 "recovery",
                 issue_number=resolved.issue_number,
@@ -281,15 +330,152 @@ class Scheduler:
         if changed:
             self._persist()
 
+    def _reconcile_verifying_task(self, task: Task) -> tuple[Task, str]:
+        """#203: reconcile an interrupted VERIFYING task on startup.
+        If a PR already exists, advance to READY_FOR_REVIEW without duplicating side effects.
+        Otherwise, if worktree/handoff are valid, return the task to READY (or escalate
+        to NEEDS_HUMAN if the attempt threshold is reached) so the task is not stranded.
+        Fail closed to NEEDS_HUMAN if worktree or handoff is invalid.
+        """
+        if task.worktree is None:
+            reason = "no worktree recorded for verifying task; escalated to NEEDS_HUMAN"
+            return task.transition(TaskState.NEEDS_HUMAN, reason=reason), reason
+
+        worktree_dir = Path(task.worktree)
+        if not worktree_dir.exists() or not worktree_dir.is_dir() or worktree_dir.is_symlink():
+            reason = "worktree invalid or missing for verifying task; escalated to NEEDS_HUMAN"
+            return task.transition(TaskState.NEEDS_HUMAN, reason=reason), reason
+
+        from subsched.handoff import reconstruct_or_quarantine_handoff
+
+        handoff_ok = reconstruct_or_quarantine_handoff(worktree_dir, task)
+        if not handoff_ok:
+            reason = (
+                "handoff was corrupted and quarantined for verifying task; escalated to NEEDS_HUMAN"
+            )
+            return task.transition(TaskState.NEEDS_HUMAN, reason=reason), reason
+
+        # If push and PR creation are enabled and a repo is configured,
+        # check if a remote PR was already created before interruption.
+        if self.push_enabled and self.create_pr_enabled and self.repo is not None:
+            from subsched.github.pull_requests import (
+                ExistingPrCheckKind,
+                lookup_existing_pr,
+            )
+
+            branch_name = f"subsched/issue-{task.issue_number}"
+            existing_pr = lookup_existing_pr(
+                branch_name,
+                issue_number=task.issue_number,
+                base=self.base_branch or "main",
+                repo=self.repo,
+            )
+            if (
+                existing_pr.kind is ExistingPrCheckKind.CONFIRMED
+                and existing_pr.info is not None
+            ):
+                with_pr = replace(task, pr=existing_pr.info.number)
+                reason = (
+                    f"interrupted verifying task already has PR #{existing_pr.info.number}; "
+                    "recovered to READY_FOR_REVIEW"
+                )
+                pr_ready = with_pr.transition(TaskState.PR_READY, reason=reason)
+                ready_for_review = pr_ready.transition(
+                    TaskState.READY_FOR_REVIEW, reason=reason
+                )
+                return ready_for_review, reason
+
+        # Otherwise, verification was interrupted; recover to READY (or
+        # NEEDS_HUMAN if attempt limit exceeded).
+        reason = "verification interrupted before completion; recovered to READY"
+        retry = task.transition(
+            TaskState.RETRY, current_agent=None, increment_attempt=True, reason=reason
+        )
+        next_state = (
+            TaskState.NEEDS_HUMAN
+            if retry.attempt >= self.max_agent_failures
+            else TaskState.READY
+        )
+        return retry.transition(next_state, reason=reason), reason
+
+
     def discover(
-        self, issues: Iterable[Issue], *, exclude_labels: frozenset[str] = frozenset()
+        self,
+        issues: Iterable[Issue],
+        *,
+        exclude_labels: frozenset[str] = frozenset(),
+        snapshot_complete: bool = False,
     ) -> None:
         effective_exclude = frozenset({"security-sensitive"}).union(exclude_labels)
-        existing = {task.issue_number for task in self.tasks}
+        issues_list = list(issues)
+        issues_by_number = {issue.number: issue for issue in issues_list}
+        existing_numbers = {task.issue_number for task in self.tasks}
+
+        # #185: Reconcile persisted non-terminal tasks against current GitHub issue state
+        reconciled_tasks: list[Task] = []
+        for task in self.tasks:
+            # Terminal states (COMPLETE, FAILED, CANCELLED) are immutable historical records
+            if task.status in (TaskState.COMPLETE, TaskState.FAILED, TaskState.CANCELLED):
+                reconciled_tasks.append(task)
+                continue
+
+            # In-flight tasks are guarded by leases/worktrees and not mutated silently
+            if task.status in _IN_FLIGHT_RECOVERY_STATES:
+                reconciled_tasks.append(task)
+                continue
+
+            # Case 1: Issue is missing from snapshot
+            if task.issue_number not in issues_by_number:
+                if snapshot_complete and task.status is not TaskState.NEEDS_HUMAN:
+                    reason = "issue missing from complete GitHub snapshot"
+                    task = task.transition(TaskState.NEEDS_HUMAN, reason=reason)
+                reconciled_tasks.append(task)
+                continue
+
+            # Case 2: Issue exists in snapshot
+            issue = issues_by_number[task.issue_number]
+            new_deps = parse_dependencies(issue.body)
+            # Deterministically refresh safe metadata (title, body, labels, dependencies)
+            task = replace(
+                task,
+                title=issue.title,
+                description=issue.body,
+                labels=issue.labels,
+                dependencies=new_deps,
+            )
+
+            # Check newly excluded labels
+            if effective_exclude.intersection(issue.labels):
+                if task.status is not TaskState.NEEDS_HUMAN:
+                    reason = "issue is no longer eligible: excluded label"
+                    task = task.transition(TaskState.NEEDS_HUMAN, reason=reason)
+                reconciled_tasks.append(task)
+                continue
+
+            # Re-evaluate dependency state transitions
+            if task.issue_number in new_deps:
+                if task.status is not TaskState.BLOCKED:
+                    task = task.transition(TaskState.BLOCKED, reason="self-dependency detected")
+            elif task.status is TaskState.READY and new_deps:
+                task = task.transition(TaskState.WAITING_DEPENDENCY)
+            elif (
+                task.status in (TaskState.WAITING_DEPENDENCY, TaskState.BLOCKED)
+                and not new_deps
+            ):
+                task = task.transition(TaskState.READY)
+
+            reconciled_tasks.append(task)
+
+        # Update queue with reconciled existing tasks
+        new_queue = replace(self.queue, tasks=tuple(reconciled_tasks))
+
         candidates = [
             issue
-            for issue in issues
-            if issue.number not in existing and not effective_exclude.intersection(issue.labels)
+            for issue in issues_list
+            if (
+                issue.number not in existing_numbers
+                and not effective_exclude.intersection(issue.labels)
+            )
         ]
 
         additions: list[Task] = []
@@ -322,9 +508,9 @@ class Scheduler:
             additions.append(Task.from_issue(issue))
 
         self.discovery_notes = tuple(notes)
-        if len(self.tasks) + len(additions) > self.max_tasks:
+        if len(new_queue.tasks) + len(additions) > self.max_tasks:
             raise ValueError(f"task limit exceeded ({self.max_tasks})")
-        new_queue = self.queue.append(additions)
+        new_queue = new_queue.append(additions)
         cycles = detect_dependency_cycles(new_queue.tasks)
         if cycles:
             updated_tasks = tuple(
@@ -335,6 +521,7 @@ class Scheduler:
             )
             new_queue = replace(new_queue, tasks=updated_tasks)
         self.queue = new_queue
+        self._release_dependencies(self.clock.now())
         self._persist()
         self._log(
             "discovery",
@@ -344,6 +531,173 @@ class Scheduler:
             },
         )
 
+    def _handle_event(
+        self,
+        event: Event,
+        current: datetime,
+        event_capacities: dict[str, Capacity],
+    ) -> None:
+        if event.event_type == EventType.PAUSE:
+            self.store.set_paused(True)
+            self._log("event_received", data={"event_type": event.event_type.value})
+        elif event.event_type == EventType.RESUME:
+            self.store.set_paused(False)
+            self._log("event_received", data={"event_type": event.event_type.value})
+        elif event.event_type == EventType.CAPACITY_PROBE:
+            extracted = _extract_capacities_from_payload(event.payload)
+            if not extracted:
+                logger.warning("CAPACITY_PROBE event missing capacity payload: %s", event)
+                self._log(
+                    "event_unhandled_payload",
+                    level="WARNING",
+                    message="CAPACITY_PROBE event missing capacity payload",
+                    data={"payload": event.payload},
+                )
+            else:
+                for cap in extracted:
+                    event_capacities[cap.agent] = cap
+                    if cap.state in _ALLOWED_COOLDOWNS:
+                        self._cooldowns[cap.agent] = cap
+                self._persist()
+                self._log(
+                    "event_received",
+                    data={
+                        "event_type": event.event_type.value,
+                        "agents": list(event_capacities.keys()),
+                    },
+                )
+        elif event.event_type == EventType.CAPACITY_RESET:
+            extracted = _extract_capacities_from_payload(event.payload)
+            target_agent: str | None = event.payload.get("agent")
+            if extracted:
+                for cap in extracted:
+                    event_capacities[cap.agent] = cap
+
+            agents_to_check: list[str] = (
+                [target_agent] if target_agent is not None else list(self._cooldowns.keys())
+            )
+            for agent in agents_to_check:
+                cooldown = self._cooldowns.get(agent)
+                probe = event_capacities.get(agent)
+                if cooldown is not None:
+                    reset_at = cooldown.reset_at
+                    has_fresh_available_probe = (
+                        reset_at is not None
+                        and probe is not None
+                        and current >= reset_at
+                        and probe.state is CapacityState.AVAILABLE
+                        and probe.source == "provider"
+                        and probe.confidence == "high"
+                        and probe.observed_at >= reset_at
+                        and timedelta(0) <= current - probe.observed_at <= FRESHNESS
+                    )
+                    if has_fresh_available_probe:
+                        self._cooldowns.pop(agent, None)
+                        self._backoff_step = 0
+                        self._log(
+                            "capacity_reset_cleared",
+                            agent=agent,
+                            message="cooldown cleared via fresh provider probe",
+                        )
+                    else:
+                        self._backoff_step = 0
+                        logger.warning(
+                            "CAPACITY_RESET received for agent %s without fresh "
+                            "high-confidence provider probe; cooldown retained",
+                            agent,
+                        )
+                        self._log(
+                            "capacity_reset_unverified",
+                            level="WARNING",
+                            agent=agent,
+                            message=(
+                                "CAPACITY_RESET received without fresh high-confidence "
+                                "provider probe; cooldown retained"
+                            ),
+                            data={"payload": event.payload},
+                        )
+            self._persist()
+        elif event.event_type == EventType.TASK_COMPLETED:
+            issue_number = event.payload.get("issue_number")
+            task_id = event.payload.get("task_id")
+            if issue_number is None and task_id is None:
+                logger.warning("TASK_COMPLETED event missing issue_number and task_id: %s", event)
+                self._log(
+                    "event_unhandled_payload",
+                    level="WARNING",
+                    message="TASK_COMPLETED missing issue_number and task_id",
+                )
+                return
+
+            matching: list[Task] = []
+            if issue_number is not None:
+                matching = [t for t in self.tasks if t.issue_number == issue_number]
+            elif task_id is not None:
+                matching = [t for t in self.tasks if t.task_id == task_id]
+
+            if not matching:
+                logger.warning(
+                    "TASK_COMPLETED event for unknown task: issue=%s, task_id=%s",
+                    issue_number,
+                    task_id,
+                )
+                self._log(
+                    "event_unhandled_payload",
+                    level="WARNING",
+                    message="TASK_COMPLETED task not found",
+                    data={"issue_number": issue_number, "task_id": task_id},
+                )
+                return
+
+            task = matching[0]
+            if task.status is TaskState.COMPLETE:
+                self._log(
+                    "task_already_complete",
+                    issue_number=task.issue_number,
+                    message="TASK_COMPLETED event received for already complete task",
+                )
+                return
+
+            if task.status is TaskState.READY_FOR_REVIEW:
+                updated = task.transition(
+                    TaskState.COMPLETE, current_agent=task.current_agent, now=current
+                )
+                self.queue = self.queue.replace(updated)
+                self._release_dependencies(current)
+                self._persist()
+                self._log(
+                    "task_transition",
+                    issue_number=task.issue_number,
+                    agent=task.current_agent,
+                    task_id=task.task_id,
+                    message="completed via TASK_COMPLETED event",
+                    data={
+                        "from_state": task.status.value,
+                        "to_state": TaskState.COMPLETE.value,
+                    },
+                )
+            else:
+                logger.warning(
+                    "TASK_COMPLETED cannot transition task #%d from %s to COMPLETE",
+                    task.issue_number,
+                    task.status.value,
+                )
+                self._log(
+                    "event_invalid_transition",
+                    level="WARNING",
+                    issue_number=task.issue_number,
+                    message=f"TASK_COMPLETED cannot transition task from {task.status.value}",
+                    data={"from_state": task.status.value},
+                )
+        else:
+            logger.warning("Unhandled or unsupported event type: %s", event.event_type)
+            self._log(
+                "event_unsupported",
+                level="WARNING",
+                message=f"unhandled or unsupported event type: {event.event_type}",
+                data={"event_type": str(event.event_type), "payload": event.payload},
+            )
+
     def tick(
         self,
         capacities: Iterable[Capacity] = (),
@@ -352,12 +706,10 @@ class Scheduler:
     ) -> bool:
         current = now or self.clock.now()
 
+        event_capacities: dict[str, Capacity] = {}
         for source in self.event_sources:
             for event in source.poll(current):
-                if event.event_type == EventType.PAUSE:
-                    self.store.set_paused(True)
-                elif event.event_type == EventType.RESUME:
-                    self.store.set_paused(False)
+                self._handle_event(event, current, event_capacities)
 
         # Pause stops new dispatch only. Existing PR CI remains observable so a bounded
         # --watch run can finish tracking already-running work while paused (#166).
@@ -369,6 +721,7 @@ class Scheduler:
         self._expire_overrun_tasks(current)
 
         supplied = {capacity.agent: capacity for capacity in capacities}
+        supplied.update(event_capacities)
         effective = self._effective_capacities(supplied, current)
         if self.router.select(effective.values(), now=current) is not None:
             self._release_waiting_tasks(current)
@@ -529,7 +882,7 @@ class Scheduler:
                     self._backoff_step = 0
                     return True
 
-            self._handle_result(running, agent, result, current)
+            self._handle_result(running, agent, result, current, effective_capacities=effective)
         finally:
             self.lease_manager.release(task.issue_number, nonce=lease.nonce)
         self._effective_capacities(supplied, current)
@@ -578,7 +931,12 @@ class Scheduler:
                 and cap.source == "provider"
                 and cap.confidence == "high"
             ):
-                self._cooldowns.pop(agent, None)
+                existing_cap = self._cooldowns.get(agent)
+                if existing_cap is None or existing_cap.state not in {
+                    CapacityState.AUTH_ERROR,
+                    CapacityState.DISABLED_BILLING,
+                }:
+                    self._cooldowns.pop(agent, None)
         self._effective_capacities(supplied, current)
         if self.router.select(supplied.values(), now=current) is not None:
             self._release_waiting_tasks(current)
@@ -691,6 +1049,70 @@ class Scheduler:
             # reason is already attached to after_rebase.needs_human_reason.
             return after_rebase
 
+        # #202: rerun verification gates on the post-rebase tree before push/PR,
+        # and record checkpoint evidence for the resulting commit SHA.
+        from subsched.checkpoint import capture_mechanical_checkpoint, save_checkpoint
+        from subsched.verification import run_verification
+
+        self._log(
+            "verification_start",
+            issue_number=verifying.issue_number,
+            agent=agent,
+            task_id=verifying.task_id,
+            data={
+                "commands": len(self.verification_commands),
+                "attempt": verifying.attempt,
+                "post_rebase": True,
+            },
+        )
+        post_rebase_report = run_verification(
+            worktree_dir,
+            self.verification_commands,
+            timeout_seconds=self.verification_timeout_seconds,
+        )
+        self._log(
+            "gate_result",
+            issue_number=verifying.issue_number,
+            agent=agent,
+            task_id=verifying.task_id,
+            data={
+                "passed": post_rebase_report.passed,
+                "attempt": verifying.attempt,
+                "post_rebase": True,
+            },
+        )
+        result_kind = (
+            AgentResultKind.PASS if post_rebase_report.passed else AgentResultKind.FAILURE
+        )
+        cp = capture_mechanical_checkpoint(
+            worktree_dir,
+            verifying.issue_number,
+            AgentResult(result_kind),
+            exit_code=0 if post_rebase_report.passed else 1,
+            test_results=post_rebase_report.summary,
+        )
+        save_checkpoint(worktree_dir, cp)
+
+        if not post_rebase_report.passed:
+            new_verification_failures = verifying.verification_failures + 1
+            retry = verifying.transition(
+                TaskState.RETRY,
+                current_agent=None,
+                increment_attempt=True,
+                now=now,
+                reason=f"post-rebase verification failed: {post_rebase_report.summary}",
+            )
+            retry = replace(retry, verification_failures=new_verification_failures)
+            next_state = (
+                TaskState.NEEDS_HUMAN
+                if new_verification_failures >= self.max_verification_failures
+                else TaskState.READY
+            )
+            return retry.transition(next_state, now=now)
+
+        verification_summary = post_rebase_report.summary
+
+
         # #140: never push a commit whose message contains a GitHub auto-close keyword
         # (Fixes/Closes/Resolves #N) -- that would let a merge auto-close the issue,
         # bypassing the "issues stay open until manual review" invariant. This never
@@ -773,6 +1195,10 @@ class Scheduler:
             AgentResultKind.CAPACITY_SESSION,
             AgentResultKind.CAPACITY_WEEKLY,
             AgentResultKind.CAPACITY_TEMPORARY,
+            AgentResultKind.AUTH_ERROR,
+            AgentResultKind.BILLING_ERROR,
+            AgentResultKind.UNKNOWN_BILLING,
+            AgentResultKind.PERMISSION_DENIED,
             AgentResultKind.TIMEOUT,
         }
     )
@@ -829,7 +1255,35 @@ class Scheduler:
             TaskState.NEEDS_HUMAN, current_agent=agent, now=dispatched_at, reason=readback.reason
         )
 
-    def _handle_result(self, task: Task, agent: str, result: AgentResult, now: datetime) -> None:
+    def _has_available_alternative_agent(
+        self,
+        exclude_agent: str,
+        effective_capacities: dict[str, Capacity] | None,
+        now: datetime,
+    ) -> bool:
+        if effective_capacities is not None:
+            candidates = [
+                c
+                for c in effective_capacities.values()
+                if c.agent != exclude_agent and not self.lease_manager.is_agent_busy(c.agent)
+            ]
+            return self.router.select(candidates, now=now) is not None
+        candidates = [
+            c
+            for c in self._cooldowns.values()
+            if c.agent != exclude_agent and not self.lease_manager.is_agent_busy(c.agent)
+        ]
+        return self.router.select(candidates, now=now) is not None
+
+    def _handle_result(
+        self,
+        task: Task,
+        agent: str,
+        result: AgentResult,
+        now: datetime,
+        *,
+        effective_capacities: dict[str, Capacity] | None = None,
+    ) -> None:
         if result.kind is AgentResultKind.PASS:
             verifying = task.transition(TaskState.VERIFYING, current_agent=agent, now=now)
             self.queue = self.queue.replace(verifying)
@@ -921,32 +1375,61 @@ class Scheduler:
                         "attempt": final.attempt,
                     },
                 )
-        elif result.kind in {AgentResultKind.CAPACITY_SESSION, AgentResultKind.CAPACITY_WEEKLY}:
-            state = (
-                CapacityState.COOLDOWN_SESSION
-                if result.kind is AgentResultKind.CAPACITY_SESSION
-                else CapacityState.COOLDOWN_WEEKLY
+        elif result.kind in {
+            AgentResultKind.CAPACITY_SESSION,
+            AgentResultKind.CAPACITY_WEEKLY,
+            AgentResultKind.CAPACITY_TEMPORARY,
+        }:
+            if result.kind is AgentResultKind.CAPACITY_SESSION:
+                state = CapacityState.COOLDOWN_SESSION
+            elif result.kind is AgentResultKind.CAPACITY_WEEKLY:
+                state = CapacityState.COOLDOWN_WEEKLY
+            else:
+                state = CapacityState.RATE_LIMITED_TEMPORARY
+
+            # #174: use explicit reset_at or bounded backoff (60s) for temporary capacity
+            reset_at = result.reset_at or (
+                now + timedelta(seconds=60)
+                if state is CapacityState.RATE_LIMITED_TEMPORARY
+                else None
             )
-            self._cooldowns = {
-                **self._cooldowns,
-                agent: Capacity(
-                    agent=agent,
-                    state=state,
-                    reset_at=result.reset_at,
-                    observed_at=now,
-                    source="structured_result",
-                    confidence="high",
-                ),
-            }
+            from subsched.capacity.base import BLOCKER_SEVERITY
+
+            existing_cap = self._cooldowns.get(agent)
+            should_update_cooldown = (
+                existing_cap is None
+                or BLOCKER_SEVERITY.get(state, 0) >= BLOCKER_SEVERITY.get(existing_cap.state, 0)
+            )
+            if should_update_cooldown:
+                self._cooldowns = {
+                    **self._cooldowns,
+                    agent: Capacity(
+                        agent=agent,
+                        state=state,
+                        reset_at=reset_at,
+                        observed_at=now,
+                        source="structured_result",
+                        confidence="high",
+                    ),
+                }
             new_capacity_events = task.capacity_events + 1
+            # #174: CAPACITY_TEMPORARY is a transient saturation event rather than
+            # a session/weekly quota cutoff, so it does not increment agent_switches
+            # and does not escalate to NEEDS_HUMAN on repeated occurrences.
+            new_agent_switches = (
+                task.agent_switches
+                if result.kind is AgentResultKind.CAPACITY_TEMPORARY
+                else task.agent_switches + 1
+            )
             switched = replace(
                 task,
-                agent_switches=task.agent_switches + 1,
+                agent_switches=new_agent_switches,
                 capacity_events=new_capacity_events,
             )
             self.queue = self.queue.replace(switched)
             if switched.agent_switches >= self.max_agent_switches:
                 waiting = switched.transition(TaskState.WAITING_CAPACITY, current_agent=None)
+
                 final_capacity_task = waiting.transition(TaskState.NEEDS_HUMAN, current_agent=None)
                 self.queue = self.queue.replace(final_capacity_task)
                 self._log(
@@ -973,6 +1456,105 @@ class Scheduler:
                         "to_state": TaskState.READY.value,
                         "capacity_state": state.value,
                         "attempt": task.attempt,
+                    },
+                )
+        elif result.kind is AgentResultKind.PERMISSION_DENIED:
+            reason = f"permission denied: {result.output or 'agent reported PERMISSION_DENIED'}"
+            final = task.transition(
+                TaskState.NEEDS_HUMAN, current_agent=None, now=now, reason=reason
+            )
+            self.queue = self.queue.replace(final)
+            self._log(
+                "task_transition",
+                level="ERROR",
+                issue_number=final.issue_number,
+                agent=agent,
+                task_id=final.task_id,
+                message=reason,
+                data={
+                    "from_state": task.status.value,
+                    "to_state": final.status.value,
+                    "attempt": final.attempt,
+                    "result_kind": result.kind.value,
+                },
+            )
+        elif result.kind in {
+            AgentResultKind.AUTH_ERROR,
+            AgentResultKind.BILLING_ERROR,
+            AgentResultKind.UNKNOWN_BILLING,
+        }:
+            target_state = (
+                CapacityState.AUTH_ERROR
+                if result.kind is AgentResultKind.AUTH_ERROR
+                else CapacityState.DISABLED_BILLING
+            )
+            from subsched.capacity.base import BLOCKER_SEVERITY
+
+            existing_cap = self._cooldowns.get(agent)
+            should_update_cooldown = (
+                existing_cap is None
+                or BLOCKER_SEVERITY.get(target_state, 0)
+                >= BLOCKER_SEVERITY.get(existing_cap.state, 0)
+            )
+            if should_update_cooldown:
+                self._cooldowns = {
+                    **self._cooldowns,
+                    agent: Capacity(
+                        agent=agent,
+                        state=target_state,
+                        reset_at=None,
+                        observed_at=now,
+                        source="structured_result",
+                        confidence="high",
+                    ),
+                }
+            if self._has_available_alternative_agent(
+                exclude_agent=agent,
+                effective_capacities=effective_capacities,
+                now=now,
+            ):
+                self.queue = self.queue.requeue_after_capacity_event(task.issue_number)
+                self._log(
+                    "task_transition",
+                    level="WARN",
+                    issue_number=task.issue_number,
+                    agent=agent,
+                    task_id=task.task_id,
+                    data={
+                        "from_state": task.status.value,
+                        "to_state": TaskState.READY.value,
+                        "capacity_state": target_state.value,
+                        "failover": True,
+                        "attempt": task.attempt,
+                    },
+                )
+            else:
+                error_label = (
+                    "auth error"
+                    if result.kind is AgentResultKind.AUTH_ERROR
+                    else "billing error"
+                )
+                reason = f"{error_label} for agent '{agent}': no alternative agent available"
+                final = task.transition(
+                    TaskState.NEEDS_HUMAN,
+                    current_agent=None,
+                    now=now,
+                    reason=reason,
+                )
+                self.queue = self.queue.replace(final)
+                self._log(
+                    "task_transition",
+                    level="ERROR",
+                    issue_number=final.issue_number,
+                    agent=agent,
+                    task_id=final.task_id,
+                    message=reason,
+                    data={
+                        "from_state": task.status.value,
+                        "to_state": final.status.value,
+                        "capacity_state": target_state.value,
+                        "failover": False,
+                        "attempt": final.attempt,
                     },
                 )
         else:

@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -91,6 +92,41 @@ def test_saved_cli_metadata_records_required_live_flags() -> None:
         "--strict-config",
     ):
         assert flag in help_output
+
+
+def test_parse_codex_cli_metadata_success() -> None:
+    from subsched.agents.codex import parse_codex_cli_metadata
+
+    version = _fixture("cli-version.txt")
+    help_output = _fixture("cli-exec-help.txt")
+
+    meta = parse_codex_cli_metadata(version_output=version, help_output=help_output)
+    assert meta.version == "0.147.0"
+    assert meta.supports_json_output is True
+    assert meta.supports_output_schema is True
+    assert meta.supports_sandbox is True
+    assert meta.supports_ephemeral is True
+    assert meta.supports_strict_config is True
+    assert meta.supports_ignore_rules is True
+    assert meta.supports_ignore_user_config is True
+    assert meta.supports_ask_for_approval is True
+
+
+def test_parse_codex_cli_metadata_rejects_missing_required_flag() -> None:
+    from subsched.agents.codex import CodexCliMetadataError, parse_codex_cli_metadata
+
+    version = _fixture("cli-version.txt")
+    with pytest.raises(CodexCliMetadataError, match="required Codex CLI flags are missing"):
+        parse_codex_cli_metadata(version_output=version, help_output="--json --sandbox")
+
+
+def test_parse_codex_cli_metadata_rejects_unrecognized_version() -> None:
+    from subsched.agents.codex import CodexCliMetadataError, parse_codex_cli_metadata
+
+    help_output = _fixture("cli-exec-help.txt")
+    with pytest.raises(CodexCliMetadataError, match="unrecognized Codex CLI version"):
+        parse_codex_cli_metadata(version_output="invalid version string", help_output=help_output)
+
 
 
 @pytest.mark.parametrize(
@@ -686,3 +722,421 @@ def test_codex_parse_jsonl_returncode_error() -> None:
     res = parse_codex_jsonl(payload, returncode=1)
     assert res.kind is AgentResultKind.FAILURE
     assert "execution failed" in res.output
+
+
+def test_validate_absolute_file_error(tmp_path: Path) -> None:
+    from subsched.agents.codex import _validate_absolute_file
+
+    with pytest.raises(ValueError, match="must be an absolute, existing, non-symlink file"):
+        _validate_absolute_file(Path("relative/path"), "desc")
+    with pytest.raises(ValueError, match="must be an absolute, existing, non-symlink file"):
+        _validate_absolute_file(tmp_path / "non_existent", "desc")
+    with pytest.raises(ValueError, match="must be an absolute, existing, non-symlink file"):
+        _validate_absolute_file(tmp_path, "desc")
+
+
+def test_codex_jsonl_additional_malformed_and_failure_branches() -> None:
+    # terminal_index not at end
+    events_terminal_not_end = [
+        json.dumps({"type": "error", "message": "fail"}),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
+    res_not_end = parse_codex_jsonl("\n".join(events_terminal_not_end), returncode=0)
+    assert res_not_end.kind is AgentResultKind.FAILURE
+
+    # events[1] not turn.started
+    pass_msg = json.dumps({"result": "pass", "summary": "ok"})
+    events_bad_turn_start = [
+        json.dumps({"type": "thread.started", "thread_id": "th_1"}),
+        json.dumps({"type": "something_else"}),
+        json.dumps(
+            {"type": "item.completed", "item": {"type": "agent_message", "text": pass_msg}}
+        ),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
+    res_bad_start = parse_codex_jsonl("\n".join(events_bad_turn_start), returncode=0)
+    assert res_bad_start.kind is AgentResultKind.FAILURE
+
+    # item agent_message without str text
+    events_bad_text = [
+        json.dumps({"type": "thread.started", "thread_id": "th_1"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": 12345}}),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
+    res_bad_text = parse_codex_jsonl("\n".join(events_bad_text), returncode=0)
+    assert res_bad_text.kind is AgentResultKind.FAILURE
+
+    # turn.failed with invalid error
+    bad_err1 = json.dumps({"type": "turn.failed", "error": "not-dict"})
+    assert parse_codex_jsonl(bad_err1, returncode=0).kind is AgentResultKind.FAILURE
+    bad_err2 = json.dumps({"type": "turn.failed", "error": {"message": 123}})
+    assert parse_codex_jsonl(bad_err2, returncode=0).kind is AgentResultKind.FAILURE
+
+    # empty payload
+    assert parse_codex_jsonl("", returncode=0).kind is AgentResultKind.FAILURE
+    assert parse_codex_jsonl("   \n  \n", returncode=0).kind is AgentResultKind.FAILURE
+
+    # final message not json or invalid schema
+    events_final_not_json = [
+        json.dumps({"type": "thread.started", "thread_id": "th_1"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps(
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "not-json"}}
+        ),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
+    res_not_json = parse_codex_jsonl("\n".join(events_final_not_json), returncode=0)
+    assert res_not_json.kind is AgentResultKind.FAILURE
+
+    bad_schema_text = json.dumps({"result": "invalid"})
+    events_final_bad_schema = [
+        json.dumps({"type": "thread.started", "thread_id": "th_1"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps(
+            {"type": "item.completed", "item": {"type": "agent_message", "text": bad_schema_text}}
+        ),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
+    res_bad_schema = parse_codex_jsonl("\n".join(events_final_bad_schema), returncode=0)
+    assert res_bad_schema.kind is AgentResultKind.FAILURE
+
+    # final message reported failure
+    fail_summary_text = json.dumps({"result": "failure", "summary": "failed to fix"})
+    events_final_failure = [
+        json.dumps({"type": "thread.started", "thread_id": "th_1"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": fail_summary_text},
+            }
+        ),
+        json.dumps({"type": "turn.completed", "usage": {}}),
+    ]
+    res_final_fail = parse_codex_jsonl("\n".join(events_final_failure), returncode=0)
+    assert res_final_fail.kind is AgentResultKind.FAILURE
+    assert "reported failure" in res_final_fail.output
+
+    # failure with approval required
+    approval_err = json.dumps({"type": "error", "message": "approval required by user"})
+    res_approval = parse_codex_jsonl(approval_err, returncode=0)
+    assert res_approval.kind is AgentResultKind.FAILURE
+    assert "approval required" in res_approval.output
+
+    # failure with generic/unknown error
+    generic_err = json.dumps({"type": "error", "message": "something unusual crashed"})
+    res_generic = parse_codex_jsonl(generic_err, returncode=0)
+    assert res_generic.kind is AgentResultKind.FAILURE
+    assert "execution failed" in res_generic.output
+
+    # _parse_reset_at with non-str
+    from subsched.agents.codex import _parse_reset_at
+
+    assert _parse_reset_at(12345) is None
+    assert _parse_reset_at("invalid-date") is None
+
+
+def test_run_codex_probe_validation_and_io_errors(tmp_path: Path) -> None:
+    exe = tmp_path / "codex"
+    exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    exe.chmod(0o755)
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    config = CodexProbeConfig(executable=exe, cwd=tmp_path, output_schema=schema)
+
+    # empty prompt
+    with pytest.raises(ValueError, match="prompt must not be empty"):
+        run_codex_probe(config, "   ", allow_live=True, subscription_billing_verified=True)
+
+    # _write_prompt with stdin is None
+    class FakeProcNoneIO:
+        stdin = None
+        stdout = None
+
+    import queue
+
+    from subsched.agents.codex import _read_bounded_output, _write_prompt
+
+    in_q: queue.Queue[bool] = queue.Queue()
+    _write_prompt(FakeProcNoneIO(), b"prompt", in_q)  # type: ignore[arg-type]
+    assert in_q.get() is True
+
+    # _read_bounded_output with stdout is None
+    out_q: queue.Queue[tuple[bytes, bool, bool]] = queue.Queue()
+    _read_bounded_output(FakeProcNoneIO(), 1024, out_q)  # type: ignore[arg-type]
+    _, _, read_failed = out_q.get()
+    assert read_failed is True
+
+
+def test_codex_agent_execute_timeout_and_limit_branches() -> None:
+    import subsched.agents.codex as codex_mod
+    from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
+    from subsched.agents.codex import CodexAgent
+
+    agent = CodexAgent(allow_live=True, subscription_billing_verified=True)
+    req = ProcessExecutionRequest(
+        argv=("echo", "hi"),
+        cwd=Path.cwd(),
+        env={},
+        stdin_payload=b"",
+        timeout_seconds=10,
+        grace_seconds=1,
+        output_limit_bytes=1000,
+    )
+
+    # timed_out and cleanup failed
+    def mock_run_timeout_cleanup_fail(request: Any) -> ProcessExecutionResult:
+        return ProcessExecutionResult(
+            exit_code=-15,
+            stdout="",
+            stderr="",
+            timed_out=True,
+            output_limit_exceeded=False,
+            cleanup_succeeded=False,
+        )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(codex_mod, "run_process_group", mock_run_timeout_cleanup_fail)
+    res = agent.execute(req)
+    assert res.kind is AgentResultKind.PROCESS_CLEANUP_FAILED
+
+    # timed_out and cleanup succeeded
+    def mock_run_timeout_cleanup_ok(request: Any) -> ProcessExecutionResult:
+        return ProcessExecutionResult(
+            exit_code=-15,
+            stdout="",
+            stderr="",
+            timed_out=True,
+            output_limit_exceeded=False,
+            cleanup_succeeded=True,
+        )
+
+    monkeypatch.setattr(codex_mod, "run_process_group", mock_run_timeout_cleanup_ok)
+    res = agent.execute(req)
+    assert res.kind is AgentResultKind.TIMEOUT
+
+    # output limit exceeded
+    def mock_run_limit_exceeded(request: Any) -> ProcessExecutionResult:
+        return ProcessExecutionResult(
+            exit_code=0,
+            stdout="",
+            stderr="",
+            timed_out=False,
+            output_limit_exceeded=True,
+            cleanup_succeeded=True,
+        )
+
+    monkeypatch.setattr(codex_mod, "run_process_group", mock_run_limit_exceeded)
+    res = agent.execute(req)
+    assert res.kind is AgentResultKind.FAILURE
+    assert "output limit exceeded" in res.output
+    monkeypatch.undo()
+
+
+def test_stop_process_group_oserror() -> None:
+    from subsched.agents.codex import _stop_process_group
+
+    class FakeProc:
+        pid = 999999
+
+        def wait(self, timeout: float = 0) -> None:
+            pass
+
+    monkeypatch = pytest.MonkeyPatch()
+
+    def mock_killpg(pid: int, sig: int) -> None:
+        raise PermissionError("EPERM")
+
+    monkeypatch.setattr(os, "killpg", mock_killpg)
+    assert _stop_process_group(FakeProc(), grace_seconds=0.01) is False  # type: ignore[arg-type]
+    monkeypatch.undo()
+
+
+def test_run_codex_probe_popen_error(tmp_path: Path) -> None:
+    exe = tmp_path / "codex"
+    exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    exe.chmod(0o755)
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    config = CodexProbeConfig(executable=exe, cwd=tmp_path, output_schema=schema)
+
+    monkeypatch = pytest.MonkeyPatch()
+
+    def mock_popen(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("cannot spawn")
+
+    monkeypatch.setattr(subprocess, "Popen", mock_popen)
+    res = run_codex_probe(config, "prompt", allow_live=True, subscription_billing_verified=True)
+    assert res.kind is AgentResultKind.FAILURE
+    assert "unavailable" in res.output
+    monkeypatch.undo()
+
+
+def test_codex_lifecycle_and_io_edge_cases() -> None:
+    import queue
+
+    from subsched.agents.codex import (
+        _failure_from_event,
+        _read_bounded_output,
+        _valid_failure_lifecycle,
+    )
+
+    # _failure_from_event with unknown type
+    assert _failure_from_event({"type": "custom_event"}) is None
+
+    # _valid_failure_lifecycle with terminal_type not error or turn.failed
+    assert _valid_failure_lifecycle(({"type": "turn.started"},)) is False
+
+    # _read_bounded_output when read raises OSError
+    class FakeStdoutError:
+        def read(self, n: int) -> bytes:
+            raise OSError("io error")
+
+    class FakeProcWithStdoutError:
+        stdout = FakeStdoutError()
+        pid = 1234
+
+    out_q: queue.Queue[tuple[bytes, bool, bool]] = queue.Queue()
+    _read_bounded_output(FakeProcWithStdoutError(), 1024, out_q)  # type: ignore[arg-type]
+    _, _, read_failed = out_q.get()
+    assert read_failed is True
+
+
+def test_parse_codex_jsonl_accepts_documented_tool_lifecycle_events() -> None:
+    """#205: Codex JSONL stream containing documented command/file tool events must be
+    accepted and parse the final structured agent_message as PASS."""
+    final_json = json.dumps({"result": "pass", "summary": "Implemented change and verified"})
+    events = [
+        {"type": "thread.started", "thread_id": "thread-audit"},
+        {"type": "turn.started"},
+        {
+            "type": "item.started",
+            "item": {
+                "id": "item_cmd_1",
+                "type": "command_execution",
+                "command": "git status --short",
+                "status": "in_progress",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_cmd_1",
+                "type": "command_execution",
+                "command": "git status --short",
+                "aggregated_output": "",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.started",
+            "item": {
+                "id": "item_file_1",
+                "type": "file_change",
+                "path": "src/module.py",
+                "status": "in_progress",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_file_1",
+                "type": "file_change",
+                "path": "src/module.py",
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_msg_final",
+                "type": "agent_message",
+                "text": final_json,
+            },
+        },
+        {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 50}},
+    ]
+    payload = "\n".join(json.dumps(e) for e in events)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.PASS
+    assert res.output == "codex completed"
+
+
+def test_parse_codex_jsonl_rejects_plain_text_final_message() -> None:
+    """#205: When final agent message is prose instead of required JSON schema, fail closed."""
+    events = [
+        {"type": "thread.started", "thread_id": "thread-audit"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_1",
+                "type": "agent_message",
+                "text": "I implemented the changes and all tests pass.",
+            },
+        },
+        {"type": "turn.completed", "usage": {}},
+    ]
+    payload = "\n".join(json.dumps(e) for e in events)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.FAILURE
+    assert res.output == "codex event stream malformed"
+
+
+def test_parse_codex_jsonl_rejects_unclosed_item_lifecycle() -> None:
+    """#205: If item.started is not completed before turn.completed, stream is malformed."""
+    events = [
+        {"type": "thread.started", "thread_id": "thread-audit"},
+        {"type": "turn.started"},
+        {
+            "type": "item.started",
+            "item": {
+                "id": "item_cmd_1",
+                "type": "command_execution",
+                "command": "pytest",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_msg_final",
+                "type": "agent_message",
+                "text": json.dumps({"result": "pass", "summary": "Done"}),
+            },
+        },
+        {"type": "turn.completed", "usage": {}},
+    ]
+    payload = "\n".join(json.dumps(e) for e in events)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.FAILURE
+    assert res.output == "codex event stream malformed"
+
+
+def test_parse_codex_jsonl_rejects_unknown_item_type() -> None:
+    """#205: Unknown item type must fail closed as malformed."""
+    events = [
+        {"type": "thread.started", "thread_id": "thread-audit"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_unknown",
+                "type": "unrecognized_future_tool",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_msg_final",
+                "type": "agent_message",
+                "text": json.dumps({"result": "pass", "summary": "Done"}),
+            },
+        },
+        {"type": "turn.completed", "usage": {}},
+    ]
+    payload = "\n".join(json.dumps(e) for e in events)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.FAILURE
+    assert res.output == "codex event stream malformed"

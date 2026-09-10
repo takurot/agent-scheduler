@@ -85,6 +85,8 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
         {
             TaskState.DISPATCHED,
             TaskState.WAITING_CAPACITY,
+            TaskState.WAITING_DEPENDENCY,
+            TaskState.BLOCKED,
             # #137: a READY task whose execution.max_task_runtime budget has already
             # been exhausted by prior attempts must be expired to NEEDS_HUMAN before
             # ever being redispatched, not silently dispatched again.
@@ -187,23 +189,42 @@ def parse_dependencies(body: str) -> tuple[int, ...]:
 
 def detect_dependency_cycles(tasks: Iterable[Task]) -> set[int]:
     task_map = {task.issue_number: task.dependencies for task in tasks}
+
+    VISITING = 1
+    SAFE = 2
+    IN_CYCLE = 3
+
+    state: dict[int, int] = {}
     in_cycle: set[int] = set()
 
-    for start_node in task_map:
-        def dfs(node: int, path: set[int]) -> bool:
-            if node in path:
-                in_cycle.add(node)
-                return True
-            path.add(node)
-            has_cycle = False
-            for dep in task_map.get(node, ()):
-                if dfs(dep, path):
-                    in_cycle.add(node)
-                    has_cycle = True
-            path.remove(node)
-            return has_cycle
+    def dfs(node: int) -> bool:
+        current_state = state.get(node)
+        if current_state == VISITING:
+            in_cycle.add(node)
+            return True
+        if current_state == SAFE:
+            return False
+        if current_state == IN_CYCLE:
+            return True
 
-        dfs(start_node, set())
+        state[node] = VISITING
+        has_cycle = False
+        for dep in task_map.get(node, ()):
+            if dfs(dep):
+                in_cycle.add(node)
+                has_cycle = True
+
+        if has_cycle:
+            state[node] = IN_CYCLE
+            in_cycle.add(node)
+            return True
+
+        state[node] = SAFE
+        return False
+
+    for start_node in task_map:
+        if start_node not in state:
+            dfs(start_node)
 
     return in_cycle
 
