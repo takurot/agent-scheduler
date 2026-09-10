@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import signal
 import subprocess
 import threading
@@ -20,6 +21,60 @@ from subsched.models import AgentResult, AgentResultKind
 
 class CodexProbeSafetyError(RuntimeError):
     """Raised before execution when the live-provider safety gate is not satisfied."""
+
+
+class CodexCliMetadataError(ValueError):
+    """Raised when installed Codex CLI capabilities or metadata are incompatible."""
+
+
+@dataclass(frozen=True, slots=True)
+class CodexCliMetadata:
+    version: str
+    supports_json_output: bool
+    supports_output_schema: bool
+    supports_sandbox: bool
+    supports_ephemeral: bool
+    supports_strict_config: bool
+    supports_ignore_rules: bool
+    supports_ignore_user_config: bool
+    supports_ask_for_approval: bool
+
+
+REQUIRED_CODEX_HEADLESS_FLAGS = frozenset(
+    {
+        "--json",
+        "--ask-for-approval",
+        "--output-schema",
+        "--sandbox",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--strict-config",
+    }
+)
+
+
+def parse_codex_cli_metadata(*, version_output: str, help_output: str) -> CodexCliMetadata:
+    version_match = re.search(r"(\d+\.\d+\.\d+)", version_output)
+    if version_match is None:
+        raise CodexCliMetadataError("unrecognized Codex CLI version")
+    missing = sorted(flag for flag in REQUIRED_CODEX_HEADLESS_FLAGS if flag not in help_output)
+    if missing:
+        raise CodexCliMetadataError(
+            f"required Codex CLI flags are missing: {', '.join(missing)}"
+        )
+    return CodexCliMetadata(
+        version=version_match.group(1),
+        supports_json_output=True,
+        supports_output_schema=True,
+        supports_sandbox=True,
+        supports_ephemeral=True,
+        supports_strict_config=True,
+        supports_ignore_rules=True,
+        supports_ignore_user_config=True,
+        supports_ask_for_approval=True,
+    )
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +136,38 @@ def build_codex_exec_argv(config: CodexProbeConfig) -> tuple[str, ...]:
     )
 
 
+CODEX_OUTPUT_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["result", "summary"],
+    "properties": {
+        "result": {"enum": ["pass", "failure"]},
+        "summary": {"type": "string"},
+    },
+}
+
+SUPPORTED_CODEX_ITEM_TYPES = frozenset(
+    {
+        "agent_message",
+        "command_execution",
+        "file_change",
+        "tool_call",
+        "reasoning",
+        "web_search",
+    }
+)
+
+
+def ensure_codex_output_schema(path: Path) -> Path:
+    """Ensure the standard Codex output schema file exists at path."""
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content = json.dumps(CODEX_OUTPUT_SCHEMA, indent=2) + "\n"
+        path.write_text(content, encoding="utf-8")
+    return path
+
+
 def parse_codex_jsonl(payload: str, *, returncode: int) -> AgentResult:
     """Normalize a complete Codex JSONL event stream to the shared AgentResult contract."""
     events = _load_events(payload)
@@ -123,23 +210,46 @@ def parse_codex_jsonl(payload: str, *, returncode: int) -> AgentResult:
         return _malformed_result()
 
     final_message: str | None = None
-    message_count = 0
+    open_items: dict[str, str] = {}
     for event in events[2:-1]:
         event_type = event.get("type")
-        if event_type == "item.completed":
-            item = event.get("item")
-            if not isinstance(item, dict) or item.get("type") != "agent_message":
-                return _malformed_result()
-            if not isinstance(item.get("text"), str):
-                return _malformed_result()
-            final_message = item["text"]
-            message_count += 1
-        else:
+        if event_type not in {"item.started", "item.completed"}:
+            return _malformed_result()
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return _malformed_result()
+        item_type = item.get("type")
+        if not isinstance(item_type, str) or item_type not in SUPPORTED_CODEX_ITEM_TYPES:
             return _malformed_result()
 
+        item_id = item.get("id")
+        if item_id is not None and not isinstance(item_id, str):
+            return _malformed_result()
+
+        if event_type == "item.started":
+            if item_id is not None:
+                if item_id in open_items:
+                    return _malformed_result()
+                open_items[item_id] = item_type
+        else:
+            assert event_type == "item.completed"
+            if item_id is not None and item_id in open_items:
+                if open_items[item_id] != item_type:
+                    return _malformed_result()
+                del open_items[item_id]
+            if item_type == "agent_message":
+                text = item.get("text")
+                if not isinstance(text, str):
+                    return _malformed_result()
+                if final_message is not None:
+                    return _malformed_result()
+                final_message = text
+
+    if open_items:
+        return _malformed_result()
     if returncode != 0:
         return AgentResult(AgentResultKind.FAILURE, output="codex execution failed")
-    if final_message is None or message_count != 1:
+    if final_message is None:
         return _malformed_result()
     return _parse_final_message(final_message)
 
