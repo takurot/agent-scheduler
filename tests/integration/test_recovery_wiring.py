@@ -406,7 +406,11 @@ def test_interrupted_verifying_task_with_existing_pr_recovers_to_ready_for_revie
     tmp_path: Path, monkeypatch
 ) -> None:
     """#203: if a PR was already created before interruption, recover to READY_FOR_REVIEW."""
-    from subsched.github.pull_requests import PullRequestInfo
+    from subsched.github.pull_requests import (
+        ExistingPrCheckKind,
+        ExistingPrCheckResult,
+        PullRequestInfo,
+    )
 
     worktree_root = tmp_path / "worktrees"
     wt = worktree_root / "issue-3"
@@ -432,7 +436,9 @@ def test_interrupted_verifying_task_with_existing_pr_recovers_to_ready_for_revie
     )
     monkeypatch.setattr(
         "subsched.github.pull_requests.lookup_existing_pr",
-        lambda branch_name, repo=None, env=None, timeout_seconds=30.0: fake_pr,
+        lambda *args, **kwargs: ExistingPrCheckResult(
+            kind=ExistingPrCheckKind.CONFIRMED, info=fake_pr
+        ),
     )
 
     scheduler = Scheduler(

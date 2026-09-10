@@ -93,9 +93,20 @@ def _no_real_merged_pr_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def mock_github(monkeypatch: pytest.MonkeyPatch) -> None:
     def list_open(
-        self: GitHubIssueSource, repo: str, *, label: str | None = None
+        self: GitHubIssueSource,
+        repo: str,
+        *,
+        label: str | None = None,
+        labels: tuple[str, ...] = (),
+        limit: int = 1000,
+        **kwargs: object,
     ) -> tuple[Issue, ...]:
-        return tuple(Issue(number=n, title=f"Scenario Issue {n}") for n in (10, 20, 30))
+        labels_list = ([label] if label else []) + list(labels) + ["ai-ready"]
+        active_labels = tuple(dict.fromkeys(labels_list))
+        return tuple(
+            Issue(number=n, title=f"Scenario Issue {n}", labels=active_labels)
+            for n in (10, 20, 30)
+        )
 
     monkeypatch.setattr(GitHubIssueSource, "list_open", list_open)
 
