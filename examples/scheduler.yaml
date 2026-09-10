@@ -2,8 +2,10 @@ github:
   repo: owner/project
   # Optional. Omit to resolve the repository default branch via GitHub.
   # base_branch: develop
+  # Multiple include_labels use AND semantics (all labels required)
   include_labels:
     - ai-ready
+  # Multiple exclude_labels use OR semantics (any label causes exclusion)
   exclude_labels:
     - blocked
     - human-only
@@ -11,6 +13,15 @@ github:
   completion:
     create_pr: true
     close_issue: false
+
+# Supported agents: claude, codex. At least one agent must remain enabled.
+agents:
+  claude:
+    enabled: true
+    priority: 100
+  codex:
+    enabled: true
+    priority: 90
 
 routing:
   strategy: capacity-aware

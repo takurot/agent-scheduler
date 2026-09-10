@@ -1,3 +1,4 @@
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -11,6 +12,7 @@ from subsched.models import (
     StateTransitionError,
     Task,
     TaskState,
+    detect_dependency_cycles,
 )
 
 
@@ -151,8 +153,6 @@ def test_self_dependency_creates_blocked_task() -> None:
 
 
 def test_detect_dependency_cycles() -> None:
-    from subsched.models import detect_dependency_cycles
-
     t1 = Task(
         task_id="github-1",
         issue_number=1,
@@ -188,3 +188,49 @@ def test_detect_dependency_cycles() -> None:
 
     cycles = detect_dependency_cycles((t1, t2, t3, t4))
     assert cycles == {1, 2, 3}
+
+
+def test_detect_dependency_cycles_shared_acyclic_dag_bounded() -> None:
+    # 38-node Fibonacci-like DAG: i depends on i-1 and i-2 (acyclic)
+    tasks = [
+        Task(
+            task_id=f"github-{i}",
+            issue_number=i,
+            title=f"Task {i}",
+            labels=(),
+            status=TaskState.WAITING_DEPENDENCY if i > 1 else TaskState.READY,
+            dependencies=tuple(sorted(j for j in [i - 1, i - 2] if j > 0)),
+        )
+        for i in range(1, 39)
+    ]
+    start = time.monotonic()
+    cycles = detect_dependency_cycles(tasks)
+    elapsed = time.monotonic() - start
+    assert cycles == set()
+    # Must complete in well under 0.5 seconds (linear O(V+E), vs exponential taking seconds/minutes)
+    assert elapsed < 0.5
+
+
+def test_detect_dependency_cycles_diamond_and_downstream() -> None:
+    # 1 -> 2, 3 -> 4 (diamond, acyclic)
+    # 5 -> 6 -> 5 (cycle)
+    # 7 -> 5 (depends on cycle)
+    # 8 -> 1 (depends on acyclic diamond)
+    tasks = [
+        Task("gh-1", 1, "1", (), TaskState.WAITING_DEPENDENCY, dependencies=(2, 3)),
+        Task("gh-2", 2, "2", (), TaskState.WAITING_DEPENDENCY, dependencies=(4,)),
+        Task("gh-3", 3, "3", (), TaskState.WAITING_DEPENDENCY, dependencies=(4,)),
+        Task("gh-4", 4, "4", (), TaskState.READY, dependencies=()),
+        Task("gh-5", 5, "5", (), TaskState.WAITING_DEPENDENCY, dependencies=(6,)),
+        Task("gh-6", 6, "6", (), TaskState.WAITING_DEPENDENCY, dependencies=(5,)),
+        Task("gh-7", 7, "7", (), TaskState.WAITING_DEPENDENCY, dependencies=(5,)),
+        Task("gh-8", 8, "8", (), TaskState.WAITING_DEPENDENCY, dependencies=(1,)),
+    ]
+    cycles = detect_dependency_cycles(tasks)
+    assert cycles == {5, 6, 7}
+
+
+def test_detect_dependency_cycles_self_cycle() -> None:
+    t1 = Task("gh-1", 1, "1", (), TaskState.WAITING_DEPENDENCY, dependencies=(1,))
+    t2 = Task("gh-2", 2, "2", (), TaskState.READY, dependencies=())
+    assert detect_dependency_cycles((t1, t2)) == {1}

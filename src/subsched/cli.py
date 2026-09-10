@@ -3,7 +3,6 @@ from __future__ import annotations
 import functools
 import re
 import secrets
-import shutil
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -13,6 +12,7 @@ from typing import Annotated
 
 import typer
 
+from subsched.agents import SUPPORTED_AGENTS
 from subsched.agents.claude import ClaudeBillingMode, ClaudeExecutionPolicy
 from subsched.agents.native import NativeWorker
 from subsched.capacity.claude import ClaudeCapacitySensor
@@ -34,6 +34,7 @@ from subsched.github.issues import (
 )
 from subsched.github.pull_requests import check_merged_pr_for_issue
 from subsched.models import Capacity, TaskState
+from subsched.preflight import validate_native_preflight
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler
 from subsched.storage import (
@@ -95,6 +96,7 @@ class ResolvedIntent:
     label: str | None
     # "all-open", a comma-separated issue-number string, or None (only when label is set).
     issues: str | None
+    labels: tuple[str, ...] = ()
 
 
 def _resolve_intent(
@@ -118,6 +120,16 @@ def _resolve_intent(
                 resolved_issues = intent.issues
             if intent.label and resolved_label is None and resolved_issues is None:
                 resolved_label = intent.label
+
+            parsed_parts: list[str] = []
+            if intent.repo:
+                parsed_parts.append(f"repo='{intent.repo}'")
+            if intent.label:
+                parsed_parts.append(f"label='{intent.label}'")
+            if intent.issues:
+                parsed_parts.append(f"issues='{intent.issues}'")
+            if parsed_parts:
+                typer.echo(f"Parsed intent: {', '.join(parsed_parts)}")
         except ConfigError as error:
             raise typer.BadParameter(str(error)) from error
 
@@ -137,6 +149,12 @@ def _resolve_intent(
     if resolved_label is not None and resolved_issues is not None:
         raise typer.BadParameter("select exactly one of --label or --issues")
 
+    resolved_labels: tuple[str, ...] = ()
+    if resolved_label is not None:
+        resolved_labels = tuple(
+            item.strip() for item in resolved_label.split(",") if item.strip()
+        )
+
     if resolved_label is None and resolved_issues is None:
         # CLI --label/--issues (and natural-language query) are already applied above and
         # take precedence over config -- this branch only runs when neither was given, so
@@ -146,7 +164,8 @@ def _resolve_intent(
         elif cfg.github.mode == "list" and cfg.github.issues:
             resolved_issues = ",".join(str(n) for n in cfg.github.issues)
         elif cfg.github.mode == "label" and cfg.github.include_labels:
-            resolved_label = cfg.github.include_labels[0]
+            resolved_labels = tuple(cfg.github.include_labels)
+            resolved_label = ", ".join(resolved_labels)
         else:
             raise typer.BadParameter("select exactly one of --label or --issues")
 
@@ -156,7 +175,13 @@ def _resolve_intent(
     if resolved_issues is not None and resolved_issues != "all-open":
         _parse_issue_numbers(resolved_issues)
 
-    return ResolvedIntent(cfg=cfg, repo=resolved_repo, label=resolved_label, issues=resolved_issues)
+    return ResolvedIntent(
+        cfg=cfg,
+        repo=resolved_repo,
+        label=resolved_label,
+        issues=resolved_issues,
+        labels=resolved_labels,
+    )
 
 
 def _format_effective_config_summary(
@@ -168,7 +193,12 @@ def _format_effective_config_summary(
     discovery or state mutation happens (#144). Never includes Issue body, agent output,
     or credentials; every value here is already validated config/CLI input.
     """
-    if intent.label is not None:
+    if intent.labels:
+        if len(intent.labels) > 1:
+            selection = f"labels={', '.join(intent.labels)}"
+        else:
+            selection = f"label={intent.labels[0]}"
+    elif intent.label is not None:
         selection = f"label={intent.label}"
     elif intent.issues == "all-open":
         selection = "all-open"
@@ -370,17 +400,45 @@ def run(
                 err=True,
             )
             raise typer.Exit(2)
-        missing_cmds = [
-            cmd for cmd in ("git", "gh", "claude", "codex") if shutil.which(cmd) is None
-        ]
-        if missing_cmds:
-            joined = ", ".join(missing_cmds)
+
+        # #189: only enabled agents are required in native pre-flight check
+        enabled_agents = (
+            tuple(
+                name for name, s in cfg.agents.items() if s.enabled and name in SUPPORTED_AGENTS
+            )
+            if cfg.agents
+            else tuple(SUPPORTED_AGENTS)
+        )
+        if not enabled_agents:
             typer.echo(
-                f"Native execution pre-flight doctor check failed; missing commands: {joined}",
+                "Native execution blocked: no agents are enabled in configuration.",
                 err=True,
             )
             raise typer.Exit(2)
-        typer.echo("Pre-flight safety checks passed: subscription verified, API fallback disabled.")
+
+        effective_push = not dry_run and cfg.github.completion.create_pr
+        report = validate_native_preflight(
+            enabled_agents=enabled_agents,
+            write_policy_requires_auth=effective_push,
+        )
+        if not report.passed:
+            missing_names = [c.name for c in report.checks if not c.found]
+            if missing_names:
+                joined = ", ".join(missing_names)
+                typer.echo(
+                    f"Native execution pre-flight doctor check failed; missing commands: {joined}",
+                    err=True,
+                )
+            for failure in report.failure_reasons:
+                if not missing_names or not any(name in failure for name in missing_names):
+                    typer.echo(
+                        f"Native execution pre-flight doctor check failed: {failure}",
+                        err=True,
+                    )
+            raise typer.Exit(2)
+        typer.echo(
+            "Pre-flight safety checks passed: subscription verified, API fallback disabled."
+        )
 
     # push must reflect Scheduler._finalize_verified_task()'s actual gate: create_pr=false
     # takes the same no-git-writes-at-all path as push_enabled=False (see docs/SPEC.md
@@ -406,14 +464,22 @@ def run(
     if resolved_issues is not None and resolved_issues != "all-open":
         requested = frozenset(_parse_issue_numbers(resolved_issues))
     try:
-        open_issues = GitHubIssueSource().list_open(resolved_repo, label=resolved_label)
+        if len(intent.labels) > 1:
+            open_issues = GitHubIssueSource().list_open(resolved_repo, labels=intent.labels)
+        elif resolved_label is not None:
+            open_issues = GitHubIssueSource().list_open(resolved_repo, label=resolved_label)
+        else:
+            open_issues = GitHubIssueSource().list_open(resolved_repo)
     except GitHubCliError as error:
         typer.echo(f"GitHub discovery failed: {error}", err=True)
         raise typer.Exit(1) from error
 
     exclude_labels = frozenset(cfg.github.exclude_labels)
     discovered = tuple(
-        issue for issue in open_issues if (requested is None or issue.number in requested)
+        issue
+        for issue in open_issues
+        if (requested is None or issue.number in requested)
+        and (not intent.labels or all(item in issue.labels for item in intent.labels))
     )
     if requested is not None:
         missing = requested - {issue.number for issue in open_issues}
@@ -493,8 +559,17 @@ def run(
         raise typer.Exit(1) from error
 
     before_count = len(scheduler.tasks)
+    is_complete_snapshot = (
+        resolved_issues == "all-open"
+        and resolved_label is None
+        and getattr(cfg.github, "include_labels", ()) == ()
+    )
     try:
-        scheduler.discover(discovered, exclude_labels=exclude_labels)
+        scheduler.discover(
+            discovered,
+            exclude_labels=exclude_labels,
+            snapshot_complete=is_complete_snapshot,
+        )
     except ValueError as error:
         typer.echo(f"Task limit exceeded ({cfg.execution.max_tasks_per_run})", err=True)
         raise typer.Exit(2) from error
@@ -512,23 +587,40 @@ def run(
         structured_logger.log("run_end", data={"run_id": run_id, "additions": additions_count})
         return
 
-    claude_sensor = ClaudeCapacitySensor(
-        ClaudeExecutionPolicy(
-            live_probe_opt_in=True,
-            billing_mode=(
-                ClaudeBillingMode.SUBSCRIPTION_VERIFIED
-                if subscription_billing_verified
-                else ClaudeBillingMode.UNKNOWN
-            ),
+    # #189: only instantiate and probe sensors for enabled agents
+    claude_enabled = cfg.agents.get("claude", None)
+    codex_enabled = cfg.agents.get("codex", None)
+
+    claude_sensor = (
+        ClaudeCapacitySensor(
+            ClaudeExecutionPolicy(
+                live_probe_opt_in=True,
+                billing_mode=(
+                    ClaudeBillingMode.SUBSCRIPTION_VERIFIED
+                    if subscription_billing_verified
+                    else ClaudeBillingMode.UNKNOWN
+                ),
+            )
         )
+        if claude_enabled and claude_enabled.enabled
+        else None
     )
-    codex_sensor = CodexCapacitySensor(
-        allow_live=True,
-        subscription_billing_verified=subscription_billing_verified,
+    codex_sensor = (
+        CodexCapacitySensor(
+            allow_live=True,
+            subscription_billing_verified=subscription_billing_verified,
+        )
+        if codex_enabled and codex_enabled.enabled
+        else None
     )
 
     def capacity_supplier() -> tuple[Capacity, ...]:
-        return (*claude_sensor.observe("claude"), *codex_sensor.observe("codex"))
+        observations: list[Capacity] = []
+        if claude_sensor is not None:
+            observations.extend(claude_sensor.observe("claude"))
+        if codex_sensor is not None:
+            observations.extend(codex_sensor.observe("codex"))
+        return tuple(observations)
 
     try:
         watch_timed_out = _run_watch_loop(
@@ -644,6 +736,31 @@ def status(
                 # config value, not per-task state) -- this is the durable Task-level
                 # runtime budget's start point, since first dispatch.
                 typer.echo(f"        task runtime since: {t.run_started_at.isoformat()}")
+    else:
+        upcoming = [t for t in tasks if t.status not in (TaskState.COMPLETE, TaskState.CANCELLED)]
+        if upcoming:
+            typer.echo("\nUpcoming Tasks:")
+            for t in upcoming[:3]:
+                pr_str = f" [PR #{t.pr}]" if t.pr else ""
+                agent_str = f" (agent: {t.current_agent})" if t.current_agent else ""
+                prefix = f"  #{t.issue_number:<4} {t.status.value:<18} {t.title}"
+                typer.echo(f"{prefix}{pr_str}{agent_str}")
+            if len(upcoming) > 3:
+                typer.echo(f"  ... and {len(upcoming) - 3} more task(s)")
+
+    try:
+        capacities = context.store.load_capacities()
+    except StateCorruptionError:
+        capacities = ()
+    if capacities:
+        typer.echo("\nCapacity & Cooldown:")
+        for cap in capacities:
+            reset_str = f" (resets at {cap.reset_at.isoformat()})" if cap.reset_at else ""
+            summary = (
+                f"  {cap.agent} ({cap.scope}): {cap.state.value} "
+                f"[{cap.used_percentage:.1f}% used]{reset_str}"
+            )
+            typer.echo(summary)
 
 
 @app.command()
@@ -705,11 +822,17 @@ def doctor() -> None:
     Reads the locally cached `gh` auth state to report token scopes; never prints the token
     value and never invokes Claude or Codex, so no Agent capacity is consumed.
     """
-    commands = ("git", "gh", "claude", "codex")
-    missing = tuple(command for command in commands if shutil.which(command) is None)
-    for command in commands:
-        typer.echo(f"{command:<8} {'FOUND' if command not in missing else 'MISSING'}")
-    if "gh" not in missing:
+    report = validate_native_preflight(
+        enabled_agents=tuple(SUPPORTED_AGENTS),
+        write_policy_requires_auth=False,
+    )
+    for check in report.checks:
+        typer.echo(f"{check.name:<8} {'FOUND' if check.found else 'MISSING'}")
+        if check.found and not check.compatible and check.error:
+            typer.echo(f"  compatibility error: {check.error}")
+
+    gh_check = report.get("gh")
+    if gh_check and gh_check.found:
         diagnosis = diagnose_token()
         if diagnosis.authenticated:
             typer.echo(f"gh token scopes: {', '.join(diagnosis.scopes) or '(none)'}")
@@ -718,9 +841,14 @@ def doctor() -> None:
                     "gh token scope is broader than required for read-only issue discovery: "
                     f"{', '.join(diagnosis.broad_scopes)}"
                 )
+                typer.echo(
+                    "  Note: Under the read-only credential isolation policy, issue discovery only "
+                    "requires minimal read scopes to prevent accidental modification."
+                )
         else:
             typer.echo("gh token scope could not be determined (not authenticated)")
-    if missing:
+
+    if not report.passed:
         raise typer.Exit(1)
     typer.echo("Native workers remain disabled until Phase 2 assumptions are validated")
 
@@ -753,10 +881,13 @@ def metrics(
     if report_file is not None:
         try:
             report_file.write_text(report_text, encoding="utf-8")
+            typer.echo(f"Report saved to {report_file}")
         except OSError as error:
             typer.echo(f"Failed to write report to {report_file}: {error}", err=True)
 
     if json_output:
         typer.echo(json.dumps(calculated.to_dict(), indent=2))
     else:
+        if not tasks:
+            typer.echo("No tasks recorded yet. Run 'subsched run' to discover and execute tasks.\n")
         typer.echo(report_text)

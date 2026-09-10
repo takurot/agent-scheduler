@@ -324,6 +324,10 @@ push前にcurrent branchが意図した`issue/...`であり、main/default branc
 HEAD、upstreamをcredentialを表示しないread-only commandで確認する。`git push`はユーザー
 またはtaskから明示的に許可された場合だけ実行し、force pushは使用しない。mainへの反映は
 PR、review、green CIを経由し、可能ならGitHub branch protectionでCIをrequired checkにする。
+default branchのruleset定義は`.github/branch-protection/main.json`にあり、`scripts/
+apply-branch-protection.sh`（デフォルトはdry-run、`--apply`で実行、`--ruleset-id`や`--repo`
+での指定・上書き対応）でGitHub repository ruleset APIへ適用する。これはrepositoryの
+権限境界を変更する操作のため、admin権限を持つmaintainerが手動で実行する。Agentは自動実行しない。
 
 初期repository文書やCIを導入するbootstrapに限り、ユーザーが対象ファイルとmainへの直接
 pushを明示した場合は例外を認める。通常のIssue実装、code、state schema、dependency変更

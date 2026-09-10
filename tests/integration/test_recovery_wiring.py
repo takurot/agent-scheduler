@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from subsched.contract import bootstrap_task_files
 from subsched.models import (
@@ -336,3 +338,186 @@ def test_tick_writes_process_record_before_dispatch_and_clears_it_after(
     assert record is not None
     assert record.pid == os.getpid()  # type: ignore[union-attr]
     assert load_process_record(worktree_root / "issue-9", 9) is None
+
+
+def test_interrupted_verifying_task_reconciled_on_restart(tmp_path: Path) -> None:
+    """#203: a task interrupted in VERIFYING state must not remain stranded on restart."""
+    worktree_root = tmp_path / "worktrees"
+    wt = worktree_root / "issue-1"
+    wt.mkdir(parents=True)
+    task = (
+        Task.from_issue(Issue(number=1, title="Interrupted gate"))
+        .transition(TaskState.DISPATCHED, current_agent="claude")
+        .transition(TaskState.IN_PROGRESS, current_agent="claude")
+        .transition(TaskState.VERIFYING, current_agent="claude")
+    )
+    task = task.with_worktree(str(wt))
+    bootstrap_task_files(wt, task)
+
+    store = JsonStateStore(tmp_path / "state.json")
+    store.save_tasks((task,))
+
+    # Restart scheduler
+    scheduler = Scheduler(
+        store=store,
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=ScriptedWorker(
+            {(1, "claude"): (AgentResult(AgentResultKind.PASS),)}
+        ),
+        worktree_root=worktree_root,
+    )
+
+    reconciled = scheduler.tasks[0]
+    assert reconciled.status is not TaskState.VERIFYING
+    assert reconciled.status is TaskState.READY
+    assert scheduler.lease_manager.active_count == 0
+
+    # Ensure tick can progress the task
+    progress = scheduler.tick([_available("claude")])
+    assert progress is True
+
+
+def test_interrupted_verifying_task_without_worktree_escalates_to_needs_human(
+    tmp_path: Path,
+) -> None:
+    """#203: a VERIFYING task with no valid worktree fails closed to NEEDS_HUMAN on restart."""
+    task = (
+        Task.from_issue(Issue(number=2, title="No worktree verifying"))
+        .transition(TaskState.DISPATCHED, current_agent="claude")
+        .transition(TaskState.IN_PROGRESS, current_agent="claude")
+        .transition(TaskState.VERIFYING, current_agent="claude")
+    )
+    store = JsonStateStore(tmp_path / "state.json")
+    store.save_tasks((task,))
+
+    scheduler = Scheduler(
+        store=store,
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=ScriptedWorker({}),
+        worktree_root=tmp_path / "worktrees",
+    )
+
+    reconciled = scheduler.tasks[0]
+    assert reconciled.status is TaskState.NEEDS_HUMAN
+    assert "worktree" in (reconciled.needs_human_reason or "").lower()
+
+
+def test_interrupted_verifying_task_with_existing_pr_recovers_to_ready_for_review(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#203: if a PR was already created before interruption, recover to READY_FOR_REVIEW."""
+    from subsched.github.pull_requests import (
+        ExistingPrCheckKind,
+        ExistingPrCheckResult,
+        PullRequestInfo,
+    )
+
+    worktree_root = tmp_path / "worktrees"
+    wt = worktree_root / "issue-3"
+    wt.mkdir(parents=True)
+    task = (
+        Task.from_issue(Issue(number=3, title="Has existing PR"))
+        .transition(TaskState.DISPATCHED, current_agent="claude")
+        .transition(TaskState.IN_PROGRESS, current_agent="claude")
+        .transition(TaskState.VERIFYING, current_agent="claude")
+    )
+    task = task.with_worktree(str(wt))
+    bootstrap_task_files(wt, task)
+
+    store = JsonStateStore(tmp_path / "state.json")
+    store.save_tasks((task,))
+
+    # Mock lookup_existing_pr to return an existing PR
+    fake_pr = PullRequestInfo(
+        number=42,
+        url="https://github.com/test/repo/pull/42",
+        title="subsched: #3",
+        body="Implements work for #3",
+    )
+    monkeypatch.setattr(
+        "subsched.github.pull_requests.lookup_existing_pr",
+        lambda *args, **kwargs: ExistingPrCheckResult(
+            kind=ExistingPrCheckKind.CONFIRMED, info=fake_pr
+        ),
+    )
+
+    scheduler = Scheduler(
+        store=store,
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=ScriptedWorker({}),
+        worktree_root=worktree_root,
+        push_enabled=True,
+        create_pr_enabled=True,
+        repo="test/repo",
+        base_branch="main",
+    )
+
+
+    reconciled = scheduler.tasks[0]
+    assert reconciled.status is TaskState.READY_FOR_REVIEW
+    assert reconciled.pr == 42
+
+
+def test_interrupted_verifying_task_exceeding_max_failures_escalates(tmp_path: Path) -> None:
+    """#203: if an interrupted task has already reached max_agent_failures attempts,
+    escalate to NEEDS_HUMAN.
+    """
+    worktree_root = tmp_path / "worktrees"
+    wt = worktree_root / "issue-4"
+    wt.mkdir(parents=True)
+    task = (
+        Task.from_issue(Issue(number=4, title="Exhausted attempts"))
+        .transition(TaskState.DISPATCHED, current_agent="claude")
+        .transition(TaskState.IN_PROGRESS, current_agent="claude")
+        .transition(TaskState.VERIFYING, current_agent="claude")
+    )
+    # Set attempt to 1 with max_agent_failures=2 so that increment_attempt makes it 2
+    task = replace(task, attempt=1)
+    task = task.with_worktree(str(wt))
+    bootstrap_task_files(wt, task)
+
+    store = JsonStateStore(tmp_path / "state.json")
+    store.save_tasks((task,))
+
+    scheduler = Scheduler(
+        store=store,
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=ScriptedWorker({}),
+        worktree_root=worktree_root,
+        max_agent_failures=2,
+    )
+
+    reconciled = scheduler.tasks[0]
+    assert reconciled.status is TaskState.NEEDS_HUMAN
+    assert "interrupted" in (reconciled.needs_human_reason or "").lower()
+
+
+def test_interrupted_verifying_task_from_repro_issue_203(tmp_path: Path) -> None:
+    """Exact reproduction scenario from issue #203."""
+    worktree_root = tmp_path / "worktrees"
+    s = Scheduler(
+        store=JsonStateStore(tmp_path / "state.json"),
+        router=Router([AgentConfig("claude", 100)]),
+        worker=ScriptedWorker({(1, "claude"): (AgentResult(AgentResultKind.PASS),)}),
+        worktree_root=worktree_root,
+    )
+    s.discover((Issue(1, "Interrupted gate"),))
+    with (
+        patch("subsched.verification.run_verification", side_effect=KeyboardInterrupt),
+        contextlib.suppress(KeyboardInterrupt),
+    ):
+        s.tick([_available("claude")])
+
+    saved = s.store.load_tasks()[0]
+
+    assert saved.status is TaskState.VERIFYING
+
+    restarted = Scheduler(
+        store=JsonStateStore(tmp_path / "state.json"),
+        router=Router([AgentConfig("claude", 100)]),
+        worker=ScriptedWorker({(1, "claude"): (AgentResult(AgentResultKind.PASS),)}),
+        worktree_root=worktree_root,
+    )
+    assert restarted.tasks[0].status is TaskState.READY
+    progress = restarted.tick([_available("claude")])
+    assert progress is True

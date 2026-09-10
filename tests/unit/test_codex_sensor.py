@@ -127,3 +127,68 @@ def test_codex_capacity_sensor_protocol_and_policy() -> None:
     assert caps_verified[0].state == CapacityState.AVAILABLE
     assert caps_verified[0].source == "policy"
     assert caps_verified[0].confidence == "low"
+
+
+def test_parse_timestamp_branches() -> None:
+    from subsched.capacity.codex import _parse_timestamp
+
+    assert _parse_timestamp("2026-08-13T02:00:00Z") == datetime(
+        2026, 8, 13, 2, 0, tzinfo=UTC
+    )
+    assert _parse_timestamp("2026-08-13T02:00:00+09:00") == datetime.fromisoformat(
+        "2026-08-13T02:00:00+09:00"
+    )
+    assert _parse_timestamp("not-a-timestamp") is None
+    assert _parse_timestamp(["invalid", "type"]) is None
+
+
+def test_parse_codex_capacity_dict_payload_and_limits() -> None:
+    now = datetime.now(UTC)
+    payload = {
+        "rate_limits": {
+            "five_hour": {
+                "used_percentage": 100.0,
+                "resets_at": "2026-08-13T02:00:00Z",
+            },
+            "seven_day": {
+                "used_percentage": 100.0,
+                "resets_at": "2026-08-20T00:00:00Z",
+            },
+            "session": {
+                "used_percentage": 85.0,
+                "resets_at": "2026-08-13T05:00:00Z",
+            },
+            "invalid_window": "not-a-dict",
+            "negative_used": {"used_percentage": -5.0},
+            "over_100_used": {"used_percentage": 150.0},
+            "non_numeric_used": {"used_percentage": "fifty"},
+        }
+    }
+    caps = parse_codex_capacity(payload, observed_at=now)
+    assert len(caps) == 3
+    by_scope = {c.scope: c for c in caps}
+    # five_hour or session
+    session_caps = [c for c in caps if c.scope == "five_hour"]
+    assert any(c.state == CapacityState.COOLDOWN_SESSION for c in session_caps)
+    assert any(c.state == CapacityState.PRESSURED_SESSION for c in session_caps)
+    assert by_scope["seven_day"].state == CapacityState.COOLDOWN_WEEKLY
+
+
+def test_parse_codex_capacity_empty_limits_fallback_and_generic_error() -> None:
+    now = datetime.now(UTC)
+    # rate_limits present but no valid entries -> falls back
+    empty_limits_payload = {"rate_limits": {"invalid": "not-dict"}}
+    caps = parse_codex_capacity(empty_limits_payload, observed_at=now)
+    assert len(caps) == 1
+    assert caps[0].state == CapacityState.UNKNOWN
+
+    # malformed json starting with {
+    caps_malformed = parse_codex_capacity("{ not json", observed_at=now)
+    assert len(caps_malformed) == 1
+    assert caps_malformed[0].state == CapacityState.UNKNOWN
+
+    # unknown generic failure message
+    generic_error_jsonl = '{"type":"error","message":"unexpected internal error"}\n'
+    caps_generic = parse_codex_capacity(generic_error_jsonl, observed_at=now)
+    assert len(caps_generic) == 1
+    assert caps_generic[0].state == CapacityState.UNKNOWN
