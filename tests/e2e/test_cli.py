@@ -641,6 +641,15 @@ def test_cli_runs_with_natural_language_query(tmp_path: Path) -> None:
     assert "4 issue(s) discovered" in result.output
 
 
+def test_cli_runs_with_natural_language_query_echoes_parsed_intent(tmp_path: Path) -> None:
+    result = invoke(
+        tmp_path, "run", "owner/projectのai-readyラベルのissueを実行", "--dry-run"
+    )
+    assert result.exit_code == 0, result.output
+    assert "Parsed intent: repo='owner/project', label='ai-ready'" in result.output
+
+
+
 def test_cli_runs_with_config_file(tmp_path: Path) -> None:
     config_file = tmp_path / "scheduler.yaml"
     config_file.write_text(
@@ -1396,3 +1405,41 @@ def test_native_run_produces_jsonl_lifecycle_timeline(
     if sys.platform != "win32":
         assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
         assert stat.S_IMODE(log_path.parent.stat().st_mode) == 0o700
+
+
+def test_doctor_warns_with_isolation_policy_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda command: f"/usr/bin/{command}")
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        stdout = (
+            "github.com\n"
+            "  ✓ Logged in to github.com account octocat\n"
+            "  - Active account: true\n"
+            "  - Token scopes: 'repo', 'workflow'\n"
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = invoke(tmp_path, "doctor")
+    assert result.exit_code == 0
+    assert "broader than required" in result.output.lower()
+    assert "read-only credential isolation policy" in result.output
+
+
+def test_metrics_empty_tasks_shows_guidance(tmp_path: Path) -> None:
+    result = invoke(tmp_path, "metrics")
+    assert result.exit_code == 0
+    assert "No tasks recorded yet" in result.output
+
+
+def test_metrics_report_shows_success_message(tmp_path: Path) -> None:
+    report_file = tmp_path / "report.md"
+    result = invoke(tmp_path, "metrics", "--report", str(report_file))
+    assert result.exit_code == 0
+    assert f"Report saved to {report_file}" in result.output
+

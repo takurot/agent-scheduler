@@ -246,7 +246,12 @@ class GitHubIssueSource:
         self._run = run
 
     def list_open(
-        self, repo: str, *, label: str | None = None, limit: int = 1000
+        self,
+        repo: str,
+        *,
+        label: str | None = None,
+        labels: tuple[str, ...] = (),
+        limit: int = 1000,
     ) -> tuple[Issue, ...]:
         validate_repo(repo)
         if limit <= 0:
@@ -262,8 +267,14 @@ class GitHubIssueSource:
             "--limit",
             str(limit),
         ]
+        query_labels: list[str] = []
         if label:
-            argv.extend(("--label", label))
+            query_labels.append(label)
+        for item in labels:
+            if item not in query_labels:
+                query_labels.append(item)
+        for item in query_labels:
+            argv.extend(("--label", item))
         argv.extend(("--json", "number,title,body,labels,url"))
         try:
             runner = self._run or subprocess.run
@@ -287,7 +298,12 @@ class GitHubIssueSource:
             if len(payload) >= limit:
                 kind = GitHubDiscoveryErrorKind.RESULT_TRUNCATED
                 raise GitHubCliError(_DISCOVERY_ERROR_MESSAGES[kind], kind=kind)
-            return tuple(self._parse_issue(value) for value in payload)
+            parsed = tuple(self._parse_issue(value) for value in payload)
+            if query_labels:
+                return tuple(
+                    issue for issue in parsed if all(item in issue.labels for item in query_labels)
+                )
+            return parsed
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
             raise GitHubCliError("GitHub CLI returned an invalid issue payload") from error
 

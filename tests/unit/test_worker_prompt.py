@@ -10,6 +10,7 @@ from subsched.contract import (
     build_worker_prompt,
     validate_dispatch_preconditions,
 )
+from subsched.handoff import REQUIRED_HANDOFF_SECTIONS
 from subsched.models import Issue, Task
 
 
@@ -74,3 +75,17 @@ def test_validate_dispatch_preconditions_succeeds_after_bootstrap(tmp_path: Path
 
     assert not (tmp_path / "AGENTS.md").exists()
     assert not (tmp_path / "CLAUDE.md").exists()
+
+
+def test_build_worker_prompt_contains_handoff_contract_rules() -> None:
+    task = Task.from_issue(Issue(number=103, title="Support timeout", body="Some details"))
+    prompt = build_worker_prompt(task)
+
+    # All required handoff section headers must be explicitly specified
+    for section in REQUIRED_HANDOFF_SECTIONS:
+        assert section in prompt
+
+    # Specific requirements for ## Current Work and ## Timestamp
+    assert "None (task completed)" in prompt
+    assert "ISO 8601" in prompt
+    assert "advance" in prompt

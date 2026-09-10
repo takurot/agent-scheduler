@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from subsched.agents import SUPPORTED_AGENTS
+
 
 class ConfigError(ValueError):
     pass
@@ -128,7 +130,7 @@ class ExecutionConfig:
     max_agent_switches: int = 6
     max_agent_failures: int = 2
     max_verification_failures: int = 2
-    max_task_runtime: str = "6h"
+    max_task_runtime: str | int = "6h"
     max_tasks_per_run: int = 50
     pause_running_policy: str = "continue"
     agent_timeout_seconds: int = 300
@@ -255,10 +257,16 @@ def _parse_github_config(raw: Mapping[str, Any]) -> GitHubConfig:
         raise ConfigError(f"invalid github.mode: {mode}")
 
     inc_labels = raw.get("include_labels", ("ai-ready",))
-    if not isinstance(inc_labels, (list, tuple)):
+    if not isinstance(inc_labels, (list, tuple)) or any(
+        not isinstance(x, str) or not x.strip() for x in inc_labels
+    ):
         raise ConfigError("github.include_labels must be a list of strings")
+    if mode == "label" and not inc_labels:
+        raise ConfigError("github.include_labels must not be empty when github.mode is 'label'")
     exc_labels = raw.get("exclude_labels", ("blocked", "human-only", "security-sensitive"))
-    if not isinstance(exc_labels, (list, tuple)):
+    if not isinstance(exc_labels, (list, tuple)) or any(
+        not isinstance(x, str) or not x.strip() for x in exc_labels
+    ):
         raise ConfigError("github.exclude_labels must be a list of strings")
 
     # #144: github.mode == "list" previously had no field to actually carry the Issue
@@ -303,6 +311,12 @@ def _parse_agents_config(raw: Any) -> dict[str, AgentSettings]:
         raise ConfigError("agents must be a mapping")
     agents: dict[str, AgentSettings] = {}
     for name, item in raw.items():
+        if name not in SUPPORTED_AGENTS:
+            supported = ", ".join(f"'{a}'" for a in sorted(SUPPORTED_AGENTS))
+            raise ConfigError(
+                f"unsupported agent {name!r} in agents configuration; "
+                f"supported agents: {supported}"
+            )
         if not isinstance(item, dict):
             raise ConfigError(f"agents.{name} must be a mapping")
         extras = set(item) - {"enabled", "priority"}
@@ -311,6 +325,10 @@ def _parse_agents_config(raw: Any) -> dict[str, AgentSettings]:
         enabled = _strict_bool(item.get("enabled", True), f"agents.{name}.enabled")
         priority = _strict_pos_int(item.get("priority", 100), f"agents.{name}.priority", min_val=0)
         agents[str(name)] = AgentSettings(enabled=enabled, priority=priority)
+
+    if not any(s.enabled for s in agents.values()):
+        raise ConfigError("all agents are disabled; at least one agent must be enabled")
+
     return agents
 
 
@@ -396,6 +414,10 @@ def _parse_execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
     )
     max_tasks = _strict_pos_int(raw.get("max_tasks_per_run", 50), "execution.max_tasks_per_run")
     runtime = raw.get("max_task_runtime", "6h")
+    if not (isinstance(runtime, int) and not isinstance(runtime, bool)) and not isinstance(
+        runtime, str
+    ):
+        raise ConfigError("execution.max_task_runtime must be a string or integer")
     parse_duration(runtime)
     policy = str(raw.get("pause_running_policy", "continue"))
     if policy in {"abort", "cancel"}:
@@ -417,7 +439,7 @@ def _parse_execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
         max_agent_switches=max_switches,
         max_agent_failures=max_failures,
         max_verification_failures=max_verification_failures,
-        max_task_runtime=str(runtime),
+        max_task_runtime=runtime,
         max_tasks_per_run=max_tasks,
         pause_running_policy=policy,
         agent_timeout_seconds=agent_timeout_seconds,
@@ -530,24 +552,37 @@ def parse_natural_language_instruction(instruction: str) -> NaturalLanguageInten
         raise ConfigError("instruction must not be empty")
     text = instruction.strip()
     repo: str | None = None
+    remaining_text = text
     repo_match = re.search(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", text)
     if repo_match:
         repo = repo_match.group(1)
+        remaining_text = text[:repo_match.start()] + " " + text[repo_match.end():]
+
+    label: str | None = None
+    label_patterns = [
+        r"--label(?:=|\s+)([A-Za-z0-9_.-]+)",
+        r"(?:ラベル|label)[:\uff1a\s]+([A-Za-z0-9_.-]+)",
+        r"(?:ラベル|label)[はが]([A-Za-z0-9_.-]+)",
+        r"([A-Za-z0-9_.-]+)ラベル",
+    ]
+    for pattern in label_patterns:
+        label_match = re.search(pattern, remaining_text)
+        if label_match:
+            label = label_match.group(1).strip()
+            remaining_text = (
+                remaining_text[:label_match.start()] + " " + remaining_text[label_match.end():]
+            )
+            break
 
     issues: str | None = None
     all_open_pattern = (
         r"(?i)(open\s*issue[s]?をすべて|全件|all[\s-]open|all open issues|すべて実行)"
     )
-    if re.search(all_open_pattern, text):
+    if re.search(all_open_pattern, remaining_text):
         issues = "all-open"
     else:
-        issue_nums = re.findall(r"#?(\d+)", text)
+        issue_nums = re.findall(r"#?(\d+)", remaining_text)
         if issue_nums:
             issues = ",".join(issue_nums)
-
-    label: str | None = None
-    label_match = re.search(r"--label\s+([A-Za-z0-9_.-]+)|label[:\s]+([A-Za-z0-9_.-]+)", text)
-    if label_match:
-        label = label_match.group(1) or label_match.group(2)
 
     return NaturalLanguageIntent(repo=repo, issues=issues, label=label)
