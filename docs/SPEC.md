@@ -502,6 +502,26 @@ CANCELLED
 COMPLETE
 ```
 
+`workflow.mode: multi-stage`（デフォルトは`standard`、既存の単一パス実行）を opt-in した場合、
+`DISPATCHED`から`IN_PROGRESS`へ進む前に計画レビューゲートを通る：
+
+```text
+DISPATCHED
+    ↓
+PLANNING          -- エージェントが .ai/plans/<issue>.md に実装計画のみを書く
+    ↓                (コード変更・コミットは行わない、read-write だが plan_review 用の
+    ↓                 読み取り専用サンドボックスではない)
+PLAN_REVIEW       -- 別エージェントが read-only サンドボックスでレビューし、
+   / \                {"verdict": "APPROVE" | "REQUEST_CHANGES", ...} を返す
+APPROVE REQUEST_CHANGES
+ │         │
+ ▼         ▼
+IN_PROGRESS  PLANNING (plan_revisions += 1, workflow.limits.max_plan_revisions
+                        に達すると NEEDS_HUMAN にフェイルクローズ)
+```
+
+`.ai/plans/`はgit管理外（`.gitignore`）であり、PRブランチにコミットされない。
+
 ---
 
 # 14. Issue Queue

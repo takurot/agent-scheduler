@@ -160,6 +160,27 @@ class VerificationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowStagesConfig:
+    planning: bool = True
+    plan_review: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowLimitsConfig:
+    max_plan_revisions: int = 2
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowConfig:
+    # #280: 'standard' (single-pass, the historical/only behavior) remains the default
+    # so every existing subsched.yaml without a `workflow:` section is unaffected.
+    # 'multi-stage' opts a repo into the PLANNING -> PLAN_REVIEW gate before IN_PROGRESS.
+    mode: str = "standard"
+    stages: WorkflowStagesConfig = WorkflowStagesConfig()
+    limits: WorkflowLimitsConfig = WorkflowLimitsConfig()
+
+
+@dataclass(frozen=True, slots=True)
 class SchedulerConfig:
     github: GitHubConfig = GitHubConfig()
     agents: dict[str, AgentSettings] = field(
@@ -174,6 +195,7 @@ class SchedulerConfig:
     queue: QueueConfig = QueueConfig()
     handoff: HandoffConfig = HandoffConfig()
     verification: VerificationConfig = VerificationConfig()
+    workflow: WorkflowConfig = WorkflowConfig()
 
 
 ROOT_KEYS = frozenset(
@@ -186,6 +208,7 @@ ROOT_KEYS = frozenset(
         "queue",
         "handoff",
         "verification",
+        "workflow",
     }
 )
 
@@ -219,6 +242,7 @@ SECTION_KEYS: dict[str, frozenset[str]] = {
     "queue": frozenset({"priority"}),
     "handoff": frozenset({"continuous"}),
     "verification": frozenset({"commands", "timeout_seconds"}),
+    "workflow": frozenset({"mode", "stages", "limits"}),
 }
 
 
@@ -487,6 +511,39 @@ def _parse_verification_config(raw: Mapping[str, Any]) -> VerificationConfig:
     )
 
 
+def _parse_workflow_config(raw: Mapping[str, Any]) -> WorkflowConfig:
+    mode = str(raw.get("mode", "standard"))
+    if mode not in {"standard", "multi-stage"}:
+        raise ConfigError(f"unsupported workflow.mode: {mode!r}")
+
+    stages_raw = raw.get("stages", {})
+    if not isinstance(stages_raw, dict):
+        raise ConfigError("workflow.stages must be a mapping")
+    stages_extras = set(stages_raw) - {"planning", "plan_review"}
+    if stages_extras:
+        raise ConfigError(f"unknown workflow.stages keys: {join_keys(stages_extras)}")
+    stages = WorkflowStagesConfig(
+        planning=_strict_bool(stages_raw.get("planning", True), "workflow.stages.planning"),
+        plan_review=_strict_bool(
+            stages_raw.get("plan_review", True), "workflow.stages.plan_review"
+        ),
+    )
+
+    limits_raw = raw.get("limits", {})
+    if not isinstance(limits_raw, dict):
+        raise ConfigError("workflow.limits must be a mapping")
+    limits_extras = set(limits_raw) - {"max_plan_revisions"}
+    if limits_extras:
+        raise ConfigError(f"unknown workflow.limits keys: {join_keys(limits_extras)}")
+    limits = WorkflowLimitsConfig(
+        max_plan_revisions=_strict_pos_int(
+            limits_raw.get("max_plan_revisions", 2), "workflow.limits.max_plan_revisions"
+        )
+    )
+
+    return WorkflowConfig(mode=mode, stages=stages, limits=limits)
+
+
 def load_config(path: Path) -> SchedulerConfig:
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -521,6 +578,7 @@ def load_config(path: Path) -> SchedulerConfig:
     queue = _parse_queue_config(raw.get("queue", {}))
     handoff = _parse_handoff_config(raw.get("handoff", {}))
     verification = _parse_verification_config(raw.get("verification", {}))
+    workflow = _parse_workflow_config(raw.get("workflow", {}))
 
     return SchedulerConfig(
         github=github,
@@ -531,6 +589,7 @@ def load_config(path: Path) -> SchedulerConfig:
         queue=queue,
         handoff=handoff,
         verification=verification,
+        workflow=workflow,
     )
 
 

@@ -13,6 +13,8 @@ class TaskState(StrEnum):
     ELIGIBILITY_CHECK = "ELIGIBILITY_CHECK"
     READY = "READY"
     DISPATCHED = "DISPATCHED"
+    PLANNING = "PLANNING"
+    PLAN_REVIEW = "PLAN_REVIEW"
     IN_PROGRESS = "IN_PROGRESS"
     VERIFYING = "VERIFYING"
     PR_READY = "PR_READY"
@@ -94,7 +96,39 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
             TaskState.CANCELLED,
         }
     ),
-    TaskState.DISPATCHED: frozenset({TaskState.IN_PROGRESS, TaskState.RETRY, TaskState.CANCELLED}),
+    TaskState.DISPATCHED: frozenset(
+        {
+            TaskState.IN_PROGRESS,
+            # #280: only entered when workflow.mode == 'multi-stage' -- the Scheduler is
+            # responsible for gating this transition on that config value, not this state
+            # machine, which only encodes which edges are structurally possible. Every
+            # dispatch (including the multi-stage PLANNING -> PLAN_REVIEW gate) passes
+            # through DISPATCHED first, so this is where the edge belongs, not on READY.
+            TaskState.PLANNING,
+            TaskState.RETRY,
+            TaskState.CANCELLED,
+        }
+    ),
+    # #280: PLANNING/PLAN_REVIEW mirror IN_PROGRESS's fail-closed escape hatches (RETRY,
+    # NEEDS_HUMAN, CANCELLED) for crash recovery and agent-failure handling, in addition
+    # to the plan-review-gate edges required by the workflow itself.
+    TaskState.PLANNING: frozenset(
+        {
+            TaskState.PLAN_REVIEW,
+            TaskState.RETRY,
+            TaskState.NEEDS_HUMAN,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.PLAN_REVIEW: frozenset(
+        {
+            TaskState.IN_PROGRESS,
+            TaskState.PLANNING,
+            TaskState.RETRY,
+            TaskState.NEEDS_HUMAN,
+            TaskState.CANCELLED,
+        }
+    ),
     TaskState.IN_PROGRESS: frozenset(
         {
             TaskState.VERIFYING,
@@ -257,6 +291,14 @@ class Task:
     # failover/retry/restart (never reset by .transition()) so execution.max_task_runtime
     # can be enforced as a durable budget for the whole Task, not just a single attempt.
     run_started_at: datetime | None = None
+    # #280: number of REQUEST_CHANGES cycles a plan has been through in the multi-stage
+    # workflow's PLAN_REVIEW gate. Durable across restarts so `workflow.limits
+    # .max_plan_revisions` cannot be bypassed by a crash/restart between reviews.
+    plan_revisions: int = 0
+    # #280: set once PLAN_REVIEW approves a plan, so a retried/redispatched task (after
+    # RETRY, capacity failover, etc.) resumes at IN_PROGRESS instead of re-running the
+    # planning gate from scratch.
+    plan_approved: bool = False
 
     @classmethod
     def from_issue(cls, issue: Issue, *, worktree: str | None = None) -> Task:
@@ -323,6 +365,8 @@ class Task:
             "description": self.description,
             "needs_human_reason": self.needs_human_reason,
             "run_started_at": self.run_started_at.isoformat() if self.run_started_at else None,
+            "plan_revisions": self.plan_revisions,
+            "plan_approved": self.plan_approved,
         }
 
     @classmethod
@@ -356,6 +400,8 @@ class Task:
                     if value.get("run_started_at")
                     else None
                 ),
+                plan_revisions=int(value.get("plan_revisions", 0)),
+                plan_approved=bool(value.get("plan_approved", False)),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("invalid task state") from error
