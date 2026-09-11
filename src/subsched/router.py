@@ -9,6 +9,18 @@ from subsched.models import Capacity
 FRESHNESS = timedelta(minutes=5)
 
 
+def _is_fresh_provider(capacity: Capacity, current: datetime) -> bool:
+    """Return whether ``capacity`` is a freshly observed provider capacity.
+
+    A provider capacity is fresh when it was observed neither in the future
+    nor longer ago than ``FRESHNESS``.
+    """
+    return (
+        capacity.source == "provider"
+        and timedelta(0) <= current - capacity.observed_at <= FRESHNESS
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class AgentConfig:
     name: str
@@ -31,19 +43,15 @@ class Router:
             if capacity.agent in self._agents
             and self._agents[capacity.agent].enabled
             and capacity.is_available(current)
-            and (
-                capacity.source != "provider"
-                or timedelta(0) <= current - capacity.observed_at <= FRESHNESS
-            )
+            and (capacity.source != "provider" or _is_fresh_provider(capacity, current))
         ]
         if not candidates:
             return None
 
         def score(capacity: Capacity) -> tuple[int, float, int, str]:
             fresh_provider = (
-                capacity.source == "provider"
+                _is_fresh_provider(capacity, current)
                 and capacity.used_percentage is not None
-                and current - capacity.observed_at <= FRESHNESS
             )
             remaining = capacity.remaining_percentage if fresh_provider else 0.0
             return (
