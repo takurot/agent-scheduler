@@ -230,7 +230,9 @@ subsched --repository /path/to/repo mcp
 
 ### Client Configuration
 
-#### Claude Desktop
+#### 1. Claude
+
+##### Claude Desktop
 Add the server entry to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 ```json
 {
@@ -243,7 +245,57 @@ Add the server entry to `~/Library/Application Support/Claude/claude_desktop_con
 }
 ```
 
-#### Cursor
+##### Claude Code (CLI)
+Register using the CLI command:
+```bash
+# Project-level (.mcp.json in current repository):
+claude mcp add subsched --scope project -- uvx --from "agent-scheduler[mcp]" subsched mcp
+
+# User-level (~/.claude.json across all repositories):
+claude mcp add subsched --scope user -- uvx --from "agent-scheduler[mcp]" subsched mcp
+```
+Or commit a `.mcp.json` at your repository root:
+```json
+{
+  "mcpServers": {
+    "subsched": {
+      "command": "uvx",
+      "args": ["--from", "agent-scheduler[mcp]", "subsched", "mcp"]
+    }
+  }
+}
+```
+
+#### 2. OpenAI Codex
+
+##### Codex CLI
+Register using the CLI command:
+```bash
+codex mcp add subsched -- uvx --from "agent-scheduler[mcp]" subsched mcp
+```
+Or configure `~/.codex/config.toml` (global) or `<repo>/.codex/config.toml` (project-specific):
+```toml
+[mcp_servers.subsched]
+command = "uvx"
+args = ["--from", "agent-scheduler[mcp]", "subsched", "mcp"]
+```
+
+#### 3. Gemini / Antigravity (`agy`)
+
+##### Antigravity CLI (`agy`) / IDE
+Add the server entry to `~/.gemini/config/mcp_config.json` (global) or `.agents/mcp_config.json` (project-specific):
+```json
+{
+  "mcpServers": {
+    "subsched": {
+      "command": "uvx",
+      "args": ["--from", "agent-scheduler[mcp]", "subsched", "mcp"]
+    }
+  }
+}
+```
+
+#### 4. Cursor
 Add the server configuration to `.cursor/mcp.json`:
 ```json
 {
@@ -255,6 +307,8 @@ Add the server configuration to `.cursor/mcp.json`:
   }
 }
 ```
+
+> **Tip:** If `agent-scheduler[mcp]` is installed locally or via `pipx` / `uv tool install`, you can use `"command": "subsched", "args": ["mcp"]`. Pass `"--repository", "/path/to/repo"` before `"mcp"` to pin the server to a specific repository.
 
 ### Exposed Capabilities
 
