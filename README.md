@@ -234,6 +234,48 @@ configuration loading instead of being accepted and ignored.
 
 ---
 
+## Guiding Coding Agents (`AGENTS.md` & `CLAUDE.md`)
+
+When `subsched` dispatches a task to a coding agent (`claude` or `codex`), it constructs a strict prompt enforcing issue scope, worktree boundaries, and security invariants. Crucially, the prompt directs each worker to read repository instructions:
+
+```text
+Read repository instructions when present:
+- AGENTS.md
+- CLAUDE.md
+Read the project documentation required by those instructions.
+```
+
+`subsched` treats `AGENTS.md` (for OpenAI Codex, Cursor, and emerging agents) and `CLAUDE.md` (for Claude Code) as **user-owned input**; it never edits or removes either file. Providing these files in your repository root allows you to control how agents implement features, run tests, and format commits.
+
+### Recommended Content for Instruction Files
+
+1. **Development Workflow & Source of Truth**:
+   - Point agents to your project's workflow and architecture documents (e.g., [`docs/WORKFLOW.md`](docs/WORKFLOW.md) and [`docs/SPEC.md`](docs/SPEC.md)).
+   - Specify repository conventions, coding standards, and directory layouts.
+
+2. **Testing & Quality Gates**:
+   - Explicitly instruct agents to write tests first (TDD: Red → Green → Refactor) and run verification before completing their work.
+   - Align the agent's verification instructions with the `verification.commands` in your `subsched.yaml` (e.g. `uv run pytest`, `uv run ruff check .`, `npm test`).
+   - Remind agents that `subsched` re-runs these commands in the post-worker gate, and the task will fail if tests or linters fail.
+
+3. **Behavioral Principles**:
+   - **Simplicity First**: Instruct agents to write the minimum code that solves the issue without speculative features or premature abstractions.
+   - **Surgical Changes**: Restrict changes only to what is directly required for the assigned issue; prohibit unrelated refactoring or cleaning up existing dead code.
+
+4. **Commit Message Rules (Crucial Safety Rule)**:
+   - Request Conventional Commits (e.g., `feat:`, `fix:`, `refactor:`, `test:`, `docs:`).
+   - **NEVER use GitHub auto-close keywords**: Explicitly forbid keywords such as `Fixes #<number>`, `Closes #<number>`, or `Resolves #<number>` (any casing or inflection) in commit messages. `subsched` enforces manual review before issues are closed; commit messages containing auto-close keywords trigger an invariant violation that blocks Git push and Pull Request creation. Tell agents to use plain references like `issue #<number>` or `Implements work for #<number>`.
+
+5. **Semantic Handoff Integrity**:
+   - If a multi-step task is interrupted or switches agents due to quota limits, workers communicate state through `.ai/handoffs/<issue>.md`.
+   - Instruct agents to preserve all 8 required section headers (`## Goal`, `## Current Plan`, `## Completed`, `## Current Work`, `## Decisions`, `## Known Broken State`, `## Next Action`, `## Timestamp`) and use strict ISO 8601 timestamps.
+
+### Example Implementations
+
+See this repository's own [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) for complete, production-tested examples of repository instruction files.
+
+---
+
 ## CLI Reference
 
 | Command | Description |
