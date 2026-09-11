@@ -436,10 +436,14 @@ def test_scheduler_lock_stale_lock_recovery(tmp_path: Path) -> None:
     lock.release()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="ps -o lstart= is a POSIX (Linux/macOS/BSD) command"
+)
 def test_process_start_time_helper() -> None:
     assert get_process_start_time(-1) is None
     st = get_process_start_time(os.getpid())
-    assert st is not None or sys.platform != "darwin"
+    assert st is not None
+    assert st != ""
 
 
 def test_state_store_cas_lost_update_detection(tmp_path: Path) -> None:

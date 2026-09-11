@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -53,10 +54,19 @@ def test_build_worker_prompt_contains_mandatory_instructions() -> None:
     assert "never automatically" in prompt
     # Regression test for #140: the prompt must explicitly forbid GitHub auto-close
     # keywords in commit messages, not just in the (Scheduler-generated) PR body.
+    # A weak "contains the word" check would still pass if the prompt were
+    # accidentally rewritten to *require* these keywords, so assert the
+    # prohibition wording itself, not just the keywords' presence.
     assert "Fixes" in prompt
     assert "Closes" in prompt
     assert "Resolves" in prompt
     assert "commit message" in prompt
+    assert re.search(
+        r"Never use GitHub auto-close keywords.*Fixes.*Closes.*Resolves.*"
+        r"commit message",
+        prompt,
+        re.DOTALL,
+    )
 
 
 def test_validate_dispatch_preconditions_fails_if_files_missing(tmp_path: Path) -> None:
