@@ -7,8 +7,14 @@ from pathlib import Path
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.claude import ClaudeAgent, ClaudeBillingMode, ClaudeExecutionPolicy
 from subsched.agents.codex import CodexAgent, ensure_codex_output_schema
-from subsched.contract import build_worker_prompt, validate_dispatch_preconditions
-from subsched.models import AgentResult, AgentResultKind, Task
+from subsched.contract import (
+    build_plan_prompt,
+    build_plan_review_prompt,
+    build_worker_prompt,
+    validate_dispatch_preconditions,
+)
+from subsched.models import AgentResult, AgentResultKind, Task, TaskState
+from subsched.plan_review import READ_ONLY_SANDBOX_ARGS
 from subsched.structured_logger import StructuredLogger
 
 # #141: default heartbeat cadence for a long-running agent invocation. Kept as a module
@@ -89,9 +95,19 @@ class NativeWorker:
                 output=f"dispatch preconditions failed: {e}",
             )
 
-        prompt = build_worker_prompt(task, verification_commands=self.verification_commands)
+        # #280: PLANNING and PLAN_REVIEW are the multi-stage workflow's pre-implementation
+        # gate -- each uses its own prompt, and PLAN_REVIEW additionally runs with a
+        # read-only tool/sandbox restriction so the reviewer can never edit a file.
+        if task.status is TaskState.PLANNING:
+            prompt = build_plan_prompt(task)
+        elif task.status is TaskState.PLAN_REVIEW:
+            prompt = build_plan_review_prompt(task)
+        else:
+            prompt = build_worker_prompt(task, verification_commands=self.verification_commands)
+        read_only = task.status is TaskState.PLAN_REVIEW
         heartbeat = self._heartbeat(task, agent)
         if agent == "claude":
+            claude_tools = READ_ONLY_SANDBOX_ARGS["claude"][1] if read_only else "Bash,Edit,Read"
             req = ProcessExecutionRequest(
                 argv=(
                     "claude",
@@ -109,7 +125,7 @@ class NativeWorker:
                     "--no-session-persistence",
                     "--strict-mcp-config",
                     "--tools",
-                    "Bash,Edit,Read",
+                    claude_tools,
                 ),
                 cwd=worktree_path,
                 # ClaudeAgent/CodexAgent.execute() apply COMMON_ENV_ALLOWLIST to this before
@@ -131,6 +147,9 @@ class NativeWorker:
                 worktree_path / ".ai" / "codex-output.schema.json"
             )
             ensure_codex_output_schema(schema_path)
+            codex_sandbox = (
+                READ_ONLY_SANDBOX_ARGS["codex"][1] if read_only else "workspace-write"
+            )
             req = ProcessExecutionRequest(
                 argv=(
                     "codex",
@@ -146,7 +165,7 @@ class NativeWorker:
                     "-C",
                     str(worktree_path),
                     "--sandbox",
-                    "workspace-write",
+                    codex_sandbox,
                     "--ephemeral",
                     "-",
                 ),

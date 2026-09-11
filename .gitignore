@@ -28,4 +28,5 @@ dist/
 .ai/backup/
 .ai/checkpoints/
 .ai/quarantine/
+.ai/plans/
 docs/PLAN.md

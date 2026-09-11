@@ -60,3 +60,17 @@ billing:
   api_fallback: false
   metered_usage: false
   unknown_mode: disable
+
+# Optional (defaults shown below apply when `workflow:` is omitted entirely).
+# mode: multi-stage opts in to a PLANNING -> PLAN_REVIEW gate before IN_PROGRESS: a
+# READY task is first dispatched to write an implementation plan (.ai/plans/<issue>.md,
+# never committed), then a read-only Plan Reviewer either approves it (-> IN_PROGRESS)
+# or requests changes (-> back to PLANNING, up to max_plan_revisions before failing
+# closed to NEEDS_HUMAN).
+workflow:
+  mode: standard
+  stages:
+    planning: true
+    plan_review: true
+  limits:
+    max_plan_revisions: 2

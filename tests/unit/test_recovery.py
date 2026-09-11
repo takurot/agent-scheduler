@@ -271,3 +271,63 @@ def test_check_process_liveness_matches_real_start_time() -> None:
         attempt_nonce="nonce_current",
     )
     assert check_process_liveness(rec) is ProcessStatus.LIVE
+
+
+def test_reconcile_planning_task_with_dead_process_recovers_to_retry(tmp_path: Path) -> None:
+    """#280: an interrupted PLANNING task recovers the same way IN_PROGRESS does --
+    back to RETRY, without losing an already-written plan file or plan_revisions."""
+    issue = Issue(number=280, title="multi-stage workflow")
+    task = Task.from_issue(issue)
+    task = task.transition(TaskState.DISPATCHED, current_agent="claude")
+    task = task.transition(TaskState.PLANNING, current_agent="claude")
+    bootstrap_task_files(tmp_path, task)
+
+    plans_dir = tmp_path / ".ai" / "plans"
+    plans_dir.mkdir(parents=True)
+    plan_file = plans_dir / "280.md"
+    plan_file.write_text("# plan\n", encoding="utf-8")
+
+    rec = ProcessRecord(
+        pid=999999,
+        started_at="2026-08-22T00:00:00Z",
+        agent="claude",
+        issue_number=280,
+        worktree=str(tmp_path),
+        attempt_nonce="nonce_plan",
+    )
+    save_process_record(tmp_path, rec)
+
+    from dataclasses import replace
+
+    task = replace(task, plan_revisions=1)
+    reconciled_task, msg = reconcile_task_recovery(tmp_path, task)
+    assert reconciled_task.status is TaskState.RETRY
+    assert reconciled_task.plan_revisions == 1
+    assert "RETRY" in msg
+    assert plan_file.is_file()
+    assert plan_file.read_text(encoding="utf-8") == "# plan\n"
+
+
+def test_reconcile_plan_review_task_with_dead_process_recovers_to_retry(
+    tmp_path: Path,
+) -> None:
+    issue = Issue(number=281, title="multi-stage workflow")
+    task = Task.from_issue(issue)
+    task = task.transition(TaskState.DISPATCHED, current_agent="claude")
+    task = task.transition(TaskState.PLANNING, current_agent="claude")
+    task = task.transition(TaskState.PLAN_REVIEW, current_agent="claude")
+    bootstrap_task_files(tmp_path, task)
+
+    rec = ProcessRecord(
+        pid=999999,
+        started_at="2026-08-22T00:00:00Z",
+        agent="claude",
+        issue_number=281,
+        worktree=str(tmp_path),
+        attempt_nonce="nonce_review",
+    )
+    save_process_record(tmp_path, rec)
+
+    reconciled_task, msg = reconcile_task_recovery(tmp_path, task)
+    assert reconciled_task.status is TaskState.RETRY
+    assert "RETRY" in msg

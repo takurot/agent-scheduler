@@ -149,7 +149,17 @@ def reconcile_task_recovery(worktree_dir: Path, task: Task) -> tuple[Task, str]:
         reason = f"{reason_prefix}; handoff was corrupted and quarantined; escalated to NEEDS_HUMAN"
         return escalate_to_needs_human(task, reason), reason
 
-    if task.status in {TaskState.DISPATCHED, TaskState.IN_PROGRESS}:
+    if task.status in {
+        TaskState.DISPATCHED,
+        TaskState.IN_PROGRESS,
+        # #280: an interrupted PLANNING/PLAN_REVIEW task recovers the same way as an
+        # interrupted IN_PROGRESS one -- back to RETRY (then READY or NEEDS_HUMAN via
+        # the caller's per-agent-failure budget). Neither plan_revisions nor an
+        # already-written plan file is touched here, so a resumed task keeps its
+        # revision count and does not lose prior planning work.
+        TaskState.PLANNING,
+        TaskState.PLAN_REVIEW,
+    }:
         reason = f"{reason_prefix}; task transitioned to RETRY"
         # #164: counts the same as a live AgentResultKind.FAILURE (see
         # Scheduler._handle_result's generic failure path) so a crash-loop -- the

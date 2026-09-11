@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from subsched.config import validate_base_branch
+from subsched.config import WorkflowConfig, validate_base_branch
 from subsched.contract import bootstrap_task_files
 from subsched.events import Clock, Event, EventSource, EventType, SystemClock
 from subsched.github.checks import CICheckState, PRChecksStatus
@@ -27,6 +27,7 @@ from subsched.models import (
     detect_dependency_cycles,
     parse_dependencies,
 )
+from subsched.plan_review import PlanVerdictError, parse_verdict, plan_path
 from subsched.queue import TaskQueue
 from subsched.recovery import (
     ProcessRecord,
@@ -43,7 +44,16 @@ from subsched.tasks.worktree import WorktreeAdapter, WorktreeError
 logger = logging.getLogger(__name__)
 
 _IN_FLIGHT_RECOVERY_STATES = frozenset(
-    {TaskState.DISPATCHED, TaskState.IN_PROGRESS, TaskState.VERIFYING}
+    {
+        TaskState.DISPATCHED,
+        TaskState.IN_PROGRESS,
+        TaskState.VERIFYING,
+        # #280: multi-stage workflow's pre-implementation gate stages are just as
+        # in-flight as IN_PROGRESS/VERIFYING and must be reconciled against a crashed
+        # process the same way, not left stranded.
+        TaskState.PLANNING,
+        TaskState.PLAN_REVIEW,
+    }
 )
 _ALLOWED_COOLDOWNS = frozenset(
     {
@@ -156,6 +166,10 @@ class Scheduler:
         max_task_runtime_seconds: float | None = None,
         ci_checker: Callable[[int], PRChecksStatus] | None = None,
         merged_pr_checker: Callable[[int], MergedPrCheckResult] | None = None,
+        # #280: None (default) is equivalent to WorkflowConfig()'s own default
+        # (mode="standard") -- every existing direct Scheduler(...) construction keeps
+        # running the historical single-pass dispatch flow unchanged.
+        workflow: WorkflowConfig | None = None,
     ) -> None:
         self.store = store
         self.router = router
@@ -197,6 +211,10 @@ class Scheduler:
         self.max_verification_failures = max_verification_failures
         self.max_agent_switches = max_agent_switches
         self.max_tasks = max_tasks
+        self.workflow = workflow or WorkflowConfig()
+        if self.workflow.limits.max_plan_revisions <= 0:
+            raise ValueError("workflow.limits.max_plan_revisions must be positive")
+        self.max_plan_revisions = self.workflow.limits.max_plan_revisions
         from subsched.lease import LeaseManager
 
         self.lease_manager = LeaseManager(max_concurrency=concurrency)
@@ -400,6 +418,212 @@ class Scheduler:
         )
         return retry.transition(next_state, reason=reason), reason
 
+    def _multi_stage_planning_enabled(self, task: Task) -> bool:
+        """#280: only READY tasks in a `workflow.mode: multi-stage` repo, that have not
+        already had a plan approved (e.g. by a prior attempt before a retry/failover),
+        go through the PLANNING -> PLAN_REVIEW gate before IN_PROGRESS.
+        """
+        return (
+            self.workflow.mode == "multi-stage"
+            and self.workflow.stages.planning
+            and not task.plan_approved
+        )
+
+    def _run_stage_worker(self, task: Task, agent: str, lease_nonce: str) -> AgentResult:
+        """Run `self.worker` for a single PLANNING/PLAN_REVIEW stage.
+
+        Mirrors the process-record bookkeeping the normal IN_PROGRESS dispatch does
+        (#164), but is exempt from `_enforce_handoff_freshness` (#280 requirement 4:
+        these are evaluation-gate stages, not the continuous-implementation worker).
+        """
+        if task.worktree is not None:
+            save_process_record(
+                Path(task.worktree),
+                ProcessRecord(
+                    pid=os.getpid(),
+                    started_at=get_process_start_time(os.getpid()) or "",
+                    agent=agent,
+                    issue_number=task.issue_number,
+                    worktree=task.worktree,
+                    attempt_nonce=lease_nonce,
+                ),
+            )
+        try:
+            return self.worker.run(task, agent)
+        except Exception as error:
+            self._log(
+                "worker_exception",
+                level="ERROR",
+                issue_number=task.issue_number,
+                agent=agent,
+                task_id=task.task_id,
+                message=str(error),
+                data={"exception_type": type(error).__name__, "attempt": task.attempt},
+            )
+            return AgentResult(AgentResultKind.FAILURE, output=type(error).__name__)
+        finally:
+            if task.worktree is not None:
+                clear_process_record(Path(task.worktree), task.issue_number)
+
+    def _escalate_stage(self, task: Task, agent: str, now: datetime, reason: str) -> None:
+        """Fail-closed escalation to NEEDS_HUMAN for a PLANNING/PLAN_REVIEW stage."""
+        escalated = task.transition(
+            TaskState.NEEDS_HUMAN, current_agent=None, now=now, reason=reason
+        )
+        self.queue = self.queue.replace(escalated)
+        self._persist()
+        self._log(
+            "task_transition",
+            level="ERROR",
+            issue_number=escalated.issue_number,
+            agent=agent,
+            task_id=escalated.task_id,
+            message=reason,
+            data={"from_state": task.status.value, "to_state": escalated.status.value},
+        )
+
+    def _run_planning_and_review(
+        self, task: Task, agent: str, now: datetime, lease_nonce: str
+    ) -> tuple[str, Task | None]:
+        """Run the PLANNING -> PLAN_REVIEW gate (#280 multi-stage workflow, Phase 1).
+
+        Returns `("approved", task)` with `task` already transitioned to IN_PROGRESS
+        (and `plan_approved=True`) once a plan is approved, ready for the caller to
+        continue with the normal implementation dispatch. Returns `("terminal", None)`
+        once a terminal outcome for this tick (NEEDS_HUMAN, RETRY -> READY, a capacity
+        wait, etc.) has already been persisted, logged, and applied to `self.queue` --
+        the caller should stop and return from `tick()` without dispatching further.
+
+        Bounded by `workflow.limits.max_plan_revisions`: a REQUEST_CHANGES verdict
+        re-enters PLANNING (incrementing `Task.plan_revisions`) up to that limit, after
+        which the task fails closed to NEEDS_HUMAN rather than looping forever.
+        """
+        current_task = task
+        while True:
+            # A REQUEST_CHANGES verdict already transitions the task PLAN_REVIEW ->
+            # PLANNING at the bottom of this loop (to durably persist the incremented
+            # plan_revisions counter before the next attempt starts); only transition
+            # here on the loop's first iteration, when current_task is still DISPATCHED.
+            if current_task.status is TaskState.PLANNING:
+                planning = current_task
+            else:
+                planning = current_task.transition(
+                    TaskState.PLANNING, current_agent=agent, now=now
+                )
+                self.queue = self.queue.replace(planning)
+                self._persist()
+            self._log(
+                "dispatch",
+                issue_number=planning.issue_number,
+                agent=agent,
+                task_id=planning.task_id,
+                data={"attempt": planning.attempt, "stage": "planning"},
+            )
+            result = self._run_stage_worker(planning, agent, lease_nonce)
+            if result.kind is not AgentResultKind.PASS:
+                self._handle_result(planning, agent, result, now)
+                return "terminal", None
+
+            plan_file_exists = planning.worktree is not None and (
+                Path(planning.worktree) / plan_path(planning.issue_number)
+            ).is_file()
+            if not plan_file_exists:
+                self._escalate_stage(
+                    planning,
+                    agent,
+                    now,
+                    "planning stage completed without producing a plan file",
+                )
+                return "terminal", None
+
+            if not self.workflow.stages.plan_review:
+                # #280: plan_review is opt-out -- an existing plan file is enough to
+                # auto-approve and proceed straight to implementation.
+                approved = planning.transition(
+                    TaskState.PLAN_REVIEW, current_agent=agent, now=now
+                )
+                approved = approved.transition(
+                    TaskState.IN_PROGRESS, current_agent=agent, now=now
+                )
+                approved = replace(approved, plan_approved=True)
+                self.queue = self.queue.replace(approved)
+                self._persist()
+                return "approved", approved
+
+            review = planning.transition(TaskState.PLAN_REVIEW, current_agent=agent, now=now)
+            self.queue = self.queue.replace(review)
+            self._persist()
+            self._log(
+                "dispatch",
+                issue_number=review.issue_number,
+                agent=agent,
+                task_id=review.task_id,
+                data={"attempt": review.attempt, "stage": "plan_review"},
+            )
+            review_result = self._run_stage_worker(review, agent, lease_nonce)
+            if review_result.kind is not AgentResultKind.PASS:
+                self._handle_result(review, agent, review_result, now)
+                return "terminal", None
+
+            try:
+                verdict = parse_verdict(review_result.output)
+            except PlanVerdictError as error:
+                self._escalate_stage(
+                    review, agent, now, f"malformed plan review verdict: {error}"
+                )
+                return "terminal", None
+
+            if verdict.verdict == "APPROVE":
+                approved = review.transition(
+                    TaskState.IN_PROGRESS, current_agent=agent, now=now
+                )
+                approved = replace(approved, plan_approved=True)
+                self.queue = self.queue.replace(approved)
+                self._persist()
+                self._log(
+                    "task_transition",
+                    issue_number=approved.issue_number,
+                    agent=agent,
+                    task_id=approved.task_id,
+                    data={
+                        "from_state": review.status.value,
+                        "to_state": approved.status.value,
+                        "verdict": verdict.verdict,
+                    },
+                )
+                return "approved", approved
+
+            # REQUEST_CHANGES
+            new_revisions = review.plan_revisions + 1
+            if new_revisions >= self.max_plan_revisions:
+                escalated = replace(review, plan_revisions=new_revisions)
+                self._escalate_stage(
+                    escalated,
+                    agent,
+                    now,
+                    f"exceeded workflow.limits.max_plan_revisions ({self.max_plan_revisions})",
+                )
+                return "terminal", None
+
+            back_to_planning = review.transition(
+                TaskState.PLANNING, current_agent=agent, now=now
+            )
+            back_to_planning = replace(back_to_planning, plan_revisions=new_revisions)
+            self.queue = self.queue.replace(back_to_planning)
+            self._persist()
+            self._log(
+                "task_transition",
+                issue_number=back_to_planning.issue_number,
+                agent=agent,
+                task_id=back_to_planning.task_id,
+                data={
+                    "from_state": review.status.value,
+                    "to_state": back_to_planning.status.value,
+                    "verdict": verdict.verdict,
+                    "plan_revisions": new_revisions,
+                },
+            )
+            current_task = back_to_planning
 
     def discover(
         self,
@@ -824,16 +1048,26 @@ class Scheduler:
                 # budget for the whole Task, not reset per attempt.
                 run_started_at=task.run_started_at or current,
             )
-            running = dispatched.transition(TaskState.IN_PROGRESS, current_agent=agent, now=current)
-            self.queue = self.queue.replace(running)
-            self._persist()
-            self._log(
-                "dispatch",
-                issue_number=running.issue_number,
-                agent=agent,
-                task_id=running.task_id,
-                data={"attempt": running.attempt},
-            )
+            if self._multi_stage_planning_enabled(dispatched):
+                outcome, staged = self._run_planning_and_review(
+                    dispatched, agent, current, lease.nonce
+                )
+                if outcome == "terminal" or staged is None:
+                    return True
+                running = staged
+            else:
+                running = dispatched.transition(
+                    TaskState.IN_PROGRESS, current_agent=agent, now=current
+                )
+                self.queue = self.queue.replace(running)
+                self._persist()
+                self._log(
+                    "dispatch",
+                    issue_number=running.issue_number,
+                    agent=agent,
+                    task_id=running.task_id,
+                    data={"attempt": running.attempt},
+                )
 
             dispatch_started = time.monotonic()
             # #164: record which process is executing this dispatch *before* calling
