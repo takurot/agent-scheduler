@@ -12,6 +12,7 @@ github:
     - security-sensitive
   completion:
     create_pr: true
+    # When true, appends "Closes #<issue>" to PR body so the issue automatically closes upon PR merge
     close_issue: false
 
 # Supported agents: claude, codex. At least one agent must remain enabled.

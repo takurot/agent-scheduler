@@ -137,6 +137,7 @@ class Scheduler:
         max_tasks: int = 50,
         push_enabled: bool = False,
         create_pr_enabled: bool = True,
+        close_issue_enabled: bool = False,
         repo: str | None = None,
         base_branch: str | None = None,
         structured_logger: StructuredLogger | None = None,
@@ -178,6 +179,7 @@ class Scheduler:
         self.verification_timeout_seconds = verification_timeout_seconds
         self.push_enabled = push_enabled
         self.create_pr_enabled = create_pr_enabled
+        self.close_issue_enabled = close_issue_enabled
         self.repo = repo
         if push_enabled and create_pr_enabled and base_branch is None:
             raise ValueError("base_branch must be resolved before enabling push/PR")
@@ -1156,6 +1158,7 @@ class Scheduler:
             base=base_branch,
             repo=self.repo,
             verification_summary=verification_summary,
+            close_issue=self.close_issue_enabled,
         )
         if pr_result.kind is not PullRequestResultKind.SUCCESS or pr_result.info is None:
             reason = f"PR creation failed: {pr_result.output}"

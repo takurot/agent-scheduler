@@ -233,12 +233,6 @@ def _parse_github_config(raw: Mapping[str, Any]) -> GitHubConfig:
     close_issue = _strict_bool(
         completion_raw.get("close_issue", False), "github.completion.close_issue"
     )
-    if close_issue:
-        raise ConfigError(
-            "github.completion.close_issue: true is not supported yet; issue auto-close "
-            "requires a separate write-permission tier that is not implemented (SPEC "
-            "§34/§41). Leave close_issue unset or false."
-        )
     completion = GitHubCompletionConfig(
         create_pr=_strict_bool(
             completion_raw.get("create_pr", True), "github.completion.create_pr"

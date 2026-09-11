@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -246,16 +247,21 @@ def test_config_rejects_unsafe_billing(tmp_path: Path, billing_yaml: str) -> Non
         load_config(path)
 
 
-def test_config_rejects_close_issue_true(tmp_path: Path) -> None:
-    """Regression test for #136: close_issue: true has no implemented runtime path (it
-    would require a separate write-permission tier per SPEC), so accepting it silently
-    would be misleading -- config must fail closed instead of just ignoring it."""
+def test_config_accepts_close_issue_true(tmp_path: Path) -> None:
     path = tmp_path / "scheduler.yaml"
     path.write_text(
         "github:\n  repo: o/r\n  completion:\n    close_issue: true\n", encoding="utf-8"
     )
+    config = load_config(path)
+    assert config.github.completion.close_issue is True
 
-    with pytest.raises(ConfigError, match="close_issue"):
+
+def test_config_rejects_non_boolean_close_issue(tmp_path: Path) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\n  completion:\n    close_issue: yes-please\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match=re.escape("github.completion.close_issue")):
         load_config(path)
 
 
