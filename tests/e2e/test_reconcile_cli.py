@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -16,7 +17,9 @@ runner = CliRunner()
 
 
 def invoke(repository: Path, *arguments: str) -> Result:
-    return runner.invoke(app, ["--repository", str(repository), *arguments])
+    return runner.invoke(
+        app, ["--repository", str(repository), *arguments], env={"NO_COLOR": "1"}
+    )
 
 
 def seed_task(
@@ -135,7 +138,8 @@ def test_reconcile_requires_repo_when_not_configured(tmp_path: Path) -> None:
     result = invoke(tmp_path, "reconcile")
 
     assert result.exit_code != 0
-    assert "--repo" in result.output
+    clean_output = re.sub(r"\x1b\[[0-9;]*[mK]", "", result.output)
+    assert "--repo" in clean_output
 
 
 def test_reconcile_with_no_candidates_is_a_no_op(tmp_path: Path) -> None:
