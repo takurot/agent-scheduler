@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 from subsched.agents.native import NativeWorker
 from subsched.config import ConfigError
+from subsched.gitenv import git_safe_env
 from subsched.github.issues import GitHubCliError, GitHubIssueSource
 from subsched.handoff import parse_semantic_handoff
 from subsched.init import InitError, build_scaffold_plan, write_scaffold_plan
@@ -165,6 +166,7 @@ def inspect_task(issue_number: int, repository_path: str | None = None) -> dict[
                     text=True,
                     timeout=10,
                     check=False,
+                    env=git_safe_env(),
                 )
                 if log.returncode == 0:
                     result["recent_commits"] = tuple(
@@ -263,6 +265,7 @@ def trigger_dispatch(
             "native execution requires subscription_billing_verified=True; refusing "
             "to dispatch unverified billing"
         )
+    _github_repo(repository)
 
     argv = [sys.executable, "-m", "subsched", "--repository", str(repository), "run"]
     if issues is not None:
@@ -282,6 +285,7 @@ def trigger_dispatch(
             stdout=log_file,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
     return {
         "status": "dispatched",
@@ -526,7 +530,11 @@ def build_server(options: ServerOptions) -> Any:
 
     @server.resource("subsched://tasks/{issue}/handoff")
     def _handoff_resource(issue: str) -> str:
-        return get_task_handoff_resource(int(issue), default_repository)
+        try:
+            issue_number = int(issue)
+        except ValueError as error:
+            raise McpToolError(f"invalid issue number: {issue}") from error
+        return get_task_handoff_resource(issue_number, default_repository)
 
     @server.resource("subsched://guidelines")
     def _guidelines_resource() -> str:
