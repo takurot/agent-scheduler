@@ -15,6 +15,7 @@ from subsched.github.pull_requests import (
     build_pr_body,
     check_merged_pr_for_issue,
     create_or_get_pull_request,
+    extract_pr_summary,
     find_close_keyword_commits,
     lookup_existing_pr,
 )
@@ -391,3 +392,169 @@ def test_find_close_keyword_commits_strips_git_location_override_env_vars(
     assert isinstance(env, dict)
     for name in GIT_LOCATION_OVERRIDE_VARS:
         assert name not in env
+
+
+def _write_handoff(repo_dir: Path, issue_number: int, completed: str, decisions: str) -> None:
+    handoffs_dir = repo_dir / ".ai" / "handoffs"
+    handoffs_dir.mkdir(parents=True, exist_ok=True)
+    (handoffs_dir / f"{issue_number}.md").write_text(
+        f"""# Issue
+
+#{issue_number} Some title
+
+## Goal
+
+Some goal
+
+## Current Plan
+
+- plan
+
+## Completed
+
+{completed}
+
+## Current Work
+
+None (task completed)
+
+## Decisions
+
+{decisions}
+
+## Known Broken State
+
+None
+
+## Next Action
+
+None
+
+## Timestamp
+
+2026-09-11T00:00:00Z
+""",
+        encoding="utf-8",
+    )
+
+
+def test_extract_pr_summary_uses_handoff_completed_and_decisions(tmp_path: Path) -> None:
+    repo_dir = _git_repo(tmp_path)
+    _write_handoff(
+        repo_dir,
+        103,
+        completed="- Implemented the widget\n- Added tests",
+        decisions="- Chose approach X over Y because it was simpler",
+    )
+    task = Task.from_issue(Issue(number=103, title="Support timeout"))
+
+    summary = extract_pr_summary(repo_dir, task, "main")
+
+    assert "### Completed Changes" in summary
+    assert "Implemented the widget" in summary
+    assert "### Key Decisions" in summary
+    assert "Chose approach X over Y" in summary
+
+
+def test_extract_pr_summary_falls_back_to_git_log_when_handoff_missing(tmp_path: Path) -> None:
+    repo_dir = _git_repo(tmp_path)
+    _commit(repo_dir, "a.txt", "fix: correct the widget rendering\n\nDetails about the fix.")
+    task = Task.from_issue(Issue(number=103, title="Support timeout"))
+
+    summary = extract_pr_summary(repo_dir, task, "main")
+
+    assert "### Commits" in summary
+    assert "fix: correct the widget rendering" in summary
+    assert "Details about the fix." in summary
+
+
+def test_extract_pr_summary_falls_back_to_git_log_when_handoff_placeholder(tmp_path: Path) -> None:
+    repo_dir = _git_repo(tmp_path)
+    _write_handoff(repo_dir, 103, completed="- Task bootstrapped", decisions="- None yet")
+    _commit(repo_dir, "a.txt", "fix: correct the widget rendering")
+    task = Task.from_issue(Issue(number=103, title="Support timeout"))
+
+    summary = extract_pr_summary(repo_dir, task, "main")
+
+    assert "### Commits" in summary
+    assert "fix: correct the widget rendering" in summary
+
+
+def test_extract_pr_summary_falls_back_to_task_title_when_nothing_available(
+    tmp_path: Path,
+) -> None:
+    repo_dir = _git_repo(tmp_path)
+    task = Task.from_issue(Issue(number=103, title="Support timeout"))
+
+    summary = extract_pr_summary(repo_dir, task, "main")
+
+    assert summary == "Support timeout"
+
+
+def test_extract_pr_summary_strips_auto_close_keywords_via_sanitize(tmp_path: Path) -> None:
+    """Regression test for #249: a worker could write 'Fixes #N' into its own handoff;
+    the summary must still be sanitized by build_pr_body before reaching the PR body."""
+    repo_dir = _git_repo(tmp_path)
+    _write_handoff(
+        repo_dir,
+        103,
+        completed="- Fixes #999 by correcting the widget",
+        decisions="- None yet",
+    )
+    task = Task.from_issue(Issue(number=103, title="Support timeout"))
+
+    summary = extract_pr_summary(repo_dir, task, "main")
+    body = build_pr_body(issue_number=103, summary=summary)
+
+    assert "fixes #" not in body.lower()
+    assert "issue #999" in body.lower()
+
+
+def test_extract_pr_summary_redacts_secrets_via_sanitize(tmp_path: Path) -> None:
+    secret = "github_pat_abcdefghijklmnopqrstuvwxyz"
+    repo_dir = _git_repo(tmp_path)
+    _write_handoff(
+        repo_dir,
+        103,
+        completed=f"- updated with {secret}",
+        decisions="- None yet",
+    )
+    task = Task.from_issue(Issue(number=103, title="Support timeout"))
+
+    summary = extract_pr_summary(repo_dir, task, "main")
+    body = build_pr_body(issue_number=103, summary=summary)
+
+    assert secret not in body
+    assert "[REDACTED]" in body
+
+
+def test_create_or_get_pull_request_uses_extract_pr_summary_when_worktree_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_dir = _git_repo(tmp_path)
+    _write_handoff(
+        repo_dir,
+        103,
+        completed="- Implemented the widget",
+        decisions="- None yet",
+    )
+
+    real_run = subprocess.run
+
+    def fake_gh_only(argv, **kwargs):
+        if argv[0] != "gh":
+            return real_run(argv, **kwargs)
+        if "list" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="[]", stderr="")
+        return subprocess.CompletedProcess(
+            argv, 0, stdout="https://github.com/takurot/agent-scheduler/pull/70\n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_gh_only)
+
+    task = Task.from_issue(Issue(number=103, title="Support timeout")).with_worktree(
+        str(repo_dir)
+    )
+    result = create_or_get_pull_request(task, "issue/103-timeout", base="main")
+
+    assert result.kind is PullRequestResultKind.SUCCESS
