@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
 from conftest import _git_snapshot
 
 
@@ -186,3 +187,41 @@ def test_git_snapshot_stable_across_reads_with_no_changes(tmp_path: Path) -> Non
     first = _git_snapshot(tmp_path)
     second = _git_snapshot(tmp_path)
     assert first == second
+
+
+def test_git_snapshot_raises_instead_of_masking_worktree_list_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: a failing `git worktree list` must not be silently coerced into
+    a `"<error>"` sentinel, since two independent failures (before/after) would then
+    compare equal and mask real repository corruption. It must fail closed instead."""
+    _init(tmp_path)
+    real_run = subprocess.run
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "worktree" in cmd:
+            return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="boom")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    with pytest.raises(RuntimeError, match="git worktree list failed"):
+        _git_snapshot(tmp_path)
+
+
+def test_git_snapshot_raises_instead_of_masking_branch_refs_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same regression as above, for `git for-each-ref`."""
+    _init(tmp_path)
+    real_run = subprocess.run
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "for-each-ref" in cmd:
+            return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="boom")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    with pytest.raises(RuntimeError, match="git for-each-ref failed"):
+        _git_snapshot(tmp_path)

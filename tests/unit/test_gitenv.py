@@ -14,6 +14,9 @@ def test_git_safe_env_strips_location_override_vars() -> None:
         "GIT_OBJECT_DIRECTORY": "/somewhere/.git/objects",
         "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/somewhere/.git/objects",
         "GIT_DISCOVERY_ACROSS_FILESYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/somewhere/.gitconfig",
+        "GIT_CONFIG_SYSTEM": "/somewhere/gitconfig",
+        "GIT_CONFIG_NOSYSTEM": "1",
     }
 
     result = git_safe_env(base)
