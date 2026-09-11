@@ -244,6 +244,30 @@ def test_render_subsched_yaml_without_repo_still_parses_as_valid_yaml(tmp_path: 
     assert cfg.github.repo is None
 
 
+def test_render_subsched_yaml_close_issue_false_by_default(tmp_path: Path) -> None:
+    content = render_subsched_yaml(repo="owner/name", verification_commands=("pytest",))
+    config_path = tmp_path / "subsched.yaml"
+    config_path.write_text(content, encoding="utf-8")
+
+    cfg = load_config(config_path)
+
+    assert cfg.github.completion.close_issue is False
+    assert "close_issue: false" in content
+
+
+def test_render_subsched_yaml_close_issue_true_when_requested(tmp_path: Path) -> None:
+    content = render_subsched_yaml(
+        repo="owner/name", verification_commands=("pytest",), close_issue=True
+    )
+    config_path = tmp_path / "subsched.yaml"
+    config_path.write_text(content, encoding="utf-8")
+
+    cfg = load_config(config_path)
+
+    assert cfg.github.completion.close_issue is True
+    assert "close_issue: true" in content
+
+
 def test_render_agent_instructions_contains_required_guidelines() -> None:
     content = render_agent_instructions(verification_commands=("pytest",))
 
@@ -283,6 +307,20 @@ def test_build_scaffold_plan_respects_agents_and_claude_md_toggles(tmp_path: Pat
 
     names = {f.path.name for f in plan.files}
     assert names == {"subsched.yaml"}
+
+
+def test_build_scaffold_plan_propagates_close_issue(tmp_path: Path) -> None:
+    plan = build_scaffold_plan(
+        tmp_path,
+        repo_override="owner/name",
+        include_agents_md=False,
+        include_claude_md=False,
+        close_issue=True,
+        run=_fake_run(1),
+    )
+
+    yaml_file = next(f for f in plan.files if f.path.name == "subsched.yaml")
+    assert "close_issue: true" in yaml_file.content
 
 
 def test_build_scaffold_plan_marks_existing_files(tmp_path: Path) -> None:

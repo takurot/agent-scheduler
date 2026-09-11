@@ -24,6 +24,34 @@ def test_init_scaffolds_all_files_with_explicit_repo(tmp_path: Path) -> None:
     assert cfg.github.repo == "owner/name"
 
 
+def test_init_close_issue_defaults_to_false(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["init", str(tmp_path), "--repo", "owner/name"])
+
+    assert result.exit_code == 0, result.output
+    cfg = load_config(tmp_path / "subsched.yaml")
+    assert cfg.github.completion.close_issue is False
+
+
+def test_init_close_issue_flag_scaffolds_true(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app, ["init", str(tmp_path), "--repo", "owner/name", "--close-issue"]
+    )
+
+    assert result.exit_code == 0, result.output
+    cfg = load_config(tmp_path / "subsched.yaml")
+    assert cfg.github.completion.close_issue is True
+
+
+def test_init_no_close_issue_flag_scaffolds_false(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app, ["init", str(tmp_path), "--repo", "owner/name", "--no-close-issue"]
+    )
+
+    assert result.exit_code == 0, result.output
+    cfg = load_config(tmp_path / "subsched.yaml")
+    assert cfg.github.completion.close_issue is False
+
+
 def test_init_detects_python_stack_and_writes_pytest_commands(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
 

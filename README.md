@@ -293,7 +293,9 @@ github:
   # exclude_labels: ["blocked"]   # OR semantics: excluded if any match
   completion:
     create_pr: true
-    # When true, appends "Closes #<issue>" to the PR body to automatically close the issue upon merge
+    # false (default): the issue is left open after the PR merges, for human review (fail-closed).
+    # true: appends "Closes #<issue>" to the PR body, so GitHub closes the issue on merge.
+    # See FAQ #6 for the safety rationale.
     close_issue: false
 
 # Supported agents: claude, codex. At least one agent must remain enabled.
@@ -404,7 +406,7 @@ See this repository's own [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) 
 
 | Command | Description |
 |---|---|
-| `subsched init` | Scaffold `subsched.yaml`, `AGENTS.md`, and `CLAUDE.md` for a new repository (`--repo`, `--agents-md/--no-agents-md`, `--claude-md/--no-claude-md`, `--force`, `--dry-run`) |
+| `subsched init` | Scaffold `subsched.yaml`, `AGENTS.md`, and `CLAUDE.md` for a new repository (`--repo`, `--agents-md/--no-agents-md`, `--claude-md/--no-claude-md`, `--close-issue/--no-close-issue`, `--force`, `--dry-run`) |
 | `subsched doctor` | Check prerequisite binaries (`git`, `gh`, `claude`, `codex`) and inspect GitHub token scope |
 | `subsched run` | Discover issues, initialize queue, and dispatch tasks (`--allow-native`, `--subscription-billing-verified`, `--watch`, `--dry-run`) |
 | `subsched status` | Display queue breakdown, cooldowns, and scheduler state (`-v` / `--verbose` for per-task detail) |
@@ -448,6 +450,12 @@ Yes, execution details are captured and persisted across multiple layers:
 - **Agent Process Logs & Transcripts**: Stdout, stderr, and output from native coding agent CLI invocations are captured and recorded in per-task worktree directories and scheduler execution logs.
 - **Task Artifacts & Handoffs**: Every worktree retains `.ai/tasks/<issue>.md`, `.ai/handoffs/<issue>.md`, and `.ai/checkpoints/`, documenting incremental progress across worker dispatches and restarts.
 - **Markdown Run Reports**: Comprehensive execution summaries (covering productivity, reliability, failure breakdowns, and capacity events) can be generated at any time using `subsched metrics --report run_report.md`.
+
+### 6. Why does the GitHub issue stay open after `subsched` merges its pull request?
+This is expected, fail-closed behavior, not a failure: `github.completion.close_issue` defaults to `false`. `subsched` only appends `Closes #<issue>` to the PR body (which lets GitHub auto-close the issue on merge) when you explicitly opt in.
+- **Rationale**: Leaving the issue open gives a human a deliberate checkpoint to review the merged diff before the issue is marked resolved, rather than trusting an agent's self-assessment to close it silently.
+- **To opt in**: Set `close_issue: true` under `github.completion` in `subsched.yaml`, or scaffold it directly with `subsched init --close-issue`. The `subsched_init_repo` MCP tool accepts the same `close_issue` parameter.
+- **To confirm success without auto-close**: Check the PR merge status and the task's `COMPLETE` state via `subsched status --verbose` or `subsched metrics --json`; a merged PR with `close_issue: false` is a completed task, not a stuck one.
 
 ---
 

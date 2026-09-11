@@ -388,6 +388,31 @@ def test_init_repo_writes_scaffold(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert (tmp_path / "subsched.yaml").read_text() == "github: {}\n"
 
 
+def test_init_repo_propagates_close_issue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from subsched.init import ScaffoldFile, ScaffoldPlan, StackDetection
+
+    plan = ScaffoldPlan(
+        stack=StackDetection(name="python", verification_commands=("pytest",)),
+        repo="acme/widgets",
+        files=(
+            ScaffoldFile(
+                path=tmp_path / "subsched.yaml", content="github: {}\n", exists=False
+            ),
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    def _fake_build_scaffold_plan(*args: Any, **kwargs: Any) -> ScaffoldPlan:
+        captured.update(kwargs)
+        return plan
+
+    monkeypatch.setattr("subsched.mcp_server.build_scaffold_plan", _fake_build_scaffold_plan)
+
+    init_repo(str(tmp_path), close_issue=True)
+
+    assert captured["close_issue"] is True
+
+
 def test_init_repo_wraps_init_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from subsched.init import ScaffoldFile, ScaffoldPlan, StackDetection
 
