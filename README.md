@@ -95,6 +95,19 @@ uv run subsched doctor
 
 ## Usage
 
+### Bootstrapping a New Repository
+Scaffold `subsched.yaml`, `AGENTS.md`, and `CLAUDE.md`, auto-detecting the project's
+stack (Python/Node/Go/Rust) and GitHub repo slug:
+```bash
+subsched init
+
+# Preview without writing to disk
+subsched init --dry-run
+
+# Overwrite existing files
+subsched init --force
+```
+
 ### Environment Diagnostic
 Verify local executables and GitHub token scope:
 ```bash
@@ -280,6 +293,7 @@ See this repository's own [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) 
 
 | Command | Description |
 |---|---|
+| `subsched init` | Scaffold `subsched.yaml`, `AGENTS.md`, and `CLAUDE.md` for a new repository (`--repo`, `--agents-md/--no-agents-md`, `--claude-md/--no-claude-md`, `--force`, `--dry-run`) |
 | `subsched doctor` | Check prerequisite binaries (`git`, `gh`, `claude`, `codex`) and inspect GitHub token scope |
 | `subsched run` | Discover issues, initialize queue, and dispatch tasks (`--allow-native`, `--subscription-billing-verified`, `--watch`, `--dry-run`) |
 | `subsched status` | Display queue breakdown, cooldowns, and scheduler state (`-v` / `--verbose` for per-task detail) |
