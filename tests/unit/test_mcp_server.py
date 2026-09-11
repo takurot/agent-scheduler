@@ -29,6 +29,7 @@ from subsched.mcp_server import (
     init_repo,
     inspect_task,
     queue_issues,
+    reconcile_tasks,
     resolve_needs_human,
     resolve_repository,
     trigger_dispatch,
@@ -520,6 +521,129 @@ def test_get_metrics_returns_expected_shape(tmp_path: Path) -> None:
     assert set(result.keys()) == {"productivity", "reliability", "capacity"}
 
 
+# --- reconcile_tasks -------------------------------------------------------------
+
+_real_subprocess_run = subprocess.run
+
+
+def fake_gh_pr_list(stdout: str) -> object:
+    """Fake `subprocess.run` that only intercepts `gh pr list`, letting other
+    invocations (e.g. the `git rev-parse` used to resolve the repository root)
+    fall through to the real `subprocess.run`.
+    """
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[:3] != ["gh", "pr", "list"]:
+            return _real_subprocess_run(argv, **kwargs)  # type: ignore[arg-type]
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    return fake_run
+
+
+def test_reconcile_tasks_advances_merged_pr_to_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    store.save_tasks((_task(1, TaskState.READY_FOR_REVIEW, pr=10),))
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        fake_gh_pr_list('[{"number": 10, "state": "MERGED", "mergedAt": null}]'),
+    )
+
+    result = reconcile_tasks(str(tmp_path), repo="owner/project")
+
+    assert result["reconciled_complete"] == 1
+    assert result["reconciled_needs_human"] == 0
+    assert result["unchanged"] == 0
+    assert result["dry_run"] is False
+    assert result["items"][0]["action"] == "COMPLETE"
+    assert store.load_tasks()[0].status is TaskState.COMPLETE
+
+
+def test_reconcile_tasks_dry_run_does_not_mutate_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    store.save_tasks((_task(2, TaskState.READY_FOR_REVIEW, pr=20),))
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        fake_gh_pr_list('[{"number": 20, "state": "MERGED", "mergedAt": null}]'),
+    )
+
+    result = reconcile_tasks(str(tmp_path), repo="owner/project", dry_run=True)
+
+    assert result["reconciled_complete"] == 1
+    assert result["dry_run"] is True
+    assert store.load_tasks()[0].status is TaskState.READY_FOR_REVIEW
+
+
+def test_reconcile_tasks_no_candidates_returns_zero_counts(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+
+    result = reconcile_tasks(str(tmp_path), repo="owner/project")
+
+    assert result == {
+        "reconciled_complete": 0,
+        "reconciled_needs_human": 0,
+        "unchanged": 0,
+        "dry_run": False,
+        "items": [],
+    }
+
+
+def test_reconcile_tasks_raises_on_gh_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    store.save_tasks((_task(3, TaskState.READY_FOR_REVIEW, pr=30),))
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not authenticated")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(McpToolError, match="failed to fetch PR state"):
+        reconcile_tasks(str(tmp_path), repo="owner/project")
+
+    assert store.load_tasks()[0].status is TaskState.READY_FOR_REVIEW
+
+
+def test_reconcile_tasks_uses_configured_repo_when_not_provided(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    store.save_tasks((_task(4, TaskState.READY_FOR_REVIEW, pr=40),))
+    (tmp_path / "subsched.yaml").write_text(
+        yaml.safe_dump({"github": {"repo": "owner/project"}})
+    )
+
+    seen_repos: list[str] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[:3] != ["gh", "pr", "list"]:
+            return _real_subprocess_run(argv, **kwargs)  # type: ignore[arg-type]
+        seen_repos.append(argv[argv.index("--repo") + 1])
+        return subprocess.CompletedProcess(
+            argv, 0, stdout='[{"number": 40, "state": "OPEN", "mergedAt": null}]', stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = reconcile_tasks(str(tmp_path))
+
+    assert seen_repos == ["owner/project"]
+    assert result["unchanged"] == 1
+
+
 # --- resources -------------------------------------------------------------------
 
 
@@ -610,6 +734,7 @@ def test_build_server_registers_all_tools_resources_and_prompts(tmp_path: Path) 
         "subsched_cancel_task",
         "subsched_control",
         "subsched_get_metrics",
+        "subsched_reconcile",
     }
     assert "subsched://queue" in resources
     assert "subsched://capacities" in resources

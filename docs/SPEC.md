@@ -1354,7 +1354,13 @@ Bernsteinを採用できる場合、このverification gateを既存機能へ委
 
 - `execution.ci_monitoring: false`（既定）: `READY_FOR_REVIEW`のままとどまり、Scheduler
   は自動でCOMPLETEへ昇格させない。PR merge後の後始末（Issue再発見の抑止等）は#146の
-  discovery-time reconciliationが別途担当する。
+  discovery-time reconciliationが別途担当する。明示的にPR状態を反映させたい場合は
+  `subsched reconcile`（#277）を実行する。これは`gh pr list`でPRのlifecycle状態を
+  batch取得し、`MERGED`なら`COMPLETE`へ、mergeされずに`CLOSED`なら`NEEDS_HUMAN`へ
+  遷移させ、`OPEN`または不明な状態のtaskは`READY_FOR_REVIEW`のまま変更しない。`gh`
+  実行エラー・認証失敗・不正な出力の場合はscheduler状態を一切変更せずnon-zeroで
+  終了する（fail-closed）。dispatch loopや`discover()`からは暗黙に呼ばれず、必ず
+  operatorまたはMCPクライアントが明示的に起動する。
 - `execution.ci_monitoring: true`: 各tickで`READY_FOR_REVIEW`かつ`pr`を持つTaskの
   CI状態を`gh pr checks`経由で確認する。
   - CI `PASS` → `COMPLETE`へ昇格する。
@@ -2860,7 +2866,7 @@ CLIとの並行実行時にも競合やデータ破損を完全に防止する�
 
 ## 6. 公開仕様
 
-### Tools (9個)
+### Tools (10個)
 1. `subsched_get_status`: キュー状態内訳、タスク一覧、プロバイダークールダウン状態の取得。
 2. `subsched_inspect_task`: 指定Issueの詳細情報、パース済みセマンティックハンドオフ、直近コミットの取得。
 3. `subsched_queue_issues`: GitHubからのIssue自動検出およびキュー登録（`dry_run` 対応）。
@@ -2870,6 +2876,7 @@ CLIとの並行実行時にも競合やデータ破損を完全に防止する�
 7. `subsched_cancel_task`: ワークツリーおよびハンドオフファイルを温存したままタスクを `CANCELLED` に遷移。
 8. `subsched_control`: スケジューラーの新規ディスパッチの一時停止 (`pause`) / 再開 (`resume`)。
 9. `subsched_get_metrics`: 生産性、信頼性、キャパシティ指標の集計取得。
+10. `subsched_reconcile`（#277）: `READY_FOR_REVIEW` タスクを実際のPR状態と突き合わせ、mergeされたPRを`COMPLETE`へ、mergeされずcloseされたPRを`NEEDS_HUMAN`へ遷移させる（`dry_run` 対応、`gh`エラー時はfail-closed）。ワークツリーのpruneはCLI (`subsched reconcile --prune-worktrees`) 専用で、このツールからは行わない。
 
 ### Resources (4個)
 1. `subsched://queue`: タスク一覧および一時停止状態のリアルタイムJSONスナップショット。
