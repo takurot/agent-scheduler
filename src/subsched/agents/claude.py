@@ -7,9 +7,10 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.process import COMMON_ENV_ALLOWLIST, filter_environment, run_process_group
@@ -127,7 +128,9 @@ def parse_claude_cli_metadata(*, version_output: str, help_output: str) -> Claud
     )
 
 
-def parse_claude_result(outcome: ClaudeProcessOutcome) -> AgentResult:
+def parse_claude_result(
+    outcome: ClaudeProcessOutcome, observed_at: datetime | None = None
+) -> AgentResult:
     if outcome.timed_out:
         if outcome.cleanup_succeeded is not True:
             return AgentResult(
@@ -141,14 +144,20 @@ def parse_claude_result(outcome: ClaudeProcessOutcome) -> AgentResult:
         return AgentResult(AgentResultKind.PASS, output="claude completed")
     if outcome.stdout and (payload is None or not _is_known_result(payload)):
         return AgentResult(AgentResultKind.UNKNOWN, output="claude result unknown")
-    if payload is not None and (payload.get("subtype") == "success" or outcome.exit_code == 0):
+    is_api_error = payload is not None and _is_api_error_payload(payload)
+    if (
+        payload is not None
+        and not is_api_error
+        and (payload.get("subtype") == "success" or outcome.exit_code == 0)
+    ):
         return AgentResult(AgentResultKind.UNKNOWN, output="claude result unknown")
 
     message = _failure_message(payload, outcome.stderr)
     lower_message = message.casefold()
     capacity_kind = _capacity_kind(lower_message)
     if capacity_kind is not None:
-        reset_at = _reset_at(payload)
+        resolved_observed_at = observed_at if observed_at is not None else datetime.now(UTC)
+        reset_at = _reset_at(payload, resolved_observed_at)
         if reset_at is None:
             return AgentResult(AgentResultKind.UNKNOWN, output="claude capacity reset unknown")
         return AgentResult(capacity_kind, reset_at=reset_at, output="claude capacity exhausted")
@@ -215,8 +224,16 @@ def _is_known_stream_event(event: dict[str, Any]) -> bool:
     return False
 
 
+def _is_api_error_payload(payload: dict[str, Any]) -> bool:
+    return payload.get("terminal_reason") == "api_error" or payload.get("api_error_status") == 429
+
+
 def _is_known_result(payload: dict[str, Any]) -> bool:
     subtype = payload.get("subtype")
+    is_api_error = _is_api_error_payload(payload)
+    has_valid_num_turns = (type(payload.get("num_turns")) is int and payload["num_turns"] >= 0) or (
+        is_api_error and "num_turns" not in payload
+    )
     has_known_shape = (
         payload.get("type") == "result"
         and subtype
@@ -228,11 +245,12 @@ def _is_known_result(payload: dict[str, Any]) -> bool:
             "error_max_structured_output_retries",
         }
         and type(payload.get("is_error")) is bool
-        and type(payload.get("num_turns")) is int
-        and payload["num_turns"] >= 0
+        and has_valid_num_turns
     )
     if not has_known_shape:
         return False
+    if is_api_error and subtype == "success" and payload["is_error"] is True:
+        return True
     return (subtype == "success") is (payload["is_error"] is False)
 
 
@@ -327,19 +345,51 @@ def _capacity_kind(message: str) -> AgentResultKind | None:
     return None
 
 
-def _reset_at(payload: dict[str, Any] | None) -> datetime | None:
-    if payload is None or not isinstance(payload.get("reset_at"), str):
+_NATURAL_RESET_AT_PATTERN = re.compile(
+    r"resets (\d{1,2}:\d{2}(?:am|pm))(?:\s*\(([^)]+)\))?", re.IGNORECASE
+)
+
+
+def _reset_at(payload: dict[str, Any] | None, observed_at: datetime) -> datetime | None:
+    if payload is None:
         return None
+    if isinstance(payload.get("reset_at"), str):
+        try:
+            reset_at = datetime.fromisoformat(payload["reset_at"])
+        except ValueError:
+            return None
+        return reset_at if reset_at.tzinfo is not None else None
+    return _parse_natural_language_reset_at(payload.get("result"), observed_at)
+
+
+def _parse_natural_language_reset_at(result: Any, observed_at: datetime) -> datetime | None:
+    if not isinstance(result, str):
+        return None
+    match = _NATURAL_RESET_AT_PATTERN.search(result)
+    if match is None:
+        return None
+    time_text, tz_name = match.group(1), match.group(2)
     try:
-        reset_at = datetime.fromisoformat(payload["reset_at"])
+        parsed_time = datetime.strptime(time_text.lower(), "%I:%M%p")
     except ValueError:
         return None
-    return reset_at if reset_at.tzinfo is not None else None
+    tzinfo = observed_at.tzinfo or UTC
+    if tz_name is not None:
+        try:
+            tzinfo = ZoneInfo(tz_name)
+        except (ZoneInfoNotFoundError, ValueError):
+            return None
+    localized_observed_at = observed_at.astimezone(tzinfo)
+    reset_at = localized_observed_at.replace(
+        hour=parsed_time.hour, minute=parsed_time.minute, second=0, microsecond=0
+    )
+    if reset_at < localized_observed_at:
+        reset_at += timedelta(days=1)
+    return reset_at
 
 
 def _contains_any(value: str, candidates: tuple[str, ...]) -> bool:
     return any(candidate in value for candidate in candidates)
-
 
 
 class ClaudeAgent:

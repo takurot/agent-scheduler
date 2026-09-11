@@ -1,0 +1,8 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": true,
+  "api_error_status": 429,
+  "result": "You've hit your session limit · resets 8:10pm (Asia/Tokyo)",
+  "terminal_reason": "api_error"
+}

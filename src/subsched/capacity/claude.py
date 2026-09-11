@@ -115,7 +115,7 @@ def parse_claude_capacity(
             return tuple(results)
 
     # 2. Fall back to standard result parsing
-    res = parse_claude_result(outcome)
+    res = parse_claude_result(outcome, observed_at=current)
     if res.kind is AgentResultKind.PASS:
         return (
             Capacity(

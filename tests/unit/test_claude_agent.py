@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -51,6 +52,39 @@ def test_classifies_capacity_with_structured_reset(
 
     assert result.kind is kind
     assert result.reset_at == datetime.fromisoformat(reset_at)
+
+
+def test_classifies_session_429_payload_with_natural_language_reset() -> None:
+    observed_at = datetime(2026, 8, 13, 5, 0, tzinfo=UTC)
+
+    result = parse_claude_result(
+        ClaudeProcessOutcome(exit_code=1, stdout=fixture("session-429.json")),
+        observed_at=observed_at,
+    )
+
+    assert result.kind is AgentResultKind.CAPACITY_SESSION
+    assert result.reset_at == datetime(2026, 8, 13, 20, 10, tzinfo=ZoneInfo("Asia/Tokyo"))
+
+
+def test_session_429_payload_rolls_over_to_next_day_when_reset_time_has_passed() -> None:
+    observed_at = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
+
+    result = parse_claude_result(
+        ClaudeProcessOutcome(exit_code=1, stdout=fixture("session-429.json")),
+        observed_at=observed_at,
+    )
+
+    assert result.kind is AgentResultKind.CAPACITY_SESSION
+    assert result.reset_at == datetime(2026, 8, 14, 20, 10, tzinfo=ZoneInfo("Asia/Tokyo"))
+
+
+def test_session_429_payload_with_unknown_timezone_fails_closed() -> None:
+    payload = fixture("session-429.json").replace("Asia/Tokyo", "Not/AZone")
+
+    result = parse_claude_result(ClaudeProcessOutcome(exit_code=1, stdout=payload))
+
+    assert result.kind is AgentResultKind.UNKNOWN
+    assert result.output == "claude capacity reset unknown"
 
 
 @pytest.mark.parametrize(
