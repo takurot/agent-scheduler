@@ -241,8 +241,6 @@ def parse_codex_jsonl(payload: str, *, returncode: int) -> AgentResult:
                 text = item.get("text")
                 if not isinstance(text, str):
                     return _malformed_result()
-                if final_message is not None:
-                    return _malformed_result()
                 final_message = text
 
     if open_items:
