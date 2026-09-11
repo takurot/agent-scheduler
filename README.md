@@ -141,6 +141,10 @@ subsched run --config subsched.yaml --allow-native --subscription-billing-verifi
 subsched run --config subsched.yaml --allow-native --subscription-billing-verified --watch
 ```
 
+When `--config` is omitted, `run` and `config validate` load `subsched.yaml` from the
+repository root automatically if it exists, falling back to an empty configuration
+(requiring `--repo`) only when no such file is present.
+
 Without `--watch`, `run` remains one-shot and reports when durable work is waiting. `--watch`
 re-polls pending CI and waits until the next capacity reset, but exits at
 `--watch-timeout-seconds`. Capacity is not probed before `Scheduler.wait_duration()` elapses.

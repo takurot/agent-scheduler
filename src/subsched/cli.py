@@ -100,6 +100,19 @@ class ResolvedIntent:
     labels: tuple[str, ...] = ()
 
 
+def _load_effective_config(repository: Path, config: Path | None) -> SchedulerConfig:
+    """Resolve the configuration `run` and `config validate` operate on: an explicit
+    `--config` always wins; otherwise fall back to `subsched.yaml` in the repository
+    root if present (#268), and only then to an empty `SchedulerConfig()`.
+    """
+    if config is not None:
+        return load_config(config)
+    default_config_path = repository / "subsched.yaml"
+    if default_config_path.is_file():
+        return load_config(default_config_path)
+    return SchedulerConfig()
+
+
 def _resolve_intent(
     *,
     cfg: SchedulerConfig,
@@ -368,7 +381,7 @@ def run(
     """Discover issues and initialize the durable queue."""
     context: Context = ctx.obj
     try:
-        cfg = load_config(config) if config is not None else SchedulerConfig()
+        cfg = _load_effective_config(context.repository, config)
     except ConfigError as error:
         raise typer.BadParameter(str(error), param_hint="--config") from error
 
@@ -669,6 +682,7 @@ def run(
 
 @config_app.command("validate")
 def config_validate(
+    ctx: typer.Context,
     query: Annotated[
         str | None,
         typer.Argument(help="Natural language instruction (e.g. 'GitHubのopen issueをすべて実行')"),
@@ -688,8 +702,9 @@ def config_validate(
     confirm a config file (or a set of CLI overrides) resolves to what you expect before
     actually running it (#144).
     """
+    context: Context = ctx.obj
     try:
-        cfg = load_config(config) if config is not None else SchedulerConfig()
+        cfg = _load_effective_config(context.repository, config)
     except ConfigError as error:
         raise typer.BadParameter(str(error), param_hint="--config") from error
 

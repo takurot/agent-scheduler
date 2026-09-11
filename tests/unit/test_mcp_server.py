@@ -326,6 +326,10 @@ def test_trigger_dispatch_launches_detached_dry_run_subprocess(
     assert "--dry-run" in captured["argv"]
     assert "--allow-native" not in captured["argv"]
     assert captured["kwargs"]["start_new_session"] is True
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert "--config" in argv
+    assert argv[argv.index("--config") + 1] == str(tmp_path / "subsched.yaml")
 
 
 def test_trigger_dispatch_native_forwards_gates(
@@ -357,6 +361,7 @@ def test_trigger_dispatch_native_forwards_gates(
     assert "--allow-native" in captured["argv"]
     assert "--subscription-billing-verified" in captured["argv"]
     assert "--issues" in captured["argv"]
+    assert "--config" in captured["argv"]
 
 
 # --- init_repo -------------------------------------------------------------------
