@@ -9,6 +9,7 @@ from pathlib import Path
 
 from subsched.agents.process import redact_sensitive_command_audit
 from subsched.gitenv import git_safe_env
+from subsched.handoff import parse_semantic_handoff
 from subsched.models import Task
 
 # Shared between the PR body sanitizer (_strip_close_keywords) and the commit-message
@@ -120,6 +121,103 @@ def find_close_keyword_commits(
                 )
             )
     return tuple(violations)
+
+
+# Default handoff content stamped by bootstrap_task_files (contract.py) before any
+# real progress has been recorded -- treated as "unpopulated" so a freshly-bootstrapped
+# worktree falls back to commit log / task.title instead of echoing boilerplate (#249).
+_PLACEHOLDER_HANDOFF_VALUES = frozenset({"- task bootstrapped", "- none yet"})
+
+
+def _extract_commit_log_summary(
+    worktree_dir: Path,
+    base_branch: str,
+    env: dict[str, str] | None,
+    timeout_seconds: float,
+) -> str:
+    """Summarize commits reachable from HEAD but not base_branch as a bullet list of
+    subject lines (with any body lines indented underneath). Read-only `git log`;
+    returns "" (not None) on any failure so the caller can fall back safely.
+    """
+    argv = [
+        "git",
+        "-C",
+        str(worktree_dir),
+        "log",
+        f"{base_branch}..HEAD",
+        f"--format=%s{_LOG_FIELD_SEP}%b{_LOG_RECORD_SEP}",
+    ]
+    try:
+        res = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_seconds,
+            env=git_safe_env(env),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if res.returncode != 0:
+        return ""
+
+    entries: list[str] = []
+    for record in res.stdout.split(_LOG_RECORD_SEP):
+        record = record.strip("\n")
+        if not record:
+            continue
+        subject, _, body = record.partition(_LOG_FIELD_SEP)
+        subject = subject.strip()
+        if not subject:
+            continue
+        entry = f"- {subject}"
+        body_lines = "\n".join(f"  {line}" for line in body.strip().splitlines() if line.strip())
+        if body_lines:
+            entry = f"{entry}\n{body_lines}"
+        entries.append(entry)
+    if not entries:
+        return ""
+    return "### Commits\n\n" + "\n".join(entries)
+
+
+def extract_pr_summary(
+    worktree_dir: Path,
+    task: Task,
+    base_branch: str,
+    env: dict[str, str] | None = None,
+    timeout_seconds: float = 30.0,
+) -> str:
+    """Build a rich PR summary from the worktree's semantic handoff and commit log
+    (#249), so reviewers see what changed without inspecting the full diff.
+
+    Preference order: populated handoff `## Completed` (plus `## Decisions` if
+    present) -> commit subjects/bodies from `git log base_branch..HEAD` -> task.title.
+    The caller must still pass the result through `_sanitize_pr_section` (redaction,
+    auto-close keyword stripping, length cap) -- this function only assembles content.
+    """
+    handoff_file = worktree_dir / ".ai" / "handoffs" / f"{task.issue_number}.md"
+    if handoff_file.is_file():
+        try:
+            content = handoff_file.read_text(encoding="utf-8")
+        except OSError:
+            content = ""
+        parsed = parse_semantic_handoff(content) if content else None
+        if parsed is not None:
+            completed = parsed.completed.strip()
+            if completed and completed.lower() not in _PLACEHOLDER_HANDOFF_VALUES:
+                sections = [f"### Completed Changes\n\n{completed}"]
+                decisions = parsed.decisions.strip()
+                if decisions and decisions.lower() not in _PLACEHOLDER_HANDOFF_VALUES:
+                    sections.append(f"### Key Decisions\n\n{decisions}")
+                return "\n\n".join(sections)
+
+    commit_summary = _extract_commit_log_summary(worktree_dir, base_branch, env, timeout_seconds)
+    if commit_summary:
+        return commit_summary
+
+    return task.title
 
 
 def build_pr_body(
@@ -460,9 +558,16 @@ def create_or_get_pull_request(
             output=_redact(f"existing PR verification failed: {check.reason}"),
         )
 
+    summary = (
+        extract_pr_summary(
+            Path(task.worktree), task, base, env=env, timeout_seconds=timeout_seconds
+        )
+        if task.worktree
+        else task.title
+    )
     body = build_pr_body(
         issue_number=task.issue_number,
-        summary=task.title,
+        summary=summary,
         verification_results=verification_summary,
         close_issue=close_issue,
     )
