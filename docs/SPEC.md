@@ -2843,7 +2843,19 @@ subsched mcp [--repository PATH]
 状態を変更するすべてのMCPツール操作は、既存の `JsonStateStore.lock()` 排他ロックを取得して実行され、
 CLIとの並行実行時にも競合やデータ破損を完全に防止する。
 
-## 5. 公開仕様
+## 5. ツール記述とサーバーインストラクション (#270)
+
+`FastMCP("subsched", instructions=SERVER_INSTRUCTIONS)` により、`init_repo` → `queue_issues` →
+`trigger_dispatch` → `get_status`/`inspect_task` → `resolve_needs_human` という標準的な
+オーケストレーションワークフローをサーバーレベルの `instructions` として提供する。
+また、各 `@server.tool()` は空文字列ではなく意味のある `description` を明示し、各パラメータも
+`pydantic.Field(description=...)` により期待される形式（例: `issues="123,124"` や
+`"all-open"`）、前提条件（`allow_native`/`subscription_billing_verified` のゲート）、既定値を
+`tools/list` のJSONスキーマ上に記述する。これにより、`subsched` のソースコードやCLIフラグに
+事前知識のないAIアシスタント（Claude Desktop、Cursor、Antigravity/Gemini等）でも、ツール
+スキーマのみからワークフローと呼び出し要件を把握できる。
+
+## 6. 公開仕様
 
 ### Tools (9個)
 1. `subsched_get_status`: キュー状態内訳、タスク一覧、プロバイダークールダウン状態の取得。

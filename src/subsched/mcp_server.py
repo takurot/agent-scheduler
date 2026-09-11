@@ -65,6 +65,30 @@ only a pure ISO 8601 string, always advanced past the previous value.
 """
 
 
+SERVER_INSTRUCTIONS = """subsched orchestrates AI coding agents against GitHub issues, one issue
+per isolated git worktree. Standard workflow for an assistant driving subsched over MCP:
+
+1. subsched_init_repo -- scaffold subsched.yaml, AGENTS.md, and CLAUDE.md for a new repository.
+2. subsched_queue_issues -- discover open GitHub issues and persist eligible ones to the
+   durable queue.
+3. subsched_trigger_dispatch -- launch `subsched run` as a background worker subprocess. Live
+   execution requires explicit allow_native=True and subscription_billing_verified=True;
+   omitted, it performs a dry-run only.
+4. subsched_get_status / subsched_inspect_task -- monitor queue state, capacities, and
+   individual task progress (handoffs, recent commits).
+5. subsched_resolve_needs_human -- after diagnosing and fixing the root cause in a
+   NEEDS_HUMAN task's worktree, reset it back to READY.
+
+Safety invariants: native worker execution and billing confirmation default to False and must
+be opted into explicitly (fail closed); subsched_cancel_task always preserves the task's
+worktree and handoff files.
+"""
+
+REPOSITORY_PATH_DESCRIPTION = (
+    "Target git repository path. Defaults to the repository where subsched was started."
+)
+
+
 class McpToolError(RuntimeError):
     """Raised by an MCP tool when a request cannot be safely fulfilled."""
 
@@ -455,69 +479,186 @@ def build_server(options: ServerOptions) -> Any:
     requires the `mcp` package to be installed.
     """
     from mcp.server.fastmcp import FastMCP
+    from pydantic import Field
 
     default_repository = str(options.default_repository)
-    server = FastMCP("subsched")
+    server = FastMCP("subsched", instructions=SERVER_INSTRUCTIONS)
 
     def _default(repository_path: str | None) -> str | None:
         return repository_path if repository_path is not None else default_repository
 
-    @server.tool(name="subsched_get_status")
-    def _get_status(repository_path: str | None = None, verbose: bool = False) -> dict[str, Any]:
+    @server.tool(
+        name="subsched_get_status",
+        description=(
+            "Get the current scheduler queue status: task counts by state, provider "
+            "capacity/cooldowns, and pause state. Set verbose=True to include the full task list."
+        ),
+    )
+    def _get_status(
+        repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
+        verbose: bool = Field(
+            default=False,
+            description="Include the full list of tasks with status details. Defaults to False.",
+        ),
+    ) -> dict[str, Any]:
         return get_status(_default(repository_path), verbose)
 
-    @server.tool(name="subsched_inspect_task")
-    def _inspect_task(issue_number: int, repository_path: str | None = None) -> dict[str, Any]:
+    @server.tool(
+        name="subsched_inspect_task",
+        description=(
+            "Get full details for one tracked issue: current state, worktree path, parsed "
+            "semantic handoff (.ai/handoffs/<issue>.md), and the 5 most recent worktree commits."
+        ),
+    )
+    def _inspect_task(
+        issue_number: int = Field(description="GitHub issue number of the task to inspect."),
+        repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
+    ) -> dict[str, Any]:
         return inspect_task(issue_number, _default(repository_path))
 
-    @server.tool(name="subsched_queue_issues")
+    @server.tool(
+        name="subsched_queue_issues",
+        description=(
+            "Discover open GitHub issues (via `gh`) and persist eligible ones to the scheduler "
+            "queue. Set dry_run=True to preview counts without mutating state."
+        ),
+    )
     def _queue_issues(
-        issues: str | None = None,
-        label: str | None = None,
-        dry_run: bool = False,
-        repository_path: str | None = None,
+        issues: str | None = Field(
+            default=None,
+            description=(
+                "Comma-separated issue numbers (e.g. '123,124') or 'all-open'. Defaults to "
+                "discovering all eligible open issues."
+            ),
+        ),
+        label: str | None = Field(
+            default=None, description="Only discover issues with this GitHub label."
+        ),
+        dry_run: bool = Field(
+            default=False,
+            description=(
+                "Preview discovered/would-queue counts without persisting scheduler state. "
+                "Defaults to False."
+            ),
+        ),
+        repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
     ) -> dict[str, Any]:
         return queue_issues(_default(repository_path), issues, label, dry_run)
 
-    @server.tool(name="subsched_trigger_dispatch")
+    @server.tool(
+        name="subsched_trigger_dispatch",
+        description=(
+            "Launch `subsched run` as a detached background subprocess to dispatch queued tasks "
+            "to workers. Returns immediately; execution can take minutes to hours. Requires "
+            "allow_native=True and subscription_billing_verified=True for live worker execution "
+            "-- otherwise performs a dry-run."
+        ),
+    )
     def _trigger_dispatch(
-        issues: str | None = None,
-        allow_native: bool = False,
-        subscription_billing_verified: bool = False,
-        repository_path: str | None = None,
+        issues: str | None = Field(
+            default=None,
+            description=(
+                "Comma-separated issue numbers (e.g. '123,124') or 'all-open' to restrict "
+                "dispatch. Defaults to the configured discovery rules."
+            ),
+        ),
+        allow_native: bool = Field(
+            default=False,
+            description=(
+                "Explicitly enable native worker execution (e.g. Claude Code / Codex). Defaults "
+                "to False (dry-run only)."
+            ),
+        ),
+        subscription_billing_verified: bool = Field(
+            default=False,
+            description=(
+                "Confirm subscription billing is in effect with metered/API fallback disabled. "
+                "Required when allow_native=True."
+            ),
+        ),
+        repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
     ) -> dict[str, Any]:
         return trigger_dispatch(
             _default(repository_path), issues, allow_native, subscription_billing_verified
         )
 
-    @server.tool(name="subsched_init_repo")
+    @server.tool(
+        name="subsched_init_repo",
+        description=(
+            "Scaffold subsched.yaml, AGENTS.md, and CLAUDE.md for a repository by detecting its "
+            "language/tooling stack."
+        ),
+    )
     def _init_repo(
-        repository_path: str | None = None,
-        force: bool = False,
-        generate_agent_instructions: bool = True,
+        repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
+        force: bool = Field(
+            default=False,
+            description=(
+                "Overwrite existing subsched.yaml/AGENTS.md/CLAUDE.md files. Defaults to False "
+                "(fails if any already exist)."
+            ),
+        ),
+        generate_agent_instructions: bool = Field(
+            default=True,
+            description="Also write AGENTS.md and CLAUDE.md agent instruction files.",
+        ),
     ) -> dict[str, Any]:
         return init_repo(_default(repository_path), force, generate_agent_instructions)
 
-    @server.tool(name="subsched_resolve_needs_human")
+    @server.tool(
+        name="subsched_resolve_needs_human",
+        description=(
+            "Reset a NEEDS_HUMAN task back to READY after diagnosing and resolving the root "
+            "cause in its worktree. Call this only after the underlying problem is actually "
+            "fixed."
+        ),
+    )
     def _resolve_needs_human(
-        issue_number: int,
-        resolution_notes: str | None = None,
-        repository_path: str | None = None,
+        issue_number: int = Field(description="GitHub issue number of the task to resolve."),
+        resolution_notes: str | None = Field(
+            default=None,
+            description=(
+                "Optional note describing how the issue was resolved, recorded in the task's "
+                "transition history."
+            ),
+        ),
+        repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
     ) -> dict[str, Any]:
         return resolve_needs_human(issue_number, resolution_notes, _default(repository_path))
 
-    @server.tool(name="subsched_cancel_task")
-    def _cancel_task(issue_number: int, repository_path: str | None = None) -> dict[str, Any]:
+    @server.tool(
+        name="subsched_cancel_task",
+        description=(
+            "Cancel one tracked task while preserving its worktree and handoff files for later "
+            "inspection."
+        ),
+    )
+    def _cancel_task(
+        issue_number: int = Field(description="GitHub issue number of the task to cancel."),
+        repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
+    ) -> dict[str, Any]:
         return cancel_task(issue_number, _default(repository_path))
 
-    @server.tool(name="subsched_control")
+    @server.tool(
+        name="subsched_control",
+        description="Pause or resume new task dispatches; already-running work is unaffected.",
+    )
     def _control(
-        action: Literal["pause", "resume"], repository_path: str | None = None
+        action: Literal["pause", "resume"] = Field(
+            description="'pause' to stop new dispatches, or 'resume' to allow them again."
+        ),
+        repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
     ) -> dict[str, Any]:
         return control(action, _default(repository_path))
 
-    @server.tool(name="subsched_get_metrics")
-    def _get_metrics(repository_path: str | None = None) -> dict[str, Any]:
+    @server.tool(
+        name="subsched_get_metrics",
+        description="Calculate Productivity, Reliability, and Capacity metrics from scheduler "
+        "state.",
+    )
+    def _get_metrics(
+        repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
+    ) -> dict[str, Any]:
         return get_metrics(_default(repository_path))
 
     @server.resource("subsched://queue")

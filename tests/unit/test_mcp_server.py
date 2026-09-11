@@ -7,6 +7,7 @@ import asyncio
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -584,6 +585,33 @@ def test_build_server_registers_all_tools_resources_and_prompts(tmp_path: Path) 
     assert "subsched://capacities" in resources
     assert "subsched://guidelines" in resources
     assert set(prompts) == {"triage_task", "bootstrap_repo"}
+
+
+def test_build_server_sets_instructions(tmp_path: Path) -> None:
+    server = build_server(ServerOptions(default_repository=tmp_path))
+    assert server.instructions
+    assert "subsched_queue_issues" in server.instructions
+    assert "subsched_trigger_dispatch" in server.instructions
+
+
+def test_build_server_tools_have_descriptions_and_documented_parameters(
+    tmp_path: Path,
+) -> None:
+    server = build_server(ServerOptions(default_repository=tmp_path))
+
+    async def _list_tools() -> list[Any]:
+        return await server.list_tools()
+
+    tools = asyncio.run(_list_tools())
+    assert tools
+
+    for tool in tools:
+        assert tool.description, f"{tool.name} is missing a description"
+        properties = tool.inputSchema.get("properties", {})
+        for param_name, schema in properties.items():
+            assert schema.get(
+                "description"
+            ), f"{tool.name}.{param_name} is missing a parameter description"
 
 
 # --- CLI command integration -------------------------------------------------------
