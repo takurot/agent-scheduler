@@ -155,7 +155,9 @@ def resolve_github_repo(path: Path, *, run: RunCommand | None = None) -> str | N
     return _safe_validated_repo(gh_result.stdout.strip() or None)
 
 
-def render_subsched_yaml(*, repo: str | None, verification_commands: tuple[str, ...]) -> str:
+def render_subsched_yaml(
+    *, repo: str | None, verification_commands: tuple[str, ...], close_issue: bool = False
+) -> str:
     if repo is not None:
         repo_lines = f"  repo: {repo}\n"
     else:
@@ -165,6 +167,7 @@ def render_subsched_yaml(*, repo: str | None, verification_commands: tuple[str, 
             "  # repo: owner/name\n"
         )
     commands_block = "\n".join(f"    - {command}" for command in verification_commands)
+    close_issue_value = "true" if close_issue else "false"
     return f"""github:
 {repo_lines}  include_labels:
     - ai-ready
@@ -174,9 +177,12 @@ def render_subsched_yaml(*, repo: str | None, verification_commands: tuple[str, 
     - security-sensitive
   completion:
     create_pr: true
-    # When true, appends "Closes #<issue>" to PR body so the issue automatically closes
-    # upon PR merge.
-    close_issue: false
+    # false (default): the issue is left open after the PR merges, so a human can
+    #   review the merged change before closing it (fail-closed).
+    # true: appends "Closes #<issue>" to the PR body, so GitHub closes the issue
+    #   automatically when the PR merges. Only enable this once you trust the
+    #   scheduler's merged output without a manual closure step.
+    close_issue: {close_issue_value}
 
 # Supported agents: claude, codex. At least one agent must remain enabled.
 agents:
@@ -266,6 +272,7 @@ def build_scaffold_plan(
     repo_override: str | None,
     include_agents_md: bool,
     include_claude_md: bool,
+    close_issue: bool = False,
     run: RunCommand | None = None,
 ) -> ScaffoldPlan:
     repo = repo_override if repo_override is not None else resolve_github_repo(path, run=run)
@@ -274,7 +281,7 @@ def build_scaffold_plan(
     files: list[ScaffoldFile] = []
     yaml_path = path / "subsched.yaml"
     yaml_content = render_subsched_yaml(
-        repo=repo, verification_commands=stack.verification_commands
+        repo=repo, verification_commands=stack.verification_commands, close_issue=close_issue
     )
     files.append(ScaffoldFile(path=yaml_path, content=yaml_content, exists=yaml_path.exists()))
 

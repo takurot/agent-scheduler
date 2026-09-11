@@ -340,6 +340,7 @@ def init_repo(
     repository_path: str | None = None,
     force: bool = False,
     generate_agent_instructions: bool = True,
+    close_issue: bool = False,
 ) -> dict[str, Any]:
     """Scaffold `subsched.yaml`, `AGENTS.md`, and `CLAUDE.md` for a repository."""
     repository = resolve_repository(repository_path)
@@ -348,6 +349,7 @@ def init_repo(
         repo_override=None,
         include_agents_md=generate_agent_instructions,
         include_claude_md=generate_agent_instructions,
+        close_issue=close_issue,
     )
     try:
         written = write_scaffold_plan(plan, force=force)
@@ -619,8 +621,18 @@ def build_server(options: ServerOptions) -> Any:
             default=True,
             description="Also write AGENTS.md and CLAUDE.md agent instruction files.",
         ),
+        close_issue: bool = Field(
+            default=False,
+            description=(
+                "Scaffold github.completion.close_issue: true, so merging a PR auto-closes "
+                "its issue. Defaults to False (fail-closed): the issue stays open for human "
+                "review after merge."
+            ),
+        ),
     ) -> dict[str, Any]:
-        return init_repo(_default(repository_path), force, generate_agent_instructions)
+        return init_repo(
+            _default(repository_path), force, generate_agent_instructions, close_issue
+        )
 
     @server.tool(
         name="subsched_resolve_needs_human",

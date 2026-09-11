@@ -737,6 +737,16 @@ def init(
     force: Annotated[
         bool, typer.Option("--force", help="Overwrite existing files")
     ] = False,
+    close_issue: Annotated[
+        bool,
+        typer.Option(
+            "--close-issue/--no-close-issue",
+            help=(
+                "Scaffold github.completion.close_issue: true, so merging a PR "
+                "auto-closes its issue (default: false, fail-closed)"
+            ),
+        ),
+    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Preview files without writing to disk")
     ] = False,
@@ -758,6 +768,7 @@ def init(
         repo_override=repo,
         include_agents_md=agents_md,
         include_claude_md=claude_md,
+        close_issue=close_issue,
     )
 
     if dry_run:
