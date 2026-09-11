@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -8,7 +9,9 @@ from pathlib import Path
 
 from subsched.handoff import reconstruct_or_quarantine_handoff
 from subsched.models import Task, TaskState
-from subsched.storage import get_process_start_time
+from subsched.storage import atomic_write_secure_bytes, get_process_start_time
+
+logger = logging.getLogger(__name__)
 
 
 class ProcessStatus(StrEnum):
@@ -46,10 +49,8 @@ def save_process_record(worktree_dir: Path, record: ProcessRecord) -> Path:
     runtime_dir = worktree_dir / ".ai" / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     target = runtime_dir / f"{record.issue_number}.process.json"
-    temp_target = runtime_dir / f"{record.issue_number}.process.json.tmp"
     data = json.dumps(record.to_dict(), indent=2)
-    temp_target.write_text(data, encoding="utf-8")
-    temp_target.replace(target)
+    atomic_write_secure_bytes(target, data.encode("utf-8"))
     return target
 
 
@@ -61,7 +62,8 @@ def load_process_record(worktree_dir: Path, issue_number: int) -> ProcessRecord 
     try:
         data = json.loads(target.read_text(encoding="utf-8"))
         return ProcessRecord.from_dict(data)
-    except Exception:
+    except Exception as err:
+        logger.warning("corrupted process record %s: %s", target, err)
         return None
 
 
@@ -91,7 +93,9 @@ def check_process_liveness(record: ProcessRecord) -> ProcessStatus:
 
     if record.started_at:
         actual_start_time = get_process_start_time(record.pid)
-        if actual_start_time is not None and actual_start_time != record.started_at:
+        if actual_start_time is None:
+            return ProcessStatus.UNKNOWN
+        if actual_start_time != record.started_at:
             return ProcessStatus.DEAD
 
     return ProcessStatus.LIVE
@@ -117,6 +121,15 @@ def reconcile_task_recovery(worktree_dir: Path, task: Task) -> tuple[Task, str]:
         liveness = check_process_liveness(record)
         if liveness == ProcessStatus.LIVE:
             return task, f"process {record.pid} is still live; resumed monitoring"
+        if liveness == ProcessStatus.UNKNOWN:
+            # Liveness could not be verified (e.g. permission denied on os.kill, or the
+            # process start time could not be confirmed). Fail-closed: keep the process
+            # record intact and escalate rather than clearing it and retrying, which would
+            # risk a second worker running concurrently against the same task.
+            reason = (
+                f"process {record.pid} liveness could not be verified; escalated to NEEDS_HUMAN"
+            )
+            return escalate_to_needs_human(task, reason), reason
         clear_process_record(worktree_dir, task.issue_number)
         reason_prefix = f"process {record.pid} terminated"
     else:
