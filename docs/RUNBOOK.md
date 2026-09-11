@@ -310,6 +310,17 @@ Add the server configuration to `.cursor/mcp.json`:
 
 > **Tip:** If `agent-scheduler[mcp]` is installed locally or via `pipx` / `uv tool install`, you can use `"command": "subsched", "args": ["mcp"]`. Pass `"--repository", "/path/to/repo"` before `"mcp"` to pin the server to a specific repository.
 
+### Tool Discovery & Server Instructions
+
+The server initializes `FastMCP("subsched", instructions=...)` with a summary of the standard
+orchestration workflow (`init_repo` → `queue_issues` → `trigger_dispatch` → `get_status` /
+`inspect_task` → `resolve_needs_human`), and every tool below registers a non-empty
+`description` plus per-parameter `Field(description=...)` documentation in its `tools/list`
+schema. Clients that surface server instructions and tool/parameter descriptions (Claude
+Desktop, Cursor, Antigravity/Gemini) can therefore infer the workflow, argument formats (e.g.
+`issues="123,124"` or `"all-open"`), and safety gates (`allow_native`,
+`subscription_billing_verified`) without prior knowledge of the `subsched` CLI or source code.
+
 ### Exposed Capabilities
 
 #### Tools
