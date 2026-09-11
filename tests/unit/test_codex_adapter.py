@@ -76,6 +76,44 @@ def test_replays_sanitized_live_success_fixture() -> None:
     assert result.output == "codex completed"
 
 
+def test_multi_message_stream_uses_final_agent_message_as_pass_result() -> None:
+    result = parse_codex_jsonl(_fixture("multi-message-success.jsonl"), returncode=0)
+
+    assert result.kind is AgentResultKind.PASS
+    assert result.output == "codex completed"
+
+
+def test_multi_message_stream_uses_final_agent_message_as_failure_result() -> None:
+    fail_msg = json.dumps({"result": "failure", "summary": "could not complete task"})
+    payload = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "fixture-thread"}),
+            json.dumps({"type": "turn.started"}),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Checking the repository state."},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "Running the test suite now."},
+                }
+            ),
+            json.dumps(
+                {"type": "item.completed", "item": {"type": "agent_message", "text": fail_msg}}
+            ),
+            json.dumps({"type": "turn.completed", "usage": {}}),
+        ]
+    )
+
+    result = parse_codex_jsonl(payload, returncode=0)
+
+    assert result.kind is AgentResultKind.FAILURE
+    assert result.output == "codex reported failure"
+
+
 def test_saved_cli_metadata_records_required_live_flags() -> None:
     version = _fixture("cli-version.txt")
     help_output = _fixture("cli-exec-help.txt")
@@ -197,11 +235,6 @@ def test_malformed_or_unknown_events_fail_closed(payload: str) -> None:
         '{"type":"turn.started"}\n'
         '{"type":"turn.completed","usage":{}}\n'
         '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"result\\":\\"pass\\",\\"summary\\":\\"unsafe\\"}"}}\n',
-        '{"type":"thread.started","thread_id":"fixture-thread"}\n'
-        '{"type":"turn.started"}\n'
-        '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"result\\":\\"pass\\",\\"summary\\":\\"unsafe\\"}"}}\n'
-        '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"result\\":\\"pass\\",\\"summary\\":\\"unsafe\\"}"}}\n'
-        '{"type":"turn.completed","usage":{}}\n',
         '{"type":"thread.started","thread_id":"fixture-thread"}\n'
         '{"type":"turn.started"}\n'
         '{"type":"item.completed","item":{"type":"agent_message","text":"{\\"result\\":\\"pass\\",\\"summary\\":\\"unsafe\\"}"}}\n'
