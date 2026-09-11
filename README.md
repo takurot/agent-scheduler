@@ -87,7 +87,7 @@ uv tool install -e .
 ```bash
 git clone https://github.com/takurot/agent-scheduler.git
 cd agent-scheduler
-uv sync --extra dev
+uv sync
 uv run subsched doctor
 ```
 

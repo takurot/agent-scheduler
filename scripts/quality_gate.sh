@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "=== Syncing dependencies ==="
-uv sync --extra dev
+uv sync
 
 echo "=== Running Ruff linter ==="
 uv run ruff check .

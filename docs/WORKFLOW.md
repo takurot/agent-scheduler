@@ -91,7 +91,7 @@ branch名全体を短く保つ。
 ### 3.3 環境を準備する
 
 ```bash
-uv sync --frozen --extra dev
+uv sync --frozen
 ```
 
 Pythonは3.12以上を使用する。依存関係を変更するIssue以外では`uv.lock`を意図せず更新
@@ -230,7 +230,7 @@ uv run pip-audit
 PR前にCIと同じコマンドを実行する。
 
 ```bash
-uv sync --frozen --extra dev
+uv sync --frozen
 uv run ruff check .
 uv run mypy src
 uv run pytest --cov=subsched --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=80

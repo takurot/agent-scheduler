@@ -17,6 +17,11 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+mcp = [
+    { name = "mcp" },
+]
+
+[package.dev-dependencies]
 dev = [
     { name = "mcp" },
     { name = "mypy" },
@@ -26,24 +31,25 @@ dev = [
     { name = "ruff" },
     { name = "types-pyyaml" },
 ]
-mcp = [
-    { name = "mcp" },
-]
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", marker = "extra == 'dev'", specifier = ">=1.2.0,<2" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.2.0,<2" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.17,<3" },
-    { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.8,<3" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3,<10" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.2,<8" },
     { name = "pyyaml", specifier = ">=6.0.2,<7" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12,<1" },
     { name = "typer", specifier = ">=0.16,<1" },
-    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12" },
 ]
-provides-extras = ["mcp", "dev"]
+provides-extras = ["mcp"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mcp", specifier = ">=1.2.0,<2" },
+    { name = "mypy", specifier = ">=1.17,<3" },
+    { name = "pip-audit", specifier = ">=2.8,<3" },
+    { name = "pytest", specifier = ">=9.0.3,<10" },
+    { name = "pytest-cov", specifier = ">=6.2,<8" },
+    { name = "ruff", specifier = ">=0.12,<1" },
+    { name = "types-pyyaml", specifier = ">=6.0.12" },
+]
 
 [[package]]
 name = "annotated-doc"
