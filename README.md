@@ -166,6 +166,49 @@ subsched resume
 subsched cancel 101
 ```
 
+### Model Context Protocol (MCP) Server
+
+Run `subsched` as an MCP server over stdio to integrate directly with AI assistants and IDEs (Claude Desktop, Cursor, Antigravity):
+
+```bash
+# Run over stdio (requires mcp extra: pip install agent-scheduler[mcp])
+subsched mcp
+
+# Target a specific repository
+subsched --repository /path/to/repo mcp
+```
+
+#### Client Configuration Examples
+
+**Claude Desktop** (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "subsched": {
+      "command": "uvx",
+      "args": ["--from", "agent-scheduler[mcp]", "subsched", "mcp"]
+    }
+  }
+}
+```
+
+**Cursor** (`.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "subsched": {
+      "command": "subsched",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+#### Exposed Tools, Resources, and Prompts
+- **Tools**: `subsched_get_status`, `subsched_inspect_task`, `subsched_queue_issues`, `subsched_trigger_dispatch` (non-blocking background dispatch), `subsched_init_repo`, `subsched_resolve_needs_human`, `subsched_cancel_task`, `subsched_control`, `subsched_get_metrics`. All tools accept an optional `repository_path`.
+- **Resources**: `subsched://queue`, `subsched://capacities`, `subsched://tasks/{issue}/handoff`, `subsched://guidelines`.
+- **Prompts**: `triage_task` (diagnose and remediate `NEEDS_HUMAN` issues), `bootstrap_repo` (scaffold repository configuration).
+
 ---
 
 ## Configuration (`subsched.yaml`)
@@ -301,6 +344,7 @@ See this repository's own [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) 
 | `subsched pause` | Pause task execution cleanly after current step |
 | `subsched resume` | Resume scheduler execution from paused state |
 | `subsched cancel <id>` | Cancel a task and preserve its worktree files |
+| `subsched mcp` | Run subsched as an MCP server over stdio (`agent-scheduler[mcp]`) |
 
 ---
 

@@ -33,7 +33,11 @@ Documentation = "https://github.com/takurot/agent-scheduler/blob/main/docs/RUNBO
 Issues = "https://github.com/takurot/agent-scheduler/issues"
 
 [project.optional-dependencies]
+mcp = [
+  "mcp>=1.2.0,<2",
+]
 dev = [
+  "mcp>=1.2.0,<2",
   "mypy>=1.17,<3",
   "pip-audit>=2.8,<3",
   "pytest>=9.0.3,<10",

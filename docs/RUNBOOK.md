@@ -204,3 +204,77 @@ uvx agent-scheduler run --help
 uv tool install agent-scheduler
 subsched doctor
 ```
+
+---
+
+## 7. Model Context Protocol (MCP) Server
+
+`subsched` provides a Model Context Protocol (MCP) server running over standard I/O (`stdio`), allowing AI assistants (such as Claude Desktop, Cursor, and Antigravity) to monitor queue state, bootstrap repositories, and trigger dispatches across local codebases.
+
+### Requirements & Installation
+The MCP server requires the optional `mcp` extra:
+```bash
+pip install agent-scheduler[mcp]
+# or with uv:
+uv add --extra mcp agent-scheduler
+```
+
+### Launching the Server
+```bash
+# Launch with the current directory as the default repository
+subsched mcp
+
+# Launch with an explicit repository path
+subsched --repository /path/to/repo mcp
+```
+
+### Client Configuration
+
+#### Claude Desktop
+Add the server entry to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+```json
+{
+  "mcpServers": {
+    "subsched": {
+      "command": "uvx",
+      "args": ["--from", "agent-scheduler[mcp]", "subsched", "mcp"]
+    }
+  }
+}
+```
+
+#### Cursor
+Add the server configuration to `.cursor/mcp.json`:
+```json
+{
+  "mcpServers": {
+    "subsched": {
+      "command": "subsched",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Exposed Capabilities
+
+#### Tools
+- **`subsched_get_status`**: Retrieve current queue breakdown, active cooldowns, and task lists. Supports optional `repository_path` and `verbose` flag.
+- **`subsched_inspect_task`**: Fetch complete task detail, parsed semantic handoff (`.ai/handoffs/<issue>.md`), and recent worktree commits.
+- **`subsched_queue_issues`**: Discover issues from GitHub and queue them atomically. Supports `dry_run=True` to preview discoveries without state mutations.
+- **`subsched_trigger_dispatch`**: Non-blocking background dispatch of `subsched run`. Execution runs out-of-process to avoid blocking the MCP stdio loop. Requires explicit `allow_native=True` and `subscription_billing_verified=True` for live worker execution (fails closed by default).
+- **`subsched_init_repo`**: Scaffold `subsched.yaml`, `AGENTS.md`, and `CLAUDE.md` in the target repository.
+- **`subsched_resolve_needs_human`**: Transition a remediated task from `NEEDS_HUMAN` back to `READY`.
+- **`subsched_cancel_task`**: Transition task to `CANCELLED` while strictly preserving worktree and handoff files.
+- **`subsched_control`**: Cleanly pause or resume task dispatching (`action: "pause" | "resume"`).
+- **`subsched_get_metrics`**: Calculate Productivity, Reliability, and Capacity metrics.
+
+#### Resources
+- `subsched://queue`: JSON snapshot of all tasks and scheduler pause state.
+- `subsched://capacities`: JSON snapshot of active agent cooldowns and provider reset times.
+- `subsched://tasks/{issue}/handoff`: Markdown content of the task's semantic handoff document.
+- `subsched://guidelines`: Standard guidelines and invariants for coding agents.
+
+#### Prompts
+- `triage_task`: Prompt guiding the LLM to inspect handoffs and git commits for `NEEDS_HUMAN` issues before remediating.
+- `bootstrap_repo`: Prompt guiding the LLM to inspect stack tooling and initialize `subsched` configuration.
