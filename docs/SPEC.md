@@ -2837,6 +2837,9 @@ subsched mcp [--repository PATH]
 独立したバックグラウンドプロセスとして起動し、即座に制御を戻す。
 また、`allow_native` および `subscription_billing_verified` の既定値を `False` とし、
 明示的なオプトインがない限りネイティブ実行は許可しない（fail-closed）。
+`subsched_trigger_dispatch` はディスパッチ前にリポジトリルートの `subsched.yaml` の存在を
+確認し（存在しなければ `McpToolError` でfail-closed）、起動する `subsched run` の引数に
+明示的に `--config <path>` を付与する（#268）。
 
 ## 4. 排他ロックとデータ完全性
 

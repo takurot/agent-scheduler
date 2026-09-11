@@ -291,7 +291,24 @@ def trigger_dispatch(
         )
     _github_repo(repository)
 
-    argv = [sys.executable, "-m", "subsched", "--repository", str(repository), "run"]
+    # #268: the background `subsched run` subprocess resolves its own config from cwd/
+    # --config, not from this process's in-memory state, so its `github.repo` fails closed
+    # unless we pass --config explicitly here -- fail fast rather than let the subprocess
+    # crash silently after "dispatched" has already been returned.
+    config_path = repository / "subsched.yaml"
+    if not config_path.is_file():
+        raise McpToolError(f"subsched.yaml not found in repository: {config_path}")
+
+    argv = [
+        sys.executable,
+        "-m",
+        "subsched",
+        "--repository",
+        str(repository),
+        "run",
+        "--config",
+        str(config_path),
+    ]
     if issues is not None:
         argv.extend(["--issues", issues])
     if allow_native:

@@ -352,6 +352,43 @@ def test_run_with_list_mode_config_needs_no_cli_issues_override(
     assert "#103" not in status.output
 
 
+def test_run_auto_detects_subsched_yaml_in_repository_root(tmp_path: Path) -> None:
+    """Regression test for #268: with no --config, `run` must fall back to
+    `subsched.yaml` in the repository root (as `subsched init` instructs users to edit)
+    instead of an empty SchedulerConfig() whose github.repo is None."""
+    (tmp_path / "subsched.yaml").write_text(
+        "github:\n  repo: owner/project\n  mode: list\n  issues:\n    - 101\n",
+        encoding="utf-8",
+    )
+
+    result = invoke(tmp_path, "run", "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "repo: owner/project" in result.output
+    assert "1 issue(s) discovered" in result.output
+
+
+def test_run_explicit_config_takes_precedence_over_repository_root_subsched_yaml(
+    tmp_path: Path,
+) -> None:
+    """Regression test for #268: an explicit --config must still win over an auto-
+    detected subsched.yaml in the repository root."""
+    (tmp_path / "subsched.yaml").write_text(
+        "github:\n  repo: owner/root-default\n  mode: list\n  issues:\n    - 101\n",
+        encoding="utf-8",
+    )
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/explicit\n  mode: list\n  issues:\n    - 7\n",
+        encoding="utf-8",
+    )
+
+    result = invoke(tmp_path, "run", "--config", str(config_file), "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "repo: owner/explicit" in result.output
+
+
 def test_cli_issues_override_takes_precedence_over_config_list_mode(
     tmp_path: Path,
 ) -> None:
@@ -411,6 +448,23 @@ def test_config_validate_prints_summary_with_no_state_mutation(
     assert "Configuration is valid." in result.output
     assert list_open_calls == []
     assert not (tmp_path / ".ai" / "scheduler.json").exists()
+
+
+def test_config_validate_auto_detects_subsched_yaml_in_repository_root(
+    tmp_path: Path,
+) -> None:
+    """Regression test for #268: like `run`, `config validate` must fall back to
+    `subsched.yaml` in the repository root when --config is omitted."""
+    (tmp_path / "subsched.yaml").write_text(
+        "github:\n  repo: owner/project\n  mode: list\n  issues:\n    - 101\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["--repository", str(tmp_path), "config", "validate"])
+
+    assert result.exit_code == 0, result.output
+    assert "repo: owner/project" in result.output
+    assert "Configuration is valid." in result.output
 
 
 def test_config_validate_rejects_malformed_issues_like_run_would(tmp_path: Path) -> None:
