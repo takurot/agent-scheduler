@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from subsched.agents.claude import ClaudeBillingMode, ClaudeExecutionPolicy, ClaudeProcessOutcome
 from subsched.capacity.base import CapacitySensor
@@ -85,6 +86,22 @@ def test_parse_claude_session_capacity_fixture() -> None:
     assert cap.source == "structured_result"
     assert cap.confidence == "high"
     assert cap.reset_at == datetime.fromisoformat("2026-08-13T13:00:00+09:00")
+
+
+def test_parse_claude_session_429_fixture() -> None:
+    fixture_path = Path("tests/fixtures/claude/session-429.json")
+    payload = fixture_path.read_text(encoding="utf-8")
+    now = datetime(2026, 8, 13, 5, 0, tzinfo=UTC)
+
+    capacities = parse_claude_capacity(payload, observed_at=now)
+    assert len(capacities) == 1
+    cap = capacities[0]
+    assert cap.agent == "claude"
+    assert cap.state == CapacityState.COOLDOWN_SESSION
+    assert cap.scope == "five_hour"
+    assert cap.source == "structured_result"
+    assert cap.confidence == "high"
+    assert cap.reset_at == datetime(2026, 8, 13, 20, 10, tzinfo=ZoneInfo("Asia/Tokyo"))
 
 
 def test_parse_claude_weekly_capacity_fixture() -> None:
