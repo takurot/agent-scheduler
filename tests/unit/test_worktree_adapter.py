@@ -60,6 +60,20 @@ def test_security_rejects_symlinks_and_escaping_paths(tmp_path: Path) -> None:
         adapter.validate_worktree_path(42, symlink_path)
 
 
+def test_rejects_path_traversal_via_dotdot(tmp_path: Path) -> None:
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
+
+    worktree_root = tmp_path / "worktrees"
+    worktree_root.mkdir()
+    adapter = GitWorktreeAdapter(tmp_path, worktree_root, run=fake_run)
+
+    escaping_path = worktree_root / "issue-42" / ".." / ".." / "escaped"
+
+    with pytest.raises(WorktreeSecurityError, match="does not match expected"):
+        adapter.validate_worktree_path(42, escaping_path)
+
+
 def test_rejects_unregistered_existing_directory(tmp_path: Path) -> None:
     worktree_root = tmp_path / "worktrees"
     worktree_root.mkdir()
