@@ -142,6 +142,35 @@ def test_inspect_task_with_handoff_and_commits(tmp_path: Path) -> None:
     assert len(result["recent_commits"]) == 1
 
 
+def test_inspect_task_git_log_uses_safe_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    task = _task(42, TaskState.NEEDS_HUMAN, worktree=str(worktree))
+    store.save_tasks((task,))
+
+    monkeypatch.setenv("GIT_DIR", "/tmp/some-other-repo/.git")
+    captured: dict[str, object] = {}
+    real_run = subprocess.run
+
+    def _fake_run(argv: list[str], **kwargs: object) -> object:
+        if argv[:1] == ["git"]:
+            captured["env"] = kwargs.get("env")
+            return real_run(argv, **kwargs)  # type: ignore[arg-type]
+        return real_run(argv, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("subsched.mcp_server.subprocess.run", _fake_run)
+
+    inspect_task(42, str(tmp_path))
+
+    env = captured["env"]
+    assert env is not None
+    assert "GIT_DIR" not in env
+
+
 def test_inspect_task_ignores_symlinked_handoff(tmp_path: Path) -> None:
     store = JsonStateStore(tmp_path)
     store.init_directories()
@@ -255,9 +284,23 @@ def test_trigger_dispatch_requires_billing_verification_for_native(tmp_path: Pat
         trigger_dispatch(str(tmp_path), allow_native=True, subscription_billing_verified=False)
 
 
+def test_trigger_dispatch_requires_github_repo_configured(tmp_path: Path) -> None:
+    with pytest.raises(McpToolError, match=r"github\.repo is not configured"):
+        trigger_dispatch(str(tmp_path))
+
+
+def test_trigger_dispatch_rejects_invalid_config(tmp_path: Path) -> None:
+    (tmp_path / "subsched.yaml").write_text("github: [not, a, mapping]\n", encoding="utf-8")
+    with pytest.raises(McpToolError, match=r"invalid subsched\.yaml"):
+        trigger_dispatch(str(tmp_path))
+
+
 def test_trigger_dispatch_launches_detached_dry_run_subprocess(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    (tmp_path / "subsched.yaml").write_text(
+        yaml.safe_dump({"github": {"repo": "acme/widgets"}}), encoding="utf-8"
+    )
     captured: dict[str, object] = {}
 
     class _FakeProcess:
@@ -281,11 +324,15 @@ def test_trigger_dispatch_launches_detached_dry_run_subprocess(
     assert result["allow_native"] is False
     assert "--dry-run" in captured["argv"]
     assert "--allow-native" not in captured["argv"]
+    assert captured["kwargs"]["start_new_session"] is True
 
 
 def test_trigger_dispatch_native_forwards_gates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    (tmp_path / "subsched.yaml").write_text(
+        yaml.safe_dump({"github": {"repo": "acme/widgets"}}), encoding="utf-8"
+    )
     captured: dict[str, object] = {}
 
     class _FakeProcess:
@@ -487,6 +534,19 @@ def test_get_task_handoff_resource_reads_content(tmp_path: Path) -> None:
     content = get_task_handoff_resource(1, str(tmp_path))
 
     assert content == "# handoff body"
+
+
+def test_handoff_resource_rejects_non_integer_issue(tmp_path: Path) -> None:
+    server = build_server(ServerOptions(default_repository=tmp_path))
+
+    async def _read() -> object:
+        return await server.read_resource("subsched://tasks/abc/handoff")
+
+    # FastMCP's resource manager wraps the underlying `McpToolError` in a `ValueError`;
+    # the important behavior is that the raw, unhandled `int()` `ValueError` never
+    # propagates -- it's replaced by our own message before FastMCP re-wraps it.
+    with pytest.raises(ValueError, match="invalid issue number: abc"):
+        asyncio.run(_read())
 
 
 def test_get_guidelines_resource_mentions_handoff_headers() -> None:
