@@ -17,8 +17,13 @@ class TaskQueue:
         if len(issues) != len(set(issues)):
             raise ValueError("duplicate active task for issue")
 
+    # #281: PR_REVIEW and REVISING are dispatchable states too (the reviewer Agent and
+    # the revision worker respectively), so they are picked up for dispatch exactly like
+    # a plain READY task -- see Scheduler.tick and Task.dispatch_status.
+    _DISPATCHABLE_STATES = frozenset({TaskState.READY, TaskState.PR_REVIEW, TaskState.REVISING})
+
     def ready(self) -> tuple[Task, ...]:
-        candidates = (task for task in self.tasks if task.status is TaskState.READY)
+        candidates = (task for task in self.tasks if task.status in self._DISPATCHABLE_STATES)
         return tuple(sorted(candidates, key=self._sort_key))
 
     def _sort_key(self, task: Task) -> tuple[int, int, int]:

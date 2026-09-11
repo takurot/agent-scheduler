@@ -135,6 +135,8 @@ class ExecutionConfig:
     pause_running_policy: str = "continue"
     agent_timeout_seconds: int = 300
     ci_monitoring: bool = False
+    pr_review_enabled: bool = False
+    max_review_cycles: int = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +239,8 @@ SECTION_KEYS: dict[str, frozenset[str]] = {
             "pause_running_policy",
             "agent_timeout_seconds",
             "ci_monitoring",
+            "pr_review_enabled",
+            "max_review_cycles",
         }
     ),
     "queue": frozenset({"priority"}),
@@ -452,6 +456,12 @@ def _parse_execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
     ci_monitoring = _strict_bool(
         raw.get("ci_monitoring", False), "execution.ci_monitoring"
     )
+    pr_review_enabled = _strict_bool(
+        raw.get("pr_review_enabled", False), "execution.pr_review_enabled"
+    )
+    max_review_cycles = _strict_pos_int(
+        raw.get("max_review_cycles", 3), "execution.max_review_cycles"
+    )
     return ExecutionConfig(
         concurrency=concurrency,
         max_agent_switches=max_switches,
@@ -462,6 +472,8 @@ def _parse_execution_config(raw: Mapping[str, Any]) -> ExecutionConfig:
         pause_running_policy=policy,
         agent_timeout_seconds=agent_timeout_seconds,
         ci_monitoring=ci_monitoring,
+        pr_review_enabled=pr_review_enabled,
+        max_review_cycles=max_review_cycles,
     )
 
 

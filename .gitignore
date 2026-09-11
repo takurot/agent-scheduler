@@ -29,4 +29,5 @@ dist/
 .ai/checkpoints/
 .ai/quarantine/
 .ai/plans/
+.ai/reviews/
 docs/PLAN.md

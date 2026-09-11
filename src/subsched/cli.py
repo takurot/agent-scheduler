@@ -576,6 +576,8 @@ def run(
             max_task_runtime_seconds=float(parse_duration(cfg.execution.max_task_runtime)),
             ci_checker=ci_checker,
             merged_pr_checker=merged_pr_checker,
+            pr_review_enabled=cfg.execution.pr_review_enabled,
+            max_review_cycles=cfg.execution.max_review_cycles,
         )
     except (ValueError, StateCorruptionError) as error:
         typer.echo(f"State error: {error}", err=True)

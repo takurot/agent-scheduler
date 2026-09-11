@@ -29,6 +29,26 @@ def test_requeue_front_preserves_worktree_and_progress() -> None:
     assert first.attempt == 0
 
 
+def _to_pr_ready(number: int) -> Task:
+    return (
+        task(number)
+        .transition(TaskState.DISPATCHED)
+        .transition(TaskState.IN_PROGRESS)
+        .transition(TaskState.VERIFYING)
+        .transition(TaskState.PR_READY)
+    )
+
+
+def test_queue_ready_includes_pr_review_and_revising() -> None:
+    """#281: PR_REVIEW/REVISING are dispatchable states too -- see Task.dispatch_status."""
+    normal = task(1)
+    reviewing = _to_pr_ready(2).transition(TaskState.PR_REVIEW)
+    revising = _to_pr_ready(3).transition(TaskState.PR_REVIEW).transition(TaskState.REVISING)
+    queue = TaskQueue(tasks=(normal, reviewing, revising))
+
+    assert [item.issue_number for item in queue.ready()] == [1, 2, 3]
+
+
 def test_queue_rejects_duplicate_issue() -> None:
     first = task(1)
 
