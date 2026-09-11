@@ -45,7 +45,7 @@ gates remain authoritative.
 
 - **Python**: `>=3.12`
 - **Supported OS**: Linux and macOS (Windows is unsupported due to POSIX process group session, signal handling, and filesystem isolation requirements)
-- **Package Manager**: [`uv`](https://docs.astral.sh/uv/) (recommended)
+- **Package Manager**: `pip`, `pipx`, or [`uv`](https://docs.astral.sh/uv/)
 - **Git**: `>=2.40`
 - **GitHub CLI**: `gh` (authenticated)
 - **Coding agent CLI tools**: `claude` (Claude Code) and/or `codex` (OpenAI Codex)
@@ -56,22 +56,34 @@ gates remain authoritative.
 
 ### 1. Installation
 
-#### Option A: Run immediately without installation (`uvx`)
+#### Option A: Install via `pip` or `pipx` (Standard)
+```bash
+# Recommended for standalone CLI installation:
+pipx install agent-scheduler
+
+# Or install into your active Python environment via pip:
+pip install agent-scheduler
+```
+
+> [!NOTE]
+> Installing the `agent-scheduler` package provides both the `subsched` command (primary) and the `agent-scheduler` alias.
+
+#### Option B: Run immediately without installation (`uvx`)
 ```bash
 uvx agent-scheduler doctor
 uvx agent-scheduler run --repo owner/project --issues 101 --dry-run
 ```
 
-#### Option B: Global CLI install (`uv tool`)
+#### Option C: Global CLI install via `uv tool`
 ```bash
-# Install from source
-uv tool install -e .
-
-# Or install from PyPI (once published)
+# Install from PyPI
 uv tool install agent-scheduler
+
+# Or install editable from local source
+uv tool install -e .
 ```
 
-#### Option C: Development setup
+#### Option D: Development setup (from source)
 ```bash
 git clone https://github.com/takurot/agent-scheduler.git
 cd agent-scheduler
@@ -152,10 +164,22 @@ github:
   repo: owner/project
   # Optional. Omit to resolve the repository default branch via GitHub.
   # base_branch: develop
-  mode: all-open # or label: "ai-ready"
+  # Optional label filtering:
+  # include_labels: ["ai-ready"]  # AND semantics: must match all
+  # exclude_labels: ["blocked"]   # OR semantics: excluded if any match
   completion:
     create_pr: true
+    # When true, appends "Closes #<issue>" to the PR body to automatically close the issue upon merge
     close_issue: false
+
+# Supported agents: claude, codex. At least one agent must remain enabled.
+agents:
+  claude:
+    enabled: true
+    priority: 100
+  codex:
+    enabled: false
+    priority: 90
 
 routing:
   strategy: capacity-aware
@@ -171,6 +195,8 @@ billing:
 
 execution:
   concurrency: 1
+  max_agent_switches: 6
+  max_tasks_per_run: 50
   pause_running_policy: continue
 
 queue:
@@ -212,13 +238,48 @@ configuration loading instead of being accepted and ignored.
 
 | Command | Description |
 |---|---|
-| `subsched doctor` | Check prerequisite binaries and inspect GitHub token scope |
-| `subsched run` | Discover issues, initialize queue, and dispatch tasks |
-| `subsched status` | Display queue breakdown, cooldowns, and scheduler state |
-| `subsched metrics` | Output Productivity, Reliability, and Capacity metrics |
+| `subsched doctor` | Check prerequisite binaries (`git`, `gh`, `claude`, `codex`) and inspect GitHub token scope |
+| `subsched run` | Discover issues, initialize queue, and dispatch tasks (`--allow-native`, `--subscription-billing-verified`, `--watch`, `--dry-run`) |
+| `subsched status` | Display queue breakdown, cooldowns, and scheduler state (`-v` / `--verbose` for per-task detail) |
+| `subsched metrics` | Output Productivity, Reliability, and Capacity metrics (`--json`, `--report <file.md>`) |
 | `subsched pause` | Pause task execution cleanly after current step |
 | `subsched resume` | Resume scheduler execution from paused state |
 | `subsched cancel <id>` | Cancel a task and preserve its worktree files |
+
+---
+
+## Frequently Asked Questions (FAQ)
+
+### 1. Does `subsched` switch agents (e.g. Claude to Codex) when token limits or subscription quotas are exhausted?
+Yes. `subsched` supports multi-agent configurations (such as Claude Code and OpenAI Codex).
+When an active agent encounters rate limits or quota boundaries (e.g., 5-hour session limits or weekly caps, classified as `CAPACITY_SESSION` or `CAPACITY_WEEKLY`), `subsched` records the cooldown state along with the target reset timestamp (`reset_at`).
+If an alternative enabled agent is configured and available, `subsched` automatically fails over to that agent, allowing task execution to proceed without manual operator intervention.
+
+### 2. What happens if quota or tokens run out in the middle of a task?
+Work is never lost or discarded:
+- **Worktree & Commit Durability**: Each task runs in its own dedicated Git worktree (`.ai/worktrees/issue-<number>`). Any files created, modifications made, and Git commits recorded prior to interruption remain intact on disk.
+- **Semantic Handoff & Mechanical Checkpoints**: The agent continually documents its progress, decisions, and next steps in a structured handoff document (`.ai/handoffs/<issue>.md`). In addition, `subsched` captures mechanical checkpoints of file diffs and commit hashes.
+- **State Preservation**: The task transitions to `WAITING_CAPACITY` (or immediately fails over to an alternative agent if one is available).
+- **Seamless Resumption**: Once the quota reset time (`reset_at`) arrives or the task is reassigned to an alternative agent, the next worker reads the handoff document and previous commits, resuming work directly from the last state rather than starting over from scratch.
+
+### 3. How are task dependencies handled (e.g., Task B cannot start until Task A completes)?
+`subsched` provides dependency tracking and topological execution:
+- **Dependency Detection**: Dependencies can be declared in GitHub Issue bodies (e.g., `Blocked by #<number>` or `Depends on #<number>`) or configured explicitly.
+- **`WAITING_DEPENDENCY` State**: If Task B depends on Task A, Task B is placed in the `WAITING_DEPENDENCY` state and will not be dispatched while Task A is in progress, verifying, or waiting.
+- **Automatic Unblocking**: When Task A passes all verification quality gates and reaches the `COMPLETE` state, `subsched` automatically resolves dependencies, transitions Task B to `READY`, and schedules it for execution in topological order. Circular dependencies are detected and fail-closed to `BLOCKED`.
+
+### 4. Can an external orchestrator (such as Gemini, an LLM controller, or a CI script) assign and monitor tasks?
+Yes. `subsched` is built with a deterministic CLI and durable JSON state, making it ideal to be driven by higher-level orchestrators (such as Gemini, autonomous supervisor agents, or CI pipelines):
+- **Command & Control**: Orchestrators can drive `subsched` via standard commands: `subsched run --issues <id>` to queue or run specific issues, `subsched pause` / `subsched resume` to control execution flow, and `subsched cancel <id>` to abort specific tasks safely.
+- **State & Health Inspection**: The scheduler's state is stored durably in `.ai/scheduler.json`. Orchestrators can query queue status with `subsched status --verbose` or export machine-readable metrics via `subsched metrics --json`.
+- **Fail-Closed Escalation for Supervisory AI**: If an unrecoverable event occurs (such as Git rebase merge conflicts, ambiguous existing PR matches, or unexpected agent termination), `subsched` transitions the task to `NEEDS_HUMAN` and records the exact reason in `needs_human_reason`. An external AI orchestrator can inspect this field, triage the root cause, and either remediate the issue programmatically or notify a human operator.
+
+### 5. Are intermediate execution logs and agent transcripts saved?
+Yes, execution details are captured and persisted across multiple layers:
+- **Structured Event Logs**: All scheduler lifecycle events (`dispatch`, `agent_finish`, `capacity_reset_cleared`, `rebase`, `verification`, `pr_create`, etc.) are written to structured logs with ISO 8601 timestamps, issue numbers, and duration metrics.
+- **Agent Process Logs & Transcripts**: Stdout, stderr, and output from native coding agent CLI invocations are captured and recorded in per-task worktree directories and scheduler execution logs.
+- **Task Artifacts & Handoffs**: Every worktree retains `.ai/tasks/<issue>.md`, `.ai/handoffs/<issue>.md`, and `.ai/checkpoints/`, documenting incremental progress across worker dispatches and restarts.
+- **Markdown Run Reports**: Comprehensive execution summaries (covering productivity, reliability, failure breakdowns, and capacity events) can be generated at any time using `subsched metrics --report run_report.md`.
 
 ---
 
