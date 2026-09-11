@@ -43,6 +43,7 @@ def _git_snapshot(repo_root: Path) -> dict[str, str] | None:
         capture_output=True,
         text=True,
         check=False,
+        timeout=10.0,
     )
     if probe.returncode != 0:
         return None
@@ -53,6 +54,7 @@ def _git_snapshot(repo_root: Path) -> dict[str, str] | None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=10.0,
         )
         return result.stdout.strip() if result.returncode == 0 else ""
 
@@ -61,6 +63,7 @@ def _git_snapshot(repo_root: Path) -> dict[str, str] | None:
         capture_output=True,
         text=True,
         check=False,
+        timeout=10.0,
     )
     # #147 code review: the reported incident also included two spurious empty commits
     # landed on a real deliverable branch (`subsched/issue-127`) checked out in a
@@ -81,13 +84,24 @@ def _git_snapshot(repo_root: Path) -> dict[str, str] | None:
         capture_output=True,
         text=True,
         check=False,
+        timeout=10.0,
     )
+    # Fail closed rather than substituting a sentinel: a sentinel value shared between
+    # "before" and "after" snapshots would compare equal even if git failed both times
+    # for different reasons (or started failing only on one side but got unlucky),
+    # silently masking real repository corruption instead of surfacing it.
+    if worktrees.returncode != 0:
+        raise RuntimeError(
+            f"git worktree list failed for {repo_root}: {worktrees.stderr}"
+        )
+    if refs.returncode != 0:
+        raise RuntimeError(f"git for-each-ref failed for {repo_root}: {refs.stderr}")
     return {
         "core.bare": _config("core.bare"),
         "user.name": _config("user.name"),
         "user.email": _config("user.email"),
-        "worktree_list": worktrees.stdout if worktrees.returncode == 0 else "<error>",
-        "branch_refs": refs.stdout if refs.returncode == 0 else "<error>",
+        "worktree_list": worktrees.stdout,
+        "branch_refs": refs.stdout,
     }
 
 
