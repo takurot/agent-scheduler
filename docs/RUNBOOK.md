@@ -32,7 +32,7 @@ git clone https://github.com/takurot/agent-scheduler.git
 cd agent-scheduler
 
 # Install dependencies and local package
-uv sync --extra dev
+uv sync
 
 # Run diagnostic verification
 uv run subsched doctor

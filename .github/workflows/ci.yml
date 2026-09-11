@@ -25,7 +25,7 @@ jobs:
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --frozen --extra dev
+      - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run mypy src
       - run: uv run pytest --cov=subsched --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=80

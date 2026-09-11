@@ -36,6 +36,8 @@ Issues = "https://github.com/takurot/agent-scheduler/issues"
 mcp = [
   "mcp>=1.2.0,<2",
 ]
+
+[dependency-groups]
 dev = [
   "mcp>=1.2.0,<2",
   "mypy>=1.17,<3",
