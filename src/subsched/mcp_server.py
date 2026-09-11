@@ -443,6 +443,71 @@ def get_metrics(repository_path: str | None = None) -> dict[str, Any]:
     return calculate_metrics(tasks).to_dict()
 
 
+def reconcile_tasks(
+    repository_path: str | None = None,
+    repo: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Reconcile READY_FOR_REVIEW tasks against actual PR state on GitHub.
+
+    A task whose PR was merged advances to COMPLETE; a task whose PR was closed
+    without being merged escalates to NEEDS_HUMAN; a task with an open PR is left
+    unchanged. Fails closed (no state mutation) on any `gh` error. Worktrees are
+    never pruned via MCP -- use `subsched reconcile --prune-worktrees` on the CLI.
+    """
+    from subsched.github.reconcile import (
+        PrLifecycleFetchKind,
+        fetch_pr_lifecycle_states,
+        plan_reconciliation,
+    )
+
+    store = _store_for(repository_path)
+    resolved_repo = repo or _github_repo(store.state_dir.parent)
+    try:
+        with store.lock():
+            tasks = store.load_tasks()
+            candidates = [
+                task
+                for task in tasks
+                if task.status is TaskState.READY_FOR_REVIEW and task.pr is not None
+            ]
+            if not candidates:
+                return {
+                    "reconciled_complete": 0,
+                    "reconciled_needs_human": 0,
+                    "unchanged": 0,
+                    "dry_run": dry_run,
+                    "items": [],
+                }
+
+            fetch = fetch_pr_lifecycle_states(resolved_repo)
+            if fetch.kind is PrLifecycleFetchKind.FAILURE:
+                raise McpToolError(f"failed to fetch PR state from GitHub: {fetch.error}")
+
+            result = plan_reconciliation(tasks, fetch.states)
+            if not dry_run:
+                store.save_tasks(result.updated_tasks, paused=store.is_paused())
+    except (SchedulerLockError, StateCorruptionError) as error:
+        raise McpToolError(f"reconciliation failed: {error}") from error
+
+    return {
+        "reconciled_complete": result.reconciled_complete,
+        "reconciled_needs_human": result.reconciled_needs_human,
+        "unchanged": result.unchanged,
+        "dry_run": dry_run,
+        "items": [
+            {
+                "issue_number": item.issue_number,
+                "pr": item.pr,
+                "from_status": item.from_status.value,
+                "action": item.action.value,
+                "reason": item.reason,
+            }
+            for item in result.items
+        ],
+    }
+
+
 def get_queue_resource(repository_path: str | None = None) -> dict[str, Any]:
     """Real-time snapshot of tasks and queue state (`subsched://queue`)."""
     store = _store_for(repository_path)
@@ -689,6 +754,28 @@ def build_server(options: ServerOptions) -> Any:
         repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
     ) -> dict[str, Any]:
         return get_metrics(_default(repository_path))
+
+    @server.tool(
+        name="subsched_reconcile",
+        description=(
+            "Reconcile READY_FOR_REVIEW tasks against actual PR state on GitHub: a merged PR "
+            "advances its task to COMPLETE, an unmerged closed PR escalates to NEEDS_HUMAN, and "
+            "an open PR leaves the task unchanged. Fails closed on any `gh` error. Set "
+            "dry_run=True to preview without mutating scheduler state."
+        ),
+    )
+    def _reconcile_tasks(
+        repo: str | None = Field(
+            default=None,
+            description="GitHub owner/repository. Defaults to github.repo in subsched.yaml.",
+        ),
+        dry_run: bool = Field(
+            default=False,
+            description="Preview planned reconciliations without mutating scheduler state.",
+        ),
+        repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
+    ) -> dict[str, Any]:
+        return reconcile_tasks(_default(repository_path), repo, dry_run)
 
     @server.resource("subsched://queue")
     def _queue_resource() -> dict[str, Any]:

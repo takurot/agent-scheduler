@@ -93,6 +93,30 @@ uv run subsched resume
 uv run subsched cancel 101
 ```
 
+### Reconciling `READY_FOR_REVIEW` Tasks Against Merged PRs
+
+Under the default `execution.ci_monitoring: false`, the scheduler never revisits a task
+once its PR is created, so tasks accumulate under `READY_FOR_REVIEW` even after a
+maintainer merges (or closes) the PR on GitHub. Run `subsched reconcile` periodically
+(e.g. from cron or CI) to close that gap:
+
+```bash
+# Preview planned transitions without mutating .ai/scheduler.json
+uv run subsched reconcile --dry-run
+
+# Apply reconciliation: merged PR -> COMPLETE, unmerged closed PR -> NEEDS_HUMAN,
+# open PR -> left unchanged
+uv run subsched reconcile
+
+# Also remove the worktree of any task that reconciles to COMPLETE, but only when
+# `git status --porcelain` reports no changes at all
+uv run subsched reconcile --prune-worktrees
+```
+
+`subsched reconcile` fails closed: any `gh` execution error, authentication failure, or
+malformed output leaves `.ai/scheduler.json` untouched and exits non-zero. It is never
+invoked implicitly by `subsched run` or the discovery loop.
+
 ---
 
 ## 4. Capacity Failover & Wait Scheduling
@@ -333,6 +357,7 @@ Desktop, Cursor, Antigravity/Gemini) can therefore infer the workflow, argument 
 - **`subsched_cancel_task`**: Transition task to `CANCELLED` while strictly preserving worktree and handoff files.
 - **`subsched_control`**: Cleanly pause or resume task dispatching (`action: "pause" | "resume"`).
 - **`subsched_get_metrics`**: Calculate Productivity, Reliability, and Capacity metrics.
+- **`subsched_reconcile`**: Reconcile `READY_FOR_REVIEW` tasks against actual PR state on GitHub -- merged PRs advance to `COMPLETE`, unmerged closed PRs escalate to `NEEDS_HUMAN`, open PRs are left unchanged. Fails closed on any `gh` error. Supports `dry_run=True`. Worktree pruning is CLI-only (`subsched reconcile --prune-worktrees`), never exposed via MCP.
 
 #### Resources
 - `subsched://queue`: JSON snapshot of all tasks and scheduler pause state.

@@ -428,6 +428,17 @@ class Scheduler:
 
             # Case 1: Issue is missing from snapshot
             if task.issue_number not in issues_by_number:
+                # #277: a closed issue is expected to be absent from an *open*-issues
+                # snapshot -- if its PR was actually merged, that is the normal,
+                # successful end state, not a reason to escalate to NEEDS_HUMAN. Check
+                # merged-PR state first so `discover()` never fights `reconcile()` over
+                # a task that has already completed the review cycle.
+                if task.status is TaskState.READY_FOR_REVIEW and self.merged_pr_checker is not None:
+                    check = self.merged_pr_checker(task.issue_number)
+                    if check.kind is MergedPrCheckKind.CONFIRMED:
+                        task = task.transition(TaskState.COMPLETE)
+                        reconciled_tasks.append(task)
+                        continue
                 if snapshot_complete and task.status is not TaskState.NEEDS_HUMAN:
                     reason = "issue missing from complete GitHub snapshot"
                     task = task.transition(TaskState.NEEDS_HUMAN, reason=reason)

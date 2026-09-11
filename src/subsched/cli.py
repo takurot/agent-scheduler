@@ -33,6 +33,14 @@ from subsched.github.issues import (
     resolve_default_branch,
 )
 from subsched.github.pull_requests import check_merged_pr_for_issue
+from subsched.github.reconcile import (
+    PrLifecycleFetchKind,
+    ReconcileAction,
+    WorktreePruneKind,
+    fetch_pr_lifecycle_states,
+    plan_reconciliation,
+    prune_worktree_if_clean,
+)
 from subsched.init import InitError, build_scaffold_plan, write_scaffold_plan
 from subsched.models import Capacity, TaskState
 from subsched.preflight import validate_native_preflight
@@ -857,6 +865,103 @@ def status(
                 f"[{cap.used_percentage:.1f}% used]{reset_str}"
             )
             typer.echo(summary)
+
+
+@app.command()
+def reconcile(
+    ctx: typer.Context,
+    repo: Annotated[str | None, typer.Option("--repo", help="GitHub owner/repository")] = None,
+    config: Annotated[
+        Path | None, typer.Option("--config", help="Path to YAML configuration file")
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Preview reconciliations without mutating scheduler state"),
+    ] = False,
+    prune_worktrees: Annotated[
+        bool,
+        typer.Option(
+            "--prune-worktrees",
+            help=(
+                "Delete the worktree of any task that reconciles to COMPLETE, but only "
+                "when `git status --porcelain` reports no changes at all. Off by default."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Reconcile READY_FOR_REVIEW tasks against actual PR state on GitHub.
+
+    A task whose PR was merged advances to COMPLETE; a task whose PR was closed
+    without being merged escalates to NEEDS_HUMAN; a task with an open PR is left
+    unchanged. Fails closed (no state mutation, non-zero exit) on any `gh` error.
+    """
+    context: Context = ctx.obj
+    try:
+        cfg = _load_effective_config(context.repository, config)
+    except ConfigError as error:
+        raise typer.BadParameter(str(error), param_hint="--config") from error
+
+    resolved_repo = repo or cfg.github.repo
+    if not resolved_repo:
+        raise typer.BadParameter(
+            "missing required --repo option or config.github.repo", param_hint="--repo"
+        )
+
+    try:
+        with context.store.lock():
+            tasks = context.store.load_tasks()
+            candidates = [
+                task
+                for task in tasks
+                if task.status is TaskState.READY_FOR_REVIEW and task.pr is not None
+            ]
+            if not candidates:
+                typer.echo("No READY_FOR_REVIEW tasks with an associated PR to reconcile")
+                return
+
+            fetch = fetch_pr_lifecycle_states(resolved_repo)
+            if fetch.kind is PrLifecycleFetchKind.FAILURE:
+                typer.echo(f"Failed to fetch PR state from GitHub: {fetch.error}", err=True)
+                raise typer.Exit(1)
+
+            result = plan_reconciliation(tasks, fetch.states)
+            for item in result.items:
+                typer.echo(
+                    f"#{item.issue_number} PR #{item.pr}: "
+                    f"{item.from_status.value} -> {item.action.value} ({item.reason})"
+                )
+            typer.echo(
+                f"\nreconciled_complete={result.reconciled_complete} "
+                f"reconciled_needs_human={result.reconciled_needs_human} "
+                f"unchanged={result.unchanged}"
+            )
+
+            if dry_run:
+                typer.echo("\nDry run: scheduler state was not modified")
+                return
+
+            context.store.save_tasks(result.updated_tasks, paused=context.store.is_paused())
+    except (SchedulerLockError, StateCorruptionError) as error:
+        typer.echo(f"State error: {error}", err=True)
+        raise typer.Exit(1) from error
+
+    if prune_worktrees:
+        completed_issue_numbers = {
+            item.issue_number for item in result.items if item.action is ReconcileAction.COMPLETE
+        }
+        for task in result.updated_tasks:
+            if task.issue_number not in completed_issue_numbers or task.worktree is None:
+                continue
+            prune_result = prune_worktree_if_clean(
+                context.repository,
+                context.store.worktrees_dir,
+                task.issue_number,
+                Path(task.worktree),
+            )
+            suffix = f" - {prune_result.reason}" if prune_result.reason else ""
+            typer.echo(f"  worktree issue-{task.issue_number}: {prune_result.kind.value}{suffix}")
+            if prune_result.kind is WorktreePruneKind.FAILED:
+                raise typer.Exit(1)
 
 
 @app.command()
