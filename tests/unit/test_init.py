@@ -157,6 +157,23 @@ def test_resolve_github_repo_from_ssh_remote(tmp_path: Path) -> None:
     assert repo == "owner/name"
 
 
+def test_resolve_github_repo_from_ssh_url_remote_with_port(tmp_path: Path) -> None:
+    repo = resolve_github_repo(
+        tmp_path,
+        run=_fake_run(0, stdout="ssh://git@github.com:22/owner/name.git\n"),
+    )
+
+    assert repo == "owner/name"
+
+
+def test_resolve_github_repo_from_ssh_url_remote_without_port(tmp_path: Path) -> None:
+    repo = resolve_github_repo(
+        tmp_path, run=_fake_run(0, stdout="ssh://git@github.com/owner/name.git\n")
+    )
+
+    assert repo == "owner/name"
+
+
 def test_resolve_github_repo_falls_back_to_gh_when_remote_missing(tmp_path: Path) -> None:
     calls: list[list[str]] = []
 

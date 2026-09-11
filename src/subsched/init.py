@@ -89,11 +89,14 @@ _GITHUB_HTTPS_RE = re.compile(
 _GITHUB_SSH_RE = re.compile(
     r"^git@github\.com:(?P<owner>[^/\s]+)/(?P<name>[^/\s]+?)(?:\.git)?$"
 )
+_GITHUB_SSH_URL_RE = re.compile(
+    r"^ssh://(?:git@)?github\.com(?::\d+)?/(?P<owner>[^/\s]+)/(?P<name>[^/\s]+?)(?:\.git)?/?$"
+)
 
 
 def _parse_github_remote(url: str) -> str | None:
     url = url.strip()
-    for pattern in (_GITHUB_HTTPS_RE, _GITHUB_SSH_RE):
+    for pattern in (_GITHUB_HTTPS_RE, _GITHUB_SSH_RE, _GITHUB_SSH_URL_RE):
         match = pattern.match(url)
         if match:
             return f"{match.group('owner')}/{match.group('name')}"
