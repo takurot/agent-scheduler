@@ -2803,3 +2803,65 @@ subsched init [PATH] [OPTIONS]
 `subsched.yaml` / `AGENTS.md` / `CLAUDE.md`のいずれかが既に存在する場合、`--force`を
 指定しない限り何も書き込まずにエラーとする（部分的な書き込みを避けるため、書き込み前に
 全ファイルの存在を検査してからまとめて書き込む）。
+
+---
+
+# 77. Model Context Protocol (MCP) サーバー (#250)
+
+Claude Desktop、Cursor、VS Code、Antigravity等のAIアシスタントやIDE環境から、
+ターミナルCLIコマンド構文やフラグを意識せずに直接`subsched`のキュー監視、タスク操作、
+リポジトリ初期化、ディスパッチ制御を行えるよう、stdioトランスポートによる
+Model Context Protocol (MCP) サーバーインターフェースを提供する。
+
+```bash
+subsched mcp [--repository PATH]
+```
+
+## 1. アーキテクチャと依存性
+
+- **トランスポート**: 標準入出力 (`stdio`)。
+- **フレームワーク**: 公式 Python MCP SDK (`mcp.server.fastmcp.FastMCP`)。
+- **パッケージング**: オプショナル依存 `mcp = ["mcp>=1.2.0,<2"]`。`pip install agent-scheduler[mcp]` で導入可能。未インストール環境で `subsched mcp` を起動した場合は、適切なインストール手順を表示して終了コード 1 で fail-closed 終了する。
+- **純粋関数設計**: `subsched.mcp_server` の各ツール関数は純粋関数として実装され、`mcp` パッケージ未インストール時でもインポートおよび単体テストが可能。
+
+## 2. マルチリポジトリ対応
+
+各ツールはオプショナル引数 `repository_path: str | None` を受け付ける。
+- 指定された場合: シンボリックリンクを拒絶し、存在を確認した上で `find_repository_root` を介してリポジトリルートを厳格に解決する。
+- 省略された場合: CLIの `--repository` 指定、またはカレントワーキングディレクトリにフォールバックする。
+
+## 3. 非同期ディスパッチとイベントループ保護
+
+長時間のワーカー実行（数分〜数時間）がMCPのstdio通信をブロックしクライアント側でタイムアウト
+（通常30〜60秒）を起こすのを防ぐため、`subsched_trigger_dispatch` は `subsched run` を
+独立したバックグラウンドプロセスとして起動し、即座に制御を戻す。
+また、`allow_native` および `subscription_billing_verified` の既定値を `False` とし、
+明示的なオプトインがない限りネイティブ実行は許可しない（fail-closed）。
+
+## 4. 排他ロックとデータ完全性
+
+状態を変更するすべてのMCPツール操作は、既存の `JsonStateStore.lock()` 排他ロックを取得して実行され、
+CLIとの並行実行時にも競合やデータ破損を完全に防止する。
+
+## 5. 公開仕様
+
+### Tools (9個)
+1. `subsched_get_status`: キュー状態内訳、タスク一覧、プロバイダークールダウン状態の取得。
+2. `subsched_inspect_task`: 指定Issueの詳細情報、パース済みセマンティックハンドオフ、直近コミットの取得。
+3. `subsched_queue_issues`: GitHubからのIssue自動検出およびキュー登録（`dry_run` 対応）。
+4. `subsched_trigger_dispatch`: バックグラウンドプロセスでの `subsched run` 起動。
+5. `subsched_init_repo`: リポジトリのスタック検出および `subsched.yaml` / `AGENTS.md` / `CLAUDE.md` のスキャフォールド。
+6. `subsched_resolve_needs_human`: `NEEDS_HUMAN` 状態のタスクを `READY` に遷移。
+7. `subsched_cancel_task`: ワークツリーおよびハンドオフファイルを温存したままタスクを `CANCELLED` に遷移。
+8. `subsched_control`: スケジューラーの新規ディスパッチの一時停止 (`pause`) / 再開 (`resume`)。
+9. `subsched_get_metrics`: 生産性、信頼性、キャパシティ指標の集計取得。
+
+### Resources (4個)
+1. `subsched://queue`: タスク一覧および一時停止状態のリアルタイムJSONスナップショット。
+2. `subsched://capacities`: プロバイダークールダウンおよびリセット時刻のリアルタイムJSONスナップショット。
+3. `subsched://tasks/{issue}/handoff`: タスクのセマンティックハンドオフ文書のMarkdown本文。
+4. `subsched://guidelines`: TDD、コミット規約、ハンドオフ仕様等のエージェント行動規範。
+
+### Prompts (2個)
+1. `triage_task`: `NEEDS_HUMAN` 状態のIssueの調査・修正を案内するプロンプト。
+2. `bootstrap_repo`: 新規リポジトリでの環境評価および初期化を案内するプロンプト。

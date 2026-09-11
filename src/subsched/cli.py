@@ -924,6 +924,31 @@ def doctor() -> None:
 
 
 @app.command()
+def mcp(ctx: typer.Context) -> None:
+    """Run subsched as a Model Context Protocol (MCP) server over stdio (#250).
+
+    Exposes tools such as `subsched_get_status`, `subsched_queue_issues`, and
+    `subsched_trigger_dispatch` to MCP clients (Claude Desktop, Cursor, Antigravity).
+    Use the top-level `--repository` option to set the default repository; every
+    tool also accepts a per-call `repository_path` override. Requires the optional
+    `mcp` extra: `pip install agent-scheduler[mcp]`.
+    """
+    context: Context = ctx.obj
+    try:
+        from subsched.mcp_server import ServerOptions, build_server
+    except ImportError as error:
+        typer.echo(
+            "The `mcp` package is required for `subsched mcp`. Install it with "
+            "`pip install agent-scheduler[mcp]`.",
+            err=True,
+        )
+        raise typer.Exit(1) from error
+
+    server = build_server(ServerOptions(default_repository=context.repository))
+    server.run()
+
+
+@app.command()
 def metrics(
     ctx: typer.Context,
     json_output: Annotated[
