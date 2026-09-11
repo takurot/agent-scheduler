@@ -36,6 +36,12 @@ from subsched.recovery import (
     reconcile_task_recovery,
     save_process_record,
 )
+from subsched.review import (
+    ReviewVerdict,
+    build_pr_comment_body,
+    read_review_report,
+    worktree_touched_unexpected_paths,
+)
 from subsched.router import FRESHNESS, Router
 from subsched.storage import JsonStateStore, get_process_start_time
 from subsched.structured_logger import StructuredLogger
@@ -170,6 +176,13 @@ class Scheduler:
         # (mode="standard") -- every existing direct Scheduler(...) construction keeps
         # running the historical single-pass dispatch flow unchanged.
         workflow: WorkflowConfig | None = None,
+        # #281: opt-in (default False), like ci_checker/ci_monitoring -- every existing
+        # direct Scheduler(...) construction in the test suite, and every deployment
+        # that doesn't configure it, keeps today's PR_READY -> READY_FOR_REVIEW
+        # behavior unchanged (a PR is opened and immediately awaits human review, no
+        # automated review round in between).
+        pr_review_enabled: bool = False,
+        max_review_cycles: int = 3,
     ) -> None:
         self.store = store
         self.router = router
@@ -207,6 +220,8 @@ class Scheduler:
             raise ValueError("max_verification_failures must be positive")
         if max_agent_switches <= 0 or max_tasks <= 0:
             raise ValueError("scheduler safety limits must be positive")
+        if max_review_cycles <= 0:
+            raise ValueError("max_review_cycles must be positive")
         self.max_agent_failures = max_agent_failures
         self.max_verification_failures = max_verification_failures
         self.max_agent_switches = max_agent_switches
@@ -215,6 +230,8 @@ class Scheduler:
         if self.workflow.limits.max_plan_revisions <= 0:
             raise ValueError("workflow.limits.max_plan_revisions must be positive")
         self.max_plan_revisions = self.workflow.limits.max_plan_revisions
+        self.pr_review_enabled = pr_review_enabled
+        self.max_review_cycles = max_review_cycles
         from subsched.lease import LeaseManager
 
         self.lease_manager = LeaseManager(max_concurrency=concurrency)
@@ -326,9 +343,17 @@ class Scheduler:
                                 reconciled,
                                 per_agent_failures=tuple(sorted(failures_dict.items())),
                             )
+                            # #281: a crashed review/revision dispatch must not be
+                            # released back to READY -- that would redispatch it with
+                            # the normal full-issue worker prompt instead of the
+                            # review/revision-specific one (see the equivalent
+                            # fail-closed check in _handle_result). Fail closed to
+                            # NEEDS_HUMAN instead of guessing.
                             next_state = (
                                 TaskState.NEEDS_HUMAN
                                 if agent_failure_count >= self.max_agent_failures
+                                or task.dispatch_status
+                                in (TaskState.PR_REVIEW, TaskState.REVISING)
                                 else TaskState.READY
                             )
                             resolved = reconciled.transition(next_state, reason=reason)
@@ -984,13 +1009,25 @@ class Scheduler:
         agent = self.router.select(available_capacities, now=current)
         if agent is None:
             task = ready_tasks[0]
-            self.queue = self.queue.replace(task.transition(TaskState.WAITING_CAPACITY))
+            # #281: PR_REVIEW/REVISING are themselves already dispatchable "ready"
+            # states (see TaskQueue.ready) -- unlike a plain READY task, WAITING_CAPACITY
+            # has no way to remember which of the two to release back into, so these are
+            # simply left in place; they are reconsidered on the next tick once capacity
+            # is available, same as any other still-ready task.
+            if task.status not in (TaskState.PR_REVIEW, TaskState.REVISING):
+                self.queue = self.queue.replace(task.transition(TaskState.WAITING_CAPACITY))
             self.is_waiting_for_capacity = True
             self._backoff_step = min(self._backoff_step + 1, 10)
             self._persist()
             return False
 
         task = ready_tasks[0]
+        # #281: snapshot which dispatchable state this task came from before the
+        # generic DISPATCHED -> IN_PROGRESS transitions below overwrite task.status --
+        # by the time Worker.run() and _handle_result() see this task, status is always
+        # IN_PROGRESS, so dispatch_status is the only way to tell a PR_REVIEW/REVISING
+        # dispatch apart from a normal one (see Task.dispatch_status docstring).
+        task = replace(task, dispatch_status=task.status)
         lease = self.lease_manager.acquire(task.issue_number, agent, now=current)
         try:
             if self.worktree_adapter is not None:
@@ -1119,7 +1156,16 @@ class Scheduler:
                 },
             )
 
-            if self.handoff_continuous and running.worktree is not None:
+            # #281: PR_REVIEW is strictly read-only and explicitly instructed not to
+            # touch the handoff file (see build_review_prompt) -- enforcing handoff
+            # freshness on it would escalate every reviewer dispatch to NEEDS_HUMAN.
+            # worktree_touched_unexpected_paths (see _process_pr_review) is the
+            # equivalent integrity check for this dispatch kind.
+            if (
+                self.handoff_continuous
+                and running.worktree is not None
+                and running.dispatch_status is not TaskState.PR_REVIEW
+            ):
                 escalated = self._enforce_handoff_freshness(running, agent, current, result.kind)
                 if escalated is not None:
                     self.queue = self.queue.replace(escalated)
@@ -1240,6 +1286,100 @@ class Scheduler:
                 self.queue = self.queue.replace(updated)
                 self._persist()
             # PENDING/UNKNOWN: leave the task in READY_FOR_REVIEW unchanged.
+
+    def _process_pr_review(self, task: Task, agent: str, now: datetime) -> None:
+        """Read back the reviewer's report for a PR_REVIEW dispatch that reported PASS,
+        and transition on its verdict.
+
+        Fail-closed like every other readback boundary in this codebase (handoff,
+        checkpoint): a missing/malformed report, or any working-tree change beyond the
+        report file itself (the reviewer is meant to be read-only -- see
+        worktree_touched_unexpected_paths), escalates straight to NEEDS_HUMAN rather
+        than guessing a verdict.
+        """
+        round_number = task.review_cycles + 1
+        report = None
+        touched_unexpected: bool | None = True
+        if task.worktree is not None:
+            worktree_dir = Path(task.worktree)
+            touched_unexpected = worktree_touched_unexpected_paths(
+                worktree_dir, task.issue_number, round_number
+            )
+            if touched_unexpected is False:
+                report = read_review_report(worktree_dir, task.issue_number, round_number)
+
+        if touched_unexpected is not False or report is None:
+            if touched_unexpected is not False:
+                reason = (
+                    "PR_REVIEW dispatch touched files beyond its review report "
+                    "(or the check could not run); failing closed"
+                )
+            else:
+                reason = (
+                    f"could not read a valid review report for round {round_number}; "
+                    "failing closed"
+                )
+            final = task.transition(
+                TaskState.NEEDS_HUMAN, current_agent=agent, now=now, reason=reason
+            )
+            self.queue = self.queue.replace(final)
+            self._log(
+                "task_transition",
+                level="ERROR",
+                issue_number=final.issue_number,
+                agent=agent,
+                task_id=final.task_id,
+                message=reason,
+                data={
+                    "from_state": task.status.value,
+                    "to_state": final.status.value,
+                    "attempt": final.attempt,
+                },
+            )
+            self._persist()
+            return
+
+        if task.pr is not None:
+            from subsched.github.review import post_pr_comment
+
+            comment_body = build_pr_comment_body(task, round_number, report)
+            post_result = post_pr_comment(task.pr, comment_body, repo=self.repo)
+            self._log(
+                "pr_comment",
+                issue_number=task.issue_number,
+                agent=agent,
+                task_id=task.task_id,
+                data={"result_kind": post_result.kind.value, "attempt": task.attempt},
+            )
+
+        if report.verdict is ReviewVerdict.APPROVE:
+            final = task.transition(TaskState.READY_FOR_REVIEW, current_agent=agent, now=now)
+        else:
+            reviewed = replace(task, review_cycles=round_number)
+            if round_number >= self.max_review_cycles:
+                reason = (
+                    f"exceeded max_review_cycles ({self.max_review_cycles}) with "
+                    "REQUEST_CHANGES verdict"
+                )
+                final = reviewed.transition(
+                    TaskState.NEEDS_HUMAN, current_agent=agent, now=now, reason=reason
+                )
+            else:
+                final = reviewed.transition(TaskState.REVISING, current_agent=agent, now=now)
+        self.queue = self.queue.replace(final)
+        self._log(
+            "task_transition",
+            issue_number=final.issue_number,
+            agent=agent,
+            task_id=final.task_id,
+            data={
+                "from_state": task.status.value,
+                "to_state": final.status.value,
+                "verdict": report.verdict.value,
+                "attempt": final.attempt,
+            },
+        )
+        self._persist()
 
     def _finalize_verified_task(
         self, verifying: Task, agent: str, now: datetime, verification_summary: str
@@ -1426,6 +1566,11 @@ class Scheduler:
         # exist yet) and no human has reviewed anything. READY_FOR_REVIEW is now the
         # default terminal state for this path; COMPLETE is only reached via CI
         # monitoring (see _poll_ci_checks) confirming CI PASS, when enabled.
+        # #281: when pr_review_enabled, an automated review round runs first (see
+        # _run_pr_reviews) -- READY_FOR_REVIEW is reached only via an APPROVE verdict
+        # (or after human escalation), not unconditionally on every PR open/update.
+        if self.pr_review_enabled:
+            return pr_ready.transition(TaskState.PR_REVIEW, current_agent=agent, now=now)
         return pr_ready.transition(TaskState.READY_FOR_REVIEW, current_agent=agent, now=now)
 
     # #145 code review: an externally-imposed interruption (capacity cutoff, timeout) is
@@ -1532,6 +1677,47 @@ class Scheduler:
         *,
         effective_capacities: dict[str, Capacity] | None = None,
     ) -> None:
+        # #281: a review/revision dispatch that did not come back PASS must not fall
+        # into the generic capacity/retry handling below -- that would eventually
+        # redispatch this task as if it were READY, i.e. with the normal full-issue
+        # worker prompt instead of the review/revision-specific one, silently changing
+        # what the task is doing mid-flight. Fail closed to NEEDS_HUMAN instead.
+        if (
+            task.dispatch_status in (TaskState.PR_REVIEW, TaskState.REVISING)
+            and result.kind is not AgentResultKind.PASS
+        ):
+            kind_label = "review" if task.dispatch_status is TaskState.PR_REVIEW else "revision"
+            reason = (
+                f"{kind_label} dispatch did not complete successfully "
+                f"({result.kind.value}); failing closed"
+            )
+            final = task.transition(
+                TaskState.NEEDS_HUMAN, current_agent=agent, now=now, reason=reason
+            )
+            self.queue = self.queue.replace(final)
+            self._log(
+                "task_transition",
+                level="ERROR",
+                issue_number=final.issue_number,
+                agent=agent,
+                task_id=final.task_id,
+                message=reason,
+                data={
+                    "from_state": task.status.value,
+                    "to_state": final.status.value,
+                    "attempt": final.attempt,
+                },
+            )
+            self._persist()
+            return
+
+        # #281: a PR_REVIEW dispatch is strictly read-only (see build_review_prompt) --
+        # it never touches source and never runs the pytest/ruff/mypy verification
+        # gates, so a PASS result here is routed to reading back the review report
+        # instead of into the normal VERIFYING path below.
+        if task.dispatch_status is TaskState.PR_REVIEW and result.kind is AgentResultKind.PASS:
+            self._process_pr_review(task, agent, now)
+            return
         if result.kind is AgentResultKind.PASS:
             verifying = task.transition(TaskState.VERIFYING, current_agent=agent, now=now)
             self.queue = self.queue.replace(verifying)

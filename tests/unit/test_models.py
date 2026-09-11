@@ -1,4 +1,5 @@
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -98,6 +99,62 @@ def test_all_state_transitions_match_allowed_matrix(from_state: TaskState) -> No
         else:
             with pytest.raises(StateTransitionError):
                 dummy_task.transition(to_state)
+
+
+def test_pr_review_round_trip_approve() -> None:
+    """PR_READY -> PR_REVIEW -> READY_FOR_REVIEW is the APPROVE path."""
+    task = Task.from_issue(Issue(number=1, title="one"))
+    running = task.transition(TaskState.DISPATCHED).transition(TaskState.IN_PROGRESS)
+    verifying = running.transition(TaskState.VERIFYING)
+    pr_ready = verifying.transition(TaskState.PR_READY)
+    in_review = pr_ready.transition(TaskState.PR_REVIEW)
+    approved = in_review.transition(TaskState.READY_FOR_REVIEW)
+    assert approved.status is TaskState.READY_FOR_REVIEW
+
+
+def test_pr_review_round_trip_request_changes_then_reverify() -> None:
+    """PR_REVIEW -> REVISING -> VERIFYING -> PR_READY -> PR_REVIEW is the
+    REQUEST_CHANGES revision loop."""
+    task = Task.from_issue(Issue(number=1, title="one"))
+    running = task.transition(TaskState.DISPATCHED).transition(TaskState.IN_PROGRESS)
+    pr_ready = running.transition(TaskState.VERIFYING).transition(TaskState.PR_READY)
+    in_review = pr_ready.transition(TaskState.PR_REVIEW)
+    revising = in_review.transition(TaskState.REVISING)
+    revision_running = revising.transition(TaskState.DISPATCHED).transition(
+        TaskState.IN_PROGRESS
+    )
+    reverified = revision_running.transition(TaskState.VERIFYING).transition(
+        TaskState.PR_READY
+    )
+    back_in_review = reverified.transition(TaskState.PR_REVIEW)
+    assert back_in_review.status is TaskState.PR_REVIEW
+
+
+def test_dispatch_status_persists_through_transition_and_round_trips() -> None:
+    """dispatch_status is preserved by .transition() (dataclasses.replace) and by
+    to_dict/from_dict, unlike status itself which is overwritten on every dispatch."""
+    task = Task.from_issue(Issue(number=1, title="one"))
+    running = replace(task, dispatch_status=TaskState.PR_REVIEW).transition(
+        TaskState.DISPATCHED
+    )
+    running = running.transition(TaskState.IN_PROGRESS)
+    assert running.status is TaskState.IN_PROGRESS
+    assert running.dispatch_status is TaskState.PR_REVIEW
+
+    restored = Task.from_dict(running.to_dict())
+    assert restored.dispatch_status is TaskState.PR_REVIEW
+
+    task_without = Task.from_issue(Issue(number=2, title="two"))
+    assert task_without.dispatch_status is None
+    assert Task.from_dict(task_without.to_dict()).dispatch_status is None
+
+
+def test_review_cycles_defaults_to_zero_and_round_trips() -> None:
+    task = Task.from_issue(Issue(number=1, title="one"))
+    assert task.review_cycles == 0
+
+    incremented = replace(task, review_cycles=2)
+    assert Task.from_dict(incremented.to_dict()).review_cycles == 2
 
 
 def test_capacity_reports_availability_and_remaining_percentage() -> None:

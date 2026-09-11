@@ -10,6 +10,8 @@ from subsched.agents.codex import CodexAgent, ensure_codex_output_schema
 from subsched.contract import (
     build_plan_prompt,
     build_plan_review_prompt,
+    build_review_prompt,
+    build_revision_prompt,
     build_worker_prompt,
     validate_dispatch_preconditions,
 )
@@ -95,16 +97,24 @@ class NativeWorker:
                 output=f"dispatch preconditions failed: {e}",
             )
 
-        # #280: PLANNING and PLAN_REVIEW are the multi-stage workflow's pre-implementation
-        # gate -- each uses its own prompt, and PLAN_REVIEW additionally runs with a
-        # read-only tool/sandbox restriction so the reviewer can never edit a file.
+        # Multi-stage workflow prompt and sandbox routing:
+        # #280: PLANNING and PLAN_REVIEW are the pre-implementation gate.
+        # #281: PR_REVIEW is the post-PR evaluation gate, and REVISING re-dispatches the worker.
         if task.status is TaskState.PLANNING:
             prompt = build_plan_prompt(task)
+            read_only = False
         elif task.status is TaskState.PLAN_REVIEW:
             prompt = build_plan_review_prompt(task)
+            read_only = True
+        elif task.dispatch_status is TaskState.PR_REVIEW:
+            prompt = build_review_prompt(task, round_number=task.review_cycles + 1)
+            read_only = True
+        elif task.dispatch_status is TaskState.REVISING:
+            prompt = build_revision_prompt(task, verification_commands=self.verification_commands)
+            read_only = False
         else:
             prompt = build_worker_prompt(task, verification_commands=self.verification_commands)
-        read_only = task.status is TaskState.PLAN_REVIEW
+            read_only = False
         heartbeat = self._heartbeat(task, agent)
         if agent == "claude":
             claude_tools = READ_ONLY_SANDBOX_ARGS["claude"][1] if read_only else "Bash,Edit,Read"

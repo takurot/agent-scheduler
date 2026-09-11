@@ -211,6 +211,33 @@ def test_ci_monitoring_defaults_to_disabled(tmp_path: Path) -> None:
     assert load_config(enabled_path).execution.ci_monitoring is True
 
 
+def test_pr_review_enabled_defaults_to_disabled(tmp_path: Path) -> None:
+    default_path = tmp_path / "default.yaml"
+    default_path.write_text("github:\n  repo: o/r\n", encoding="utf-8")
+    config = load_config(default_path)
+    assert config.execution.pr_review_enabled is False
+    assert config.execution.max_review_cycles == 3
+
+    enabled_path = tmp_path / "enabled.yaml"
+    enabled_path.write_text(
+        "github:\n  repo: o/r\nexecution:\n"
+        "  pr_review_enabled: true\n  max_review_cycles: 5\n",
+        encoding="utf-8",
+    )
+    enabled_config = load_config(enabled_path)
+    assert enabled_config.execution.pr_review_enabled is True
+    assert enabled_config.execution.max_review_cycles == 5
+
+
+def test_max_review_cycles_rejects_non_positive(tmp_path: Path) -> None:
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\nexecution:\n  max_review_cycles: 0\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
 def test_agent_timeout_seconds_rejects_non_positive(tmp_path: Path) -> None:
     path = tmp_path / "scheduler.yaml"
     path.write_text(

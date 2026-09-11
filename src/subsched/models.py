@@ -18,6 +18,8 @@ class TaskState(StrEnum):
     IN_PROGRESS = "IN_PROGRESS"
     VERIFYING = "VERIFYING"
     PR_READY = "PR_READY"
+    PR_REVIEW = "PR_REVIEW"
+    REVISING = "REVISING"
     READY_FOR_REVIEW = "READY_FOR_REVIEW"
     NEEDS_REBASE = "NEEDS_REBASE"
     RETRY = "RETRY"
@@ -142,6 +144,12 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
             # logic -- handoff integrity is a distinct safety property from whether the
             # Agent itself reported success or failure.
             TaskState.NEEDS_HUMAN,
+            # #281: outcomes of a PR_REVIEW-origin dispatch (see Task.dispatch_status /
+            # Scheduler._process_pr_review) -- a review PASS result is read back and
+            # classified straight from IN_PROGRESS, it never passes through VERIFYING
+            # since a review dispatch never runs the verification gates.
+            TaskState.READY_FOR_REVIEW,
+            TaskState.REVISING,
         }
     ),
     TaskState.VERIFYING: frozenset(
@@ -155,8 +163,46 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     ),
     TaskState.PR_READY: frozenset(
         {
+            # #281: PR_REVIEW is the normal path once automated post-PR review is
+            # enabled (Scheduler.pr_review_enabled); READY_FOR_REVIEW is kept as a
+            # direct transition too so every existing push/PR-enabled test (and any
+            # deployment with the reviewer feature left off) keeps its prior
+            # behavior -- opening a PR unconditionally means "awaiting human review".
+            TaskState.PR_REVIEW,
             TaskState.READY_FOR_REVIEW,
             TaskState.NEEDS_REBASE,
+            TaskState.NEEDS_HUMAN,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.PR_REVIEW: frozenset(
+        {
+            # PR_REVIEW is itself a dispatchable "ready" state (see TaskQueue.ready) --
+            # the reviewer Agent is dispatched from here exactly like READY dispatches a
+            # worker, so it needs the same DISPATCHED entry point.
+            TaskState.DISPATCHED,
+            # APPROVE: hand off to the existing human-review/CI-merge path.
+            TaskState.READY_FOR_REVIEW,
+            # REQUEST_CHANGES: re-dispatch the worker with the review findings.
+            TaskState.REVISING,
+            TaskState.NEEDS_HUMAN,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.REVISING: frozenset(
+        {
+            # REVISING is also directly dispatchable (see TaskQueue.ready) -- the worker
+            # is re-dispatched from here with build_revision_prompt.
+            TaskState.DISPATCHED,
+            # A revision re-dispatch always re-enters the same local verification
+            # gates a normal implementation dispatch does -- VERIFYING's own
+            # transition set (PR_READY, RETRY, NEEDS_REBASE, NEEDS_HUMAN, CANCELLED)
+            # covers every outcome from there, so REVISING itself only needs to
+            # reach VERIFYING plus the fail-closed escalation/retry paths for a
+            # revision dispatch that never got that far (missing worktree/agent
+            # identity, or the Agent itself failing).
+            TaskState.VERIFYING,
+            TaskState.RETRY,
             TaskState.NEEDS_HUMAN,
             TaskState.CANCELLED,
         }
@@ -280,6 +326,11 @@ class Task:
     # `max_agent_failures` escalation is gated on genuine Agent failures only, never on
     # verification retries (see Scheduler._handle_result / max_verification_failures).
     verification_failures: int = 0
+    # #281: number of PR_REVIEW rounds that ended in REQUEST_CHANGES for this task,
+    # incremented each time PR_REVIEW -> REVISING fires. Durable (persisted like every
+    # other Task field) so max_review_cycles is enforced across scheduler restarts, not
+    # just within a single process's lifetime.
+    review_cycles: int = 0
     current_agent: str | None = None
     worktree: str | None = None
     dependencies: tuple[int, ...] = ()
@@ -299,6 +350,16 @@ class Task:
     # RETRY, capacity failover, etc.) resumes at IN_PROGRESS instead of re-running the
     # planning gate from scratch.
     plan_approved: bool = False
+    # #281: snapshot of task.status taken by Scheduler.tick() at the moment a
+    # READY/PR_REVIEW/REVISING task is picked up for dispatch, before the generic
+    # DISPATCHED -> IN_PROGRESS transitions overwrite `status` -- by the time
+    # Worker.run(task, agent) is called, task.status is always IN_PROGRESS, so this is
+    # the only way a Worker (see NativeWorker.run), the Scheduler's own result handling
+    # (see _process_pr_review), or crash recovery (see _reconcile_recovery) can tell
+    # which kind of dispatch this is/was. Persisted (like every other Task field, not
+    # touched by .transition() which preserves it via dataclasses.replace) so it also
+    # survives a Scheduler restart mid-dispatch.
+    dispatch_status: TaskState | None = None
 
     @classmethod
     def from_issue(cls, issue: Issue, *, worktree: str | None = None) -> Task:
@@ -357,6 +418,7 @@ class Task:
             "last_dispatched_agent": self.last_dispatched_agent,
             "per_agent_failures": dict(self.per_agent_failures),
             "verification_failures": self.verification_failures,
+            "review_cycles": self.review_cycles,
             "current_agent": self.current_agent,
             "worktree": self.worktree,
             "dependencies": list(self.dependencies),
@@ -367,6 +429,7 @@ class Task:
             "run_started_at": self.run_started_at.isoformat() if self.run_started_at else None,
             "plan_revisions": self.plan_revisions,
             "plan_approved": self.plan_approved,
+            "dispatch_status": self.dispatch_status.value if self.dispatch_status else None,
         }
 
     @classmethod
@@ -388,6 +451,7 @@ class Task:
                     (str(k), int(v)) for k, v in value.get("per_agent_failures", {}).items()
                 ),
                 verification_failures=int(value.get("verification_failures", 0)),
+                review_cycles=int(value.get("review_cycles", 0)),
                 current_agent=value.get("current_agent"),
                 worktree=value.get("worktree"),
                 dependencies=tuple(int(item) for item in value["dependencies"]),
@@ -402,6 +466,11 @@ class Task:
                 ),
                 plan_revisions=int(value.get("plan_revisions", 0)),
                 plan_approved=bool(value.get("plan_approved", False)),
+                dispatch_status=(
+                    TaskState(value["dispatch_status"])
+                    if value.get("dispatch_status")
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("invalid task state") from error
