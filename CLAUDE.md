@@ -60,25 +60,49 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
-## 5. Testing
+## 5. Project Workflow & Invariants (`docs/WORKFLOW.md`)
 
-- Iterate with a scoped run during development: `uv run pytest <path>` (a specific file or
-  directory, not the full suite).
-- Type check after any code change: `uv run mypy src`.
-- Before commit, run the full gate from `docs/WORKFLOW.md` §7 (`ruff check .`, `mypy src`,
-  `pytest --cov=subsched --cov-fail-under=80`) — see that section for the exact commands and the
-  branch-coverage baseline.
+All development in this repository must strictly adhere to [`docs/WORKFLOW.md`](docs/WORKFLOW.md) and [`docs/SPEC.md`](docs/SPEC.md).
 
-### TDD workflow (required for new features)
+### Source of Truth & Core Invariants (`docs/WORKFLOW.md` §1, §5)
+- **Subscription-only**: Never enable metered usage, token purchasing, or API fallback.
+- **Task Isolation**: 1 Issue = 1 Task = 1 branch = 1 worktree. Work only on the designated issue.
+- **Worktree Preservation**: Never execute `git reset --hard` or broad `git clean`. Preserve uncommitted changes, untracked files, and prior agent work.
+- **Fail-Closed**: If billing, authentication, capacity, schema, or path boundaries are ambiguous or unknown, fail closed immediately.
+- **Security**: Prevent path traversal, reject symlinked task/handoff files, and never persist credentials or secrets to logs or fixtures.
 
-1. Write failing tests first. Do NOT implement yet.
-2. Run tests, confirm they fail for the right reason.
-3. Implement the minimal code to make tests pass.
-4. Do NOT modify tests to make them pass — fix the implementation.
-5. Run the full test command again before reporting done.
-6. If a test fails for an unrelated reason, stop and report — do not edit unrelated files.
+### Branch Lifecycle & Synchronization (`docs/WORKFLOW.md` §3)
+- Fast-forward sync with `main` before starting: `git switch main && git pull --ff-only`.
+- Development branches follow: `issue/<ISSUE>-<short-description>`.
+- The `subsched/issue-N` branch pattern is reserved exclusively for Scheduler-managed task worktrees.
 
-### Verification is required
+### Testing & Quality Gate (`docs/WORKFLOW.md` §4, §7)
+- **TDD Workflow**:
+  1. Write failing tests first. Do NOT implement yet.
+  2. Run tests, confirm they fail for the right reason.
+  3. Implement the minimal code to make tests pass.
+  4. Do NOT modify tests to make them pass — fix the implementation.
+  5. Run the full test command again before reporting done.
+  6. If a test fails for an unrelated reason, stop and report — do not edit unrelated files.
+- **Iterative Testing**:
+  - Scoped tests: `uv run pytest <path>`
+  - Type checking: `uv run mypy src`
+- **Pre-Commit Quality Gate**: Run the full gate before committing:
+  ```bash
+  bash scripts/quality_gate.sh
+  ```
+  (Executes `ruff check .`, `mypy src`, `pytest` with `--cov-fail-under=80`, `scripts/check_branch_coverage.py` requiring >=80% branch coverage, and `pip-audit`). Never report a task complete without running and displaying the gate output. Do not rely on summary claims as proof — command output is the source of truth.
 
-- Never report a task as complete without running the relevant test command and showing output.
-- Do not rely on your own summary as proof — the command output is the source of truth.
+### Documentation Synchronization (`docs/WORKFLOW.md` §8)
+- When modifying CLI commands, configuration options, task states/transitions, or schemas, update `README.md`, `docs/SPEC.md`, `docs/WORKFLOW.md`, or `examples/scheduler.yaml` within the **same PR**.
+
+### Commits & Pull Requests (`docs/WORKFLOW.md` §9)
+- Use Conventional Commits (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `ci:`, `chore:`, `perf:`).
+- **Prohibition of Auto-Close Keywords**: Never include GitHub auto-close keywords (`Fixes #N`, `Closes #N`, `Resolves #N`, any case or inflection) in commit messages. Use `issue #N` or `Implements work for #N`.
+- Execute the push safety check script in `docs/WORKFLOW.md` §9 before pushing to origin.
+- PRs must document the issue reference, changes, rationale, verified test commands, and invariant impact.
+
+### Semantic Handoffs (`docs/WORKFLOW.md` §5, `src/subsched/contract.py`)
+- When maintaining `.ai/handoffs/<issue>.md`, preserve all 8 required section headers:
+  `## Goal`, `## Current Plan`, `## Completed`, `## Current Work`, `## Decisions`, `## Known Broken State`, `## Next Action`, `## Timestamp`.
+- In `## Timestamp`, write ONLY an ISO 8601 string (e.g. `2026-09-11T09:00:00Z`).
