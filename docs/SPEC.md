@@ -2762,3 +2762,44 @@ v0.3：
 である。
 
 これをv0.3の正式なProduct Definitionとする。
+
+---
+
+# 76. `subsched init` (#258)
+
+新規リポジトリへの導入コストを下げるため、`subsched.yaml`・`AGENTS.md`・`CLAUDE.md`を自動生成する
+`subsched init`コマンドを提供する。
+
+```bash
+subsched init [PATH] [OPTIONS]
+```
+
+| オプション | 説明 |
+|---|---|
+| `PATH` | 初期化対象ディレクトリ（既定：カレントディレクトリ） |
+| `--repo OWNER/NAME` | GitHub repo slugを明示指定（自動検出を上書き） |
+| `--agents-md` / `--no-agents-md` | `AGENTS.md`を生成するか（既定：生成する） |
+| `--claude-md` / `--no-claude-md` | `CLAUDE.md`を生成するか（既定：生成する） |
+| `--force` | 既存ファイルを上書きする |
+| `--dry-run` | ディスクに書き込まず生成内容をプレビューする |
+
+## Stack検出
+
+`pyproject.toml` / `uv.lock` / `poetry.lock` / `Pipfile` / `requirements.txt`（Python）、
+`go.mod`（Go）、`Cargo.toml`（Rust）、`package.json`（Node、`pnpm-lock.yaml` /
+`yarn.lock`の有無でpackage managerを判定）の優先順位でリポジトリのstackを検出し、
+`verification.commands`へ言語ごとの標準的なtest/lintコマンドを事前投入する。いずれにも
+一致しない場合は`pytest` / `ruff check .`のgenericフォールバックを使う。
+
+## GitHub repo解決
+
+`--repo`未指定時は、`git remote get-url origin`（HTTPS/SSH双方に対応）、続いて
+`gh repo view --json nameWithOwner`の順にbest-effortで解決する。どちらも解決できない場合は
+`subsched.yaml`の`github.repo`をコメントアウトした状態で出力し、fail-closedで警告する
+（未検証の値を書き込むことはしない）。
+
+## 上書き保護
+
+`subsched.yaml` / `AGENTS.md` / `CLAUDE.md`のいずれかが既に存在する場合、`--force`を
+指定しない限り何も書き込まずにエラーとする（部分的な書き込みを避けるため、書き込み前に
+全ファイルの存在を検査してからまとめて書き込む）。

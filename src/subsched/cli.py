@@ -33,6 +33,7 @@ from subsched.github.issues import (
     resolve_default_branch,
 )
 from subsched.github.pull_requests import check_merged_pr_for_issue
+from subsched.init import InitError, build_scaffold_plan, write_scaffold_plan
 from subsched.models import Capacity, TaskState
 from subsched.preflight import validate_native_preflight
 from subsched.router import AgentConfig, Router
@@ -698,6 +699,74 @@ def config_validate(
     )
     typer.echo("\n".join(summary_lines))
     typer.echo("Configuration is valid.")
+
+
+@app.command()
+def init(
+    path: Annotated[
+        Path,
+        typer.Argument(
+            help="Directory to initialize", file_okay=False, resolve_path=True
+        ),
+    ] = Path("."),
+    repo: Annotated[
+        str | None,
+        typer.Option("--repo", help="GitHub owner/name (overrides auto-detection)"),
+    ] = None,
+    agents_md: Annotated[
+        bool, typer.Option("--agents-md/--no-agents-md", help="Scaffold AGENTS.md")
+    ] = True,
+    claude_md: Annotated[
+        bool, typer.Option("--claude-md/--no-claude-md", help="Scaffold CLAUDE.md")
+    ] = True,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite existing files")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Preview files without writing to disk")
+    ] = False,
+) -> None:
+    """Scaffold `subsched.yaml`, `AGENTS.md`, and `CLAUDE.md` for a new repository,
+    detecting its stack (Python/Node/Go/Rust) and GitHub repo slug automatically (#258).
+    """
+    if not path.is_dir():
+        raise typer.BadParameter(f"not a directory: {path}", param_hint="PATH")
+
+    if repo is not None:
+        try:
+            validate_repo(repo)
+        except ConfigError as error:
+            raise typer.BadParameter(str(error), param_hint="--repo") from error
+
+    plan = build_scaffold_plan(
+        path,
+        repo_override=repo,
+        include_agents_md=agents_md,
+        include_claude_md=claude_md,
+    )
+
+    if dry_run:
+        typer.echo(f"Detected stack: {plan.stack.name}")
+        for file in plan.files:
+            action = "overwrite" if file.exists else "create"
+            typer.echo(f"Would {action} {file.path}")
+        if plan.repo is None:
+            typer.echo("Warning: could not auto-detect the GitHub repository")
+        return
+
+    try:
+        written = write_scaffold_plan(plan, force=force)
+    except InitError as error:
+        raise typer.BadParameter(str(error)) from error
+
+    typer.echo(f"Detected stack: {plan.stack.name}")
+    for file_path in written:
+        typer.echo(f"Wrote {file_path}")
+    if plan.repo is None:
+        typer.echo(
+            "Warning: could not auto-detect the GitHub repository; edit github.repo in "
+            "subsched.yaml before running `subsched config validate` or `subsched run`."
+        )
 
 
 @app.command()
