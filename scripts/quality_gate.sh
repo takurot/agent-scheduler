@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+
+echo "=== Syncing dependencies ==="
+uv sync --extra dev
+
 echo "=== Running Ruff linter ==="
 uv run ruff check .
 
