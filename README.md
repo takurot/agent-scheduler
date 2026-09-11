@@ -180,29 +180,93 @@ subsched --repository /path/to/repo mcp
 
 #### Client Configuration Examples
 
-**Claude Desktop** (`claude_desktop_config.json`):
-```json
-{
-  "mcpServers": {
-    "subsched": {
-      "command": "uvx",
-      "args": ["--from", "agent-scheduler[mcp]", "subsched", "mcp"]
-    }
-  }
-}
-```
+You can connect `subsched` to your preferred AI coding assistant using either `uvx` (isolated, on-demand execution) or the installed `subsched` binary:
 
-**Cursor** (`.cursor/mcp.json`):
-```json
-{
-  "mcpServers": {
-    "subsched": {
-      "command": "subsched",
-      "args": ["mcp"]
+##### 1. Claude
+
+- **Claude Desktop** (`claude_desktop_config.json`):
+  - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+  - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+  - Linux: `~/.config/Claude/claude_desktop_config.json`
+
+  ```json
+  {
+    "mcpServers": {
+      "subsched": {
+        "command": "uvx",
+        "args": ["--from", "agent-scheduler[mcp]", "subsched", "mcp"]
+      }
     }
   }
-}
-```
+  ```
+
+- **Claude Code (CLI)**:
+  Register via the `claude mcp add` command:
+  ```bash
+  # Project-level (.mcp.json in current repository):
+  claude mcp add subsched --scope project -- uvx --from "agent-scheduler[mcp]" subsched mcp
+
+  # Or user-level (~/.claude.json across all repositories):
+  claude mcp add subsched --scope user -- uvx --from "agent-scheduler[mcp]" subsched mcp
+  ```
+  Alternatively, commit a `.mcp.json` file in your repository root:
+  ```json
+  {
+    "mcpServers": {
+      "subsched": {
+        "command": "uvx",
+        "args": ["--from", "agent-scheduler[mcp]", "subsched", "mcp"]
+      }
+    }
+  }
+  ```
+
+##### 2. OpenAI Codex
+
+- **Codex CLI**:
+  Register via the `codex mcp add` command:
+  ```bash
+  codex mcp add subsched -- uvx --from "agent-scheduler[mcp]" subsched mcp
+  ```
+  Or configure `~/.codex/config.toml` (user-global) or `<repo>/.codex/config.toml` (project-specific):
+  ```toml
+  [mcp_servers.subsched]
+  command = "uvx"
+  args = ["--from", "agent-scheduler[mcp]", "subsched", "mcp"]
+  ```
+
+##### 3. Gemini / Antigravity (`agy`)
+
+- **Antigravity CLI (`agy`) / Antigravity IDE**:
+  Add to `~/.gemini/config/mcp_config.json` (user-global) or `.agents/mcp_config.json` (project-specific):
+  ```json
+  {
+    "mcpServers": {
+      "subsched": {
+        "command": "uvx",
+        "args": ["--from", "agent-scheduler[mcp]", "subsched", "mcp"]
+      }
+    }
+  }
+  ```
+  Once configured, all `subsched_*` tools, resources (`subsched://queue`), and triage prompts are automatically discovered and mounted in your `agy` session.
+
+##### 4. Cursor
+
+- **Cursor** (`.cursor/mcp.json`):
+  ```json
+  {
+    "mcpServers": {
+      "subsched": {
+        "command": "subsched",
+        "args": ["mcp"]
+      }
+    }
+  }
+  ```
+
+> [!TIP]
+> If `agent-scheduler[mcp]` is installed in your active environment or via `pipx` / `uv tool install`, you can replace `"command": "uvx", "args": ["--from", "agent-scheduler[mcp]", "subsched", "mcp"]` with `"command": "subsched", "args": ["mcp"]`. To target a specific repository path when running outside its root, pass `"--repository", "/path/to/repo"` before `"mcp"` in the argument list.
 
 #### Exposed Tools, Resources, and Prompts
 - **Tools**: `subsched_get_status`, `subsched_inspect_task`, `subsched_queue_issues`, `subsched_trigger_dispatch` (non-blocking background dispatch), `subsched_init_repo`, `subsched_resolve_needs_human`, `subsched_cancel_task`, `subsched_control`, `subsched_get_metrics`. All tools accept an optional `repository_path`.
