@@ -14,6 +14,7 @@ import typer
 
 from subsched.agents import SUPPORTED_AGENTS
 from subsched.agents.claude import ClaudeBillingMode, ClaudeExecutionPolicy
+from subsched.agents.codex import CodexApprovalMode
 from subsched.agents.native import NativeWorker
 from subsched.capacity.claude import ClaudeCapacitySensor
 from subsched.capacity.codex import CodexCapacitySensor
@@ -413,6 +414,10 @@ def run(
         )
         raise typer.Exit(2)
 
+    # #291: None until preflight actually inspects the installed Codex CLI below;
+    # NativeWorker() then falls back to its own default, which only matters for
+    # dry-run/discovery-only paths that never call worker.run().
+    codex_approval_mode: CodexApprovalMode | None = None
     if allow_native and not dry_run:
         if not subscription_billing_verified:
             typer.echo(
@@ -458,6 +463,9 @@ def run(
                         err=True,
                     )
             raise typer.Exit(2)
+        codex_check = report.get("codex")
+        if codex_check is not None:
+            codex_approval_mode = codex_check.codex_approval_mode
         typer.echo(
             "Pre-flight safety checks passed: subscription verified, API fallback disabled."
         )
@@ -548,6 +556,10 @@ def run(
                 # #139: same tuple passed to the Scheduler's verification_commands=
                 # below, so the worker prompt and the post-worker gate never diverge.
                 verification_commands=cfg.verification.commands,
+                # #291: falls back to NativeWorker's own default only for dry-run/no
+                # -native paths that never call worker.run(); otherwise this is exactly
+                # what "Pre-flight safety checks passed" above already verified.
+                codex_approval_mode=codex_approval_mode or CodexApprovalMode.APPROVE_FOR_ME,
             ),
             worktree_root=worktree_root,
             worktree_adapter=worktree_adapter,

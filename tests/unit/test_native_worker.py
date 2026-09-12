@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from subsched.agents.claude import ClaudeBillingMode
+from subsched.agents.codex import CodexApprovalMode
 from subsched.agents.native import NativeWorker
 from subsched.contract import bootstrap_task_files
 from subsched.models import AgentResult, AgentResultKind, Issue, Task
@@ -341,4 +342,47 @@ def test_native_worker_codex_accepts_configured_output_schema(tmp_path: Path) ->
     req = mock_codex.execute.call_args[0][0]
     schema_idx = req.argv.index("--output-schema")
     assert req.argv[schema_idx + 1] == str(custom_schema)
+
+
+def test_native_worker_codex_defaults_to_approve_for_me(tmp_path: Path) -> None:
+    """#291: without an explicit preflight-detected mode, NativeWorker must use the
+    currently confirmed safe Codex CLI flag (`--approve-for-me`), not the legacy
+    `--ask-for-approval` flag Codex CLI 0.153.4 removed from `codex exec --help`."""
+    mock_codex = MagicMock()
+    mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(codex_agent=mock_codex, subscription_billing_verified=True)
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "codex")
+
+    argv = mock_codex.execute.call_args[0][0].argv
+    assert "--approve-for-me" in argv
+    assert "--ask-for-approval" not in argv
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+
+
+def test_native_worker_codex_uses_preflight_detected_legacy_approval_mode(
+    tmp_path: Path,
+) -> None:
+    """A Codex CLI that only offers the legacy `--ask-for-approval` flag must still be
+    dispatched with that flag when preflight detected it, not the newer one."""
+    mock_codex = MagicMock()
+    mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(
+        codex_agent=mock_codex,
+        subscription_billing_verified=True,
+        codex_approval_mode=CodexApprovalMode.ASK_FOR_APPROVAL_NEVER,
+    )
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "codex")
+
+    argv = mock_codex.execute.call_args[0][0].argv
+    assert "--ask-for-approval" in argv
+    assert argv[argv.index("--ask-for-approval") + 1] == "never"
+    assert "--approve-for-me" not in argv
 

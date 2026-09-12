@@ -15,6 +15,7 @@ import pytest
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.codex import (
     CodexAgent,
+    CodexApprovalMode,
     CodexProbeConfig,
     CodexProbeSafetyError,
     build_codex_exec_argv,
@@ -30,13 +31,55 @@ def _fixture(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
 
 
-def test_codex_argv_is_non_interactive_ephemeral_and_workspace_scoped(tmp_path: Path) -> None:
+def test_codex_argv_defaults_to_approve_for_me_and_is_non_interactive_ephemeral_and_scoped(
+    tmp_path: Path,
+) -> None:
+    """#291: Codex CLI 0.153.4 dropped `--ask-for-approval` from `codex exec --help`, so
+    the safe default must be `--approve-for-me`, not the removed legacy flag."""
     executable = tmp_path / "codex"
     executable.write_text("", encoding="utf-8")
     executable.chmod(0o700)
     schema = tmp_path / "result.schema.json"
     schema.write_text("{}", encoding="utf-8")
     config = CodexProbeConfig(executable=executable, cwd=tmp_path, output_schema=schema)
+
+    argv = build_codex_exec_argv(config)
+
+    assert argv == (
+        str(executable),
+        "--approve-for-me",
+        "exec",
+        "--strict-config",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--json",
+        "--output-schema",
+        str(schema),
+        "-C",
+        str(tmp_path),
+        "--sandbox",
+        "workspace-write",
+        "--ephemeral",
+        "-",
+    )
+    assert "--ask-for-approval" not in argv
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+
+
+def test_codex_argv_uses_legacy_ask_for_approval_when_selected(tmp_path: Path) -> None:
+    """A CLI that only exposes `--ask-for-approval` (pre-drift) must still be usable by
+    explicitly selecting that variant; it must never mix in `--approve-for-me`."""
+    executable = tmp_path / "codex"
+    executable.write_text("", encoding="utf-8")
+    executable.chmod(0o700)
+    schema = tmp_path / "result.schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    config = CodexProbeConfig(
+        executable=executable,
+        cwd=tmp_path,
+        output_schema=schema,
+        approval_mode=CodexApprovalMode.ASK_FOR_APPROVAL_NEVER,
+    )
 
     argv = build_codex_exec_argv(config)
 
@@ -147,7 +190,22 @@ def test_parse_codex_cli_metadata_success() -> None:
     assert meta.supports_strict_config is True
     assert meta.supports_ignore_rules is True
     assert meta.supports_ignore_user_config is True
-    assert meta.supports_ask_for_approval is True
+    assert meta.approval_mode is CodexApprovalMode.ASK_FOR_APPROVAL_NEVER
+
+
+def test_parse_codex_cli_metadata_detects_approve_for_me_drift() -> None:
+    """#291: Codex CLI 0.153.4's `codex exec --help` no longer lists
+    `--ask-for-approval` at all; the capability model must select `--approve-for-me`
+    instead of failing closed, since that flag keeps the same safe, non-interactive,
+    sandbox-constrained contract."""
+    from subsched.agents.codex import parse_codex_cli_metadata
+
+    version = _fixture("cli-version-0.153.4.txt")
+    help_output = _fixture("cli-exec-help-0.153.4.txt")
+
+    meta = parse_codex_cli_metadata(version_output=version, help_output=help_output)
+    assert meta.version == "0.153.4"
+    assert meta.approval_mode is CodexApprovalMode.APPROVE_FOR_ME
 
 
 def test_parse_codex_cli_metadata_rejects_missing_required_flag() -> None:
@@ -164,6 +222,20 @@ def test_parse_codex_cli_metadata_rejects_unrecognized_version() -> None:
     help_output = _fixture("cli-exec-help.txt")
     with pytest.raises(CodexCliMetadataError, match="unrecognized Codex CLI version"):
         parse_codex_cli_metadata(version_output="invalid version string", help_output=help_output)
+
+
+def test_parse_codex_cli_metadata_fails_closed_when_approval_flag_unknown() -> None:
+    """A CLI surface that removed both known approval flags is an unrecognized/ambiguous
+    approval contract and must fail closed rather than silently pick one."""
+    from subsched.agents.codex import CodexCliMetadataError, parse_codex_cli_metadata
+
+    version = _fixture("cli-version-0.153.4.txt")
+    help_output = (
+        "--strict-config --sandbox --ephemeral --ignore-user-config "
+        "--ignore-rules --output-schema --json"
+    )
+    with pytest.raises(CodexCliMetadataError, match="required Codex CLI flags are missing"):
+        parse_codex_cli_metadata(version_output=version, help_output=help_output)
 
 
 
