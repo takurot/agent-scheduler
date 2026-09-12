@@ -301,3 +301,49 @@ agents:
     )
     assert res.exit_code == 0, res.output
     assert captured.get("codex_approval_mode") is CodexApprovalMode.APPROVE_FOR_ME
+
+
+def test_run_fails_closed_when_passing_codex_check_has_no_approval_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        """
+github:
+  repo: owner/project
+  mode: all-open
+  base_branch: main
+agents:
+  claude:
+    enabled: false
+  codex:
+    enabled: true
+""",
+        encoding="utf-8",
+    )
+    codex_check = PreflightCheckResult("codex", True, compatible=True)
+    monkeypatch.setattr(
+        "subsched.cli.validate_native_preflight",
+        lambda *args, **kwargs: PreflightReport(
+            checks=(codex_check,), passed=True, failure_reasons=()
+        ),
+    )
+    monkeypatch.setattr(
+        GitHubIssueSource,
+        "list_open",
+        lambda self, repo, **kwargs: pytest.fail("discovery must not run"),
+    )
+
+    res = runner.invoke(
+        app,
+        [
+            "run",
+            "--config",
+            str(config_file),
+            "--allow-native",
+            "--subscription-billing-verified",
+        ],
+    )
+
+    assert res.exit_code == 2
+    assert "missing approval mode" in res.output

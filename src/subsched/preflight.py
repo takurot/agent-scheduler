@@ -139,16 +139,16 @@ def probe_command_capabilities(
         if name == "codex":
             v_proc = _safe_run([str(resolved), "--version"], run_cmd=run_cmd)
             h_proc = _safe_run([str(resolved), "exec", "--help"], run_cmd=run_cmd)
-            if h_proc.returncode != 0 or not h_proc.stdout.strip():
-                # Fallback to top-level help
-                h_proc = _safe_run([str(resolved), "--help"], run_cmd=run_cmd)
-
-            if v_proc.returncode != 0 or h_proc.returncode != 0:
+            if (
+                v_proc.returncode != 0
+                or h_proc.returncode != 0
+                or not h_proc.stdout.strip()
+            ):
                 return PreflightCheckResult(
                     name=name,
                     found=True,
                     executable_path=resolved,
-                    error="codex inspection failed (version or help exited nonzero)",
+                    error="codex inspection failed (version or exec help exited nonzero)",
                 )
             v_out = SECRET_PATTERN.sub(REDACTED, v_proc.stdout)
             h_out = SECRET_PATTERN.sub(REDACTED, h_proc.stdout)

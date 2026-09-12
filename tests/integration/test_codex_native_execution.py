@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from subsched.agents.codex import parse_codex_jsonl
+from subsched.agents.codex import CodexApprovalMode, parse_codex_jsonl
 from subsched.agents.native import NativeWorker
 from subsched.contract import bootstrap_task_files
 from subsched.models import AgentResultKind, Issue, Task
@@ -80,7 +80,11 @@ def test_native_codex_execution_tool_lifecycle_reproduction(tmp_path: Path) -> N
             return parse_codex_jsonl("\n".join(map(json.dumps, normal)), returncode=0)
 
     capture = Capture()
-    worker = NativeWorker(codex_agent=capture, subscription_billing_verified=True)
+    worker = NativeWorker(
+        codex_agent=capture,
+        subscription_billing_verified=True,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+    )
     native_result = worker.run(task, "codex")
 
     assert native_result.kind is AgentResultKind.PASS

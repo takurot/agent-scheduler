@@ -109,6 +109,32 @@ def test_probe_command_capabilities_codex_fails_closed_when_approval_flag_unknow
     assert "required Codex CLI flags are missing" in (res.error or "")
 
 
+def test_probe_command_capabilities_codex_fails_closed_when_exec_help_fails(
+    tmp_path: Path,
+) -> None:
+    """Top-level help cannot prove which flags the `exec` subcommand accepts."""
+    exe = tmp_path / "codex"
+    exe.write_text("", encoding="utf-8")
+    exe.chmod(0o755)
+    top_level_help = (FIXTURES / "codex" / "cli-exec-help-0.153.4.txt").read_text(
+        encoding="utf-8"
+    )
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.153.4\n", stderr="")
+        if "exec" in argv and "--help" in argv:
+            return subprocess.CompletedProcess(argv, 2, stdout="", stderr="exec unavailable")
+        if "--help" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=top_level_help, stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected")
+
+    res = probe_command_capabilities("codex", exe, run_cmd=fake_run)
+
+    assert res.compatible is False
+    assert res.error == "codex inspection failed (version or exec help exited nonzero)"
+
+
 def test_probe_command_capabilities_rejects_missing_required_flags(tmp_path: Path) -> None:
     exe = tmp_path / "claude"
     exe.write_text("", encoding="utf-8")
@@ -310,5 +336,4 @@ def test_doctor_and_run_share_capability_failure_result(
     assert run_res.exit_code == 2
     assert "Native execution pre-flight doctor check failed" in run_res.output
     assert "required Claude CLI flags are missing" in run_res.output
-
 

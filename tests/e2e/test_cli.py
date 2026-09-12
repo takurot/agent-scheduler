@@ -69,6 +69,7 @@ def _no_real_merged_pr_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
     ) -> object:
         import shutil
 
+        from subsched.agents.codex import CodexApprovalMode
         from subsched.preflight import PreflightCheckResult, PreflightReport
 
         targets = ["git", "gh"]
@@ -79,7 +80,18 @@ def _no_real_merged_pr_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
         failures = []
         for name in targets:
             found = shutil.which(name) is not None
-            checks.append(PreflightCheckResult(name=name, found=found, compatible=found))
+            checks.append(
+                PreflightCheckResult(
+                    name=name,
+                    found=found,
+                    compatible=found,
+                    codex_approval_mode=(
+                        CodexApprovalMode.APPROVE_FOR_ME
+                        if name == "codex" and found
+                        else None
+                    ),
+                )
+            )
             if not found:
                 failures.append(f"missing {name}")
         return PreflightReport(
@@ -1496,4 +1508,3 @@ def test_metrics_report_shows_success_message(tmp_path: Path) -> None:
     result = invoke(tmp_path, "metrics", "--report", str(report_file))
     assert result.exit_code == 0
     assert f"Report saved to {report_file}" in result.output
-

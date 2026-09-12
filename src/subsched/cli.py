@@ -466,6 +466,13 @@ def run(
         codex_check = report.get("codex")
         if codex_check is not None:
             codex_approval_mode = codex_check.codex_approval_mode
+            if codex_approval_mode is None:
+                typer.echo(
+                    "Native execution pre-flight doctor check failed: Codex check is "
+                    "missing approval mode",
+                    err=True,
+                )
+                raise typer.Exit(2)
         typer.echo(
             "Pre-flight safety checks passed: subscription verified, API fallback disabled."
         )
@@ -556,10 +563,9 @@ def run(
                 # #139: same tuple passed to the Scheduler's verification_commands=
                 # below, so the worker prompt and the post-worker gate never diverge.
                 verification_commands=cfg.verification.commands,
-                # #291: falls back to NativeWorker's own default only for dry-run/no
-                # -native paths that never call worker.run(); otherwise this is exactly
-                # what "Pre-flight safety checks passed" above already verified.
-                codex_approval_mode=codex_approval_mode or CodexApprovalMode.APPROVE_FOR_ME,
+                # #291: None is permitted for Claude-only construction; NativeWorker
+                # refuses any Codex dispatch unless preflight selected a concrete mode.
+                codex_approval_mode=codex_approval_mode,
             ),
             worktree_root=worktree_root,
             worktree_adapter=worktree_adapter,

@@ -52,11 +52,10 @@ class NativeWorker:
         subscription_billing_verified: bool = False,
         codex_output_schema: Path | None = None,
         # #291: the approval-flag variant a `parse_codex_cli_metadata()` capability
-        # check selected for the installed Codex CLI's `exec` surface. Defaults to the
-        # variant currently confirmed live; callers that already ran preflight (e.g.
-        # `subsched run --allow-native`) must pass through its actual detected mode so
-        # NativeWorker never diverges from what preflight verified was safe.
-        codex_approval_mode: CodexApprovalMode = CodexApprovalMode.APPROVE_FOR_ME,
+        # check selected for the installed Codex CLI's `exec` surface. None keeps
+        # Claude-only construction possible, but every Codex dispatch fails closed
+        # unless its caller passed through an actual preflight result.
+        codex_approval_mode: CodexApprovalMode | None = None,
     ) -> None:
         if type(subscription_billing_verified) is not bool:
             raise TypeError("subscription billing verification must be a boolean")
@@ -165,6 +164,11 @@ class NativeWorker:
             )
             return self.claude_agent.execute(req)
         elif agent == "codex":
+            if self.codex_approval_mode is None:
+                return AgentResult(
+                    AgentResultKind.FAILURE,
+                    output="missing preflight-detected Codex approval mode",
+                )
             schema_path = self.codex_output_schema or (
                 worktree_path / ".ai" / "codex-output.schema.json"
             )

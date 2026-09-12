@@ -57,7 +57,11 @@ def test_native_worker_dispatches_to_claude_and_codex(tmp_path: Path) -> None:
     mock_codex = MagicMock()
     mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
 
-    worker = NativeWorker(claude_agent=mock_claude, codex_agent=mock_codex)
+    worker = NativeWorker(
+        claude_agent=mock_claude,
+        codex_agent=mock_codex,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+    )
     task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
     bootstrap_task_files(tmp_path, task)
 
@@ -80,7 +84,11 @@ def test_native_worker_passes_a_resolvable_path_to_claude_and_codex(tmp_path: Pa
     mock_codex = MagicMock()
     mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
 
-    worker = NativeWorker(claude_agent=mock_claude, codex_agent=mock_codex)
+    worker = NativeWorker(
+        claude_agent=mock_claude,
+        codex_agent=mock_codex,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+    )
     task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
     bootstrap_task_files(tmp_path, task)
 
@@ -138,7 +146,11 @@ def test_native_worker_defaults_agent_timeout_to_300_seconds(tmp_path: Path) -> 
     mock_codex = MagicMock()
     mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
 
-    worker = NativeWorker(claude_agent=mock_claude, codex_agent=mock_codex)
+    worker = NativeWorker(
+        claude_agent=mock_claude,
+        codex_agent=mock_codex,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+    )
     task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
     bootstrap_task_files(tmp_path, task)
 
@@ -241,6 +253,7 @@ def test_native_worker_includes_configured_verification_commands_in_codex_prompt
         claude_agent=MagicMock(),
         codex_agent=mock_codex,
         verification_commands=("uv run mypy src",),
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
     )
     task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
     bootstrap_task_files(tmp_path, task)
@@ -280,7 +293,10 @@ def test_native_worker_applies_configured_agent_timeout(tmp_path: Path) -> None:
     mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
 
     worker = NativeWorker(
-        claude_agent=mock_claude, codex_agent=mock_codex, agent_timeout_seconds=900.0
+        claude_agent=mock_claude,
+        codex_agent=mock_codex,
+        agent_timeout_seconds=900.0,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
     )
     task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
     bootstrap_task_files(tmp_path, task)
@@ -302,7 +318,11 @@ def test_native_worker_codex_requests_output_schema_and_mentions_schema_in_promp
     mock_codex = MagicMock()
     mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
 
-    worker = NativeWorker(codex_agent=mock_codex, subscription_billing_verified=True)
+    worker = NativeWorker(
+        codex_agent=mock_codex,
+        subscription_billing_verified=True,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+    )
     task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
     bootstrap_task_files(tmp_path, task)
 
@@ -333,6 +353,7 @@ def test_native_worker_codex_accepts_configured_output_schema(tmp_path: Path) ->
         codex_agent=mock_codex,
         codex_output_schema=custom_schema,
         subscription_billing_verified=True,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
     )
     task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
     bootstrap_task_files(tmp_path, task)
@@ -344,10 +365,8 @@ def test_native_worker_codex_accepts_configured_output_schema(tmp_path: Path) ->
     assert req.argv[schema_idx + 1] == str(custom_schema)
 
 
-def test_native_worker_codex_defaults_to_approve_for_me(tmp_path: Path) -> None:
-    """#291: without an explicit preflight-detected mode, NativeWorker must use the
-    currently confirmed safe Codex CLI flag (`--approve-for-me`), not the legacy
-    `--ask-for-approval` flag Codex CLI 0.153.4 removed from `codex exec --help`."""
+def test_native_worker_codex_refuses_missing_preflight_approval_mode(tmp_path: Path) -> None:
+    """A Codex dispatch without a capability-selected mode must fail closed."""
     mock_codex = MagicMock()
     mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
 
@@ -355,12 +374,11 @@ def test_native_worker_codex_defaults_to_approve_for_me(tmp_path: Path) -> None:
     task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
     bootstrap_task_files(tmp_path, task)
 
-    worker.run(task, "codex")
+    result = worker.run(task, "codex")
 
-    argv = mock_codex.execute.call_args[0][0].argv
-    assert "--approve-for-me" in argv
-    assert "--ask-for-approval" not in argv
-    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+    assert result.kind is AgentResultKind.FAILURE
+    assert result.output == "missing preflight-detected Codex approval mode"
+    mock_codex.execute.assert_not_called()
 
 
 def test_native_worker_codex_uses_preflight_detected_legacy_approval_mode(
@@ -385,4 +403,3 @@ def test_native_worker_codex_uses_preflight_detected_legacy_approval_mode(
     assert "--ask-for-approval" in argv
     assert argv[argv.index("--ask-for-approval") + 1] == "never"
     assert "--approve-for-me" not in argv
-
