@@ -2491,6 +2491,14 @@ Codex CLI
 
 対象はテスト用Repositoryの3〜5 Issue。
 
+Codex CLIのCLI surfaceはversion間でdrift する（#291: 0.153.4で`codex exec --help`から
+`--ask-for-approval`が消え、代わりに`--approve-for-me`が現れた）。`doctor`/`run --allow-native`
+のpreflightは、インストール済みCLIの`codex exec --help`を実際に見て、`--approve-for-me`
+（現行）または`--ask-for-approval`（旧版互換）のどちらか実在する方だけを選び、
+`--dangerously-bypass-approvals-and-sandbox`は選ばない。両方欠落した場合はfail closedと
+し、`NativeWorker`は同じcapability判定結果（`CodexApprovalMode`）で構築されたargvだけを
+使うので、doctorが安全と確認した variant からNativeWorkerが独立に乖離することはない。
+
 ---
 
 # 67. Phase 3 — Durable Handoff

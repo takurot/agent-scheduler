@@ -6,7 +6,12 @@ from pathlib import Path
 
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.claude import ClaudeAgent, ClaudeBillingMode, ClaudeExecutionPolicy
-from subsched.agents.codex import CodexAgent, ensure_codex_output_schema
+from subsched.agents.codex import (
+    CodexAgent,
+    CodexApprovalMode,
+    build_codex_headless_argv,
+    ensure_codex_output_schema,
+)
 from subsched.contract import (
     build_plan_prompt,
     build_plan_review_prompt,
@@ -46,6 +51,11 @@ class NativeWorker:
         verification_commands: Sequence[str] = (),
         subscription_billing_verified: bool = False,
         codex_output_schema: Path | None = None,
+        # #291: the approval-flag variant a `parse_codex_cli_metadata()` capability
+        # check selected for the installed Codex CLI's `exec` surface. None keeps
+        # Claude-only construction possible, but every Codex dispatch fails closed
+        # unless its caller passed through an actual preflight result.
+        codex_approval_mode: CodexApprovalMode | None = None,
     ) -> None:
         if type(subscription_billing_verified) is not bool:
             raise TypeError("subscription billing verification must be a boolean")
@@ -68,6 +78,7 @@ class NativeWorker:
         self.structured_logger = structured_logger
         self.verification_commands = tuple(verification_commands)
         self.codex_output_schema = codex_output_schema
+        self.codex_approval_mode = codex_approval_mode
 
     def _heartbeat(self, task: Task, agent: str) -> Callable[[float], None] | None:
         logger = self.structured_logger
@@ -153,6 +164,11 @@ class NativeWorker:
             )
             return self.claude_agent.execute(req)
         elif agent == "codex":
+            if self.codex_approval_mode is None:
+                return AgentResult(
+                    AgentResultKind.FAILURE,
+                    output="missing preflight-detected Codex approval mode",
+                )
             schema_path = self.codex_output_schema or (
                 worktree_path / ".ai" / "codex-output.schema.json"
             )
@@ -161,23 +177,12 @@ class NativeWorker:
                 READ_ONLY_SANDBOX_ARGS["codex"][1] if read_only else "workspace-write"
             )
             req = ProcessExecutionRequest(
-                argv=(
-                    "codex",
-                    "--ask-for-approval",
-                    "never",
-                    "exec",
-                    "--strict-config",
-                    "--ignore-user-config",
-                    "--ignore-rules",
-                    "--json",
-                    "--output-schema",
-                    str(schema_path),
-                    "-C",
-                    str(worktree_path),
-                    "--sandbox",
-                    codex_sandbox,
-                    "--ephemeral",
-                    "-",
+                argv=build_codex_headless_argv(
+                    executable="codex",
+                    approval_mode=self.codex_approval_mode,
+                    sandbox=codex_sandbox,
+                    output_schema=schema_path,
+                    cwd=worktree_path,
                 ),
                 cwd=worktree_path,
                 # ClaudeAgent/CodexAgent.execute() apply COMMON_ENV_ALLOWLIST to this before

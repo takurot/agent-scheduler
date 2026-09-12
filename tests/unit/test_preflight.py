@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from subsched.agents.codex import CodexApprovalMode
 from subsched.preflight import (
     PreflightCheckResult,
     PreflightReport,
@@ -55,6 +56,83 @@ def test_probe_command_capabilities_codex_success(tmp_path: Path) -> None:
     assert res.compatible is True
     assert res.version == "0.147.0"
     assert "headless flags verified" in res.details
+    assert res.codex_approval_mode is CodexApprovalMode.ASK_FOR_APPROVAL_NEVER
+
+
+def test_probe_command_capabilities_codex_detects_approve_for_me_drift(tmp_path: Path) -> None:
+    """#291: Codex CLI 0.153.4 dropped `--ask-for-approval` from `codex exec --help`;
+    doctor/preflight must still report compatible=True and record which approval-flag
+    variant is safe to use, rather than fail-closed on an actively supported CLI."""
+    exe = tmp_path / "codex"
+    exe.write_text("", encoding="utf-8")
+    exe.chmod(0o755)
+
+    version_out = (FIXTURES / "codex" / "cli-version-0.153.4.txt").read_text(encoding="utf-8")
+    help_out = (FIXTURES / "codex" / "cli-exec-help-0.153.4.txt").read_text(encoding="utf-8")
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=version_out, stderr="")
+        if "exec" in argv and "--help" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=help_out, stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected")
+
+    res = probe_command_capabilities("codex", exe, run_cmd=fake_run)
+    assert res.compatible is True
+    assert res.version == "0.153.4"
+    assert res.codex_approval_mode is CodexApprovalMode.APPROVE_FOR_ME
+
+
+def test_probe_command_capabilities_codex_fails_closed_when_approval_flag_unknown(
+    tmp_path: Path,
+) -> None:
+    """A Codex CLI whose `exec --help` no longer lists either known approval flag is an
+    unrecognized/ambiguous approval contract and must fail closed rather than dispatch."""
+    exe = tmp_path / "codex"
+    exe.write_text("", encoding="utf-8")
+    exe.chmod(0o755)
+
+    help_out = (
+        "--strict-config --sandbox --ephemeral --ignore-user-config "
+        "--ignore-rules --output-schema --json"
+    )
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.200.0\n", stderr="")
+        if "exec" in argv and "--help" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=help_out, stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected")
+
+    res = probe_command_capabilities("codex", exe, run_cmd=fake_run)
+    assert res.compatible is False
+    assert "required Codex CLI flags are missing" in (res.error or "")
+
+
+def test_probe_command_capabilities_codex_fails_closed_when_exec_help_fails(
+    tmp_path: Path,
+) -> None:
+    """Top-level help cannot prove which flags the `exec` subcommand accepts."""
+    exe = tmp_path / "codex"
+    exe.write_text("", encoding="utf-8")
+    exe.chmod(0o755)
+    top_level_help = (FIXTURES / "codex" / "cli-exec-help-0.153.4.txt").read_text(
+        encoding="utf-8"
+    )
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="codex-cli 0.153.4\n", stderr="")
+        if "exec" in argv and "--help" in argv:
+            return subprocess.CompletedProcess(argv, 2, stdout="", stderr="exec unavailable")
+        if "--help" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=top_level_help, stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected")
+
+    res = probe_command_capabilities("codex", exe, run_cmd=fake_run)
+
+    assert res.compatible is False
+    assert res.error == "codex inspection failed (version or exec help exited nonzero)"
 
 
 def test_probe_command_capabilities_rejects_missing_required_flags(tmp_path: Path) -> None:
@@ -258,5 +336,4 @@ def test_doctor_and_run_share_capability_failure_result(
     assert run_res.exit_code == 2
     assert "Native execution pre-flight doctor check failed" in run_res.output
     assert "required Claude CLI flags are missing" in run_res.output
-
 

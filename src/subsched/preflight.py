@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from subsched.agents.claude import ClaudeCliMetadataError, parse_claude_cli_metadata
-from subsched.agents.codex import CodexCliMetadataError, parse_codex_cli_metadata
+from subsched.agents.codex import (
+    CodexApprovalMode,
+    CodexCliMetadataError,
+    parse_codex_cli_metadata,
+)
 from subsched.assumptions import REDACTED, SECRET_PATTERN
 from subsched.github.issues import diagnose_token
 
@@ -25,6 +29,11 @@ class PreflightCheckResult:
     compatible: bool = False
     details: str = ""
     error: str | None = None
+    # #291: set only for the "codex" check, so NativeWorker can be given the exact
+    # same approval-flag variant doctor/preflight verified is safe for the installed
+    # CLI, instead of the two independently re-deriving (and potentially disagreeing
+    # on) which flag is safe to use.
+    codex_approval_mode: CodexApprovalMode | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,16 +139,16 @@ def probe_command_capabilities(
         if name == "codex":
             v_proc = _safe_run([str(resolved), "--version"], run_cmd=run_cmd)
             h_proc = _safe_run([str(resolved), "exec", "--help"], run_cmd=run_cmd)
-            if h_proc.returncode != 0 or not h_proc.stdout.strip():
-                # Fallback to top-level help
-                h_proc = _safe_run([str(resolved), "--help"], run_cmd=run_cmd)
-
-            if v_proc.returncode != 0 or h_proc.returncode != 0:
+            if (
+                v_proc.returncode != 0
+                or h_proc.returncode != 0
+                or not h_proc.stdout.strip()
+            ):
                 return PreflightCheckResult(
                     name=name,
                     found=True,
                     executable_path=resolved,
-                    error="codex inspection failed (version or help exited nonzero)",
+                    error="codex inspection failed (version or exec help exited nonzero)",
                 )
             v_out = SECRET_PATTERN.sub(REDACTED, v_proc.stdout)
             h_out = SECRET_PATTERN.sub(REDACTED, h_proc.stdout)
@@ -151,6 +160,7 @@ def probe_command_capabilities(
                 version=metadata_codex.version,
                 compatible=True,
                 details=f"version {metadata_codex.version}, headless flags verified",
+                codex_approval_mode=metadata_codex.approval_mode,
             )
 
         return PreflightCheckResult(

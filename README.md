@@ -48,7 +48,10 @@ gates remain authoritative.
 - **Package Manager**: `pip`, `pipx`, or [`uv`](https://docs.astral.sh/uv/)
 - **Git**: `>=2.40`
 - **GitHub CLI**: `gh` (authenticated)
-- **Coding agent CLI tools**: `claude` (Claude Code) and/or `codex` (OpenAI Codex)
+- **Coding agent CLI tools**: `claude` (Claude Code) and/or `codex` (OpenAI Codex). For `codex`,
+  `subsched doctor` accepts either the current `codex exec --help` non-interactive approval
+  contract (`--approve-for-me`, e.g. Codex CLI 0.153.4+) or the legacy one (`--ask-for-approval`);
+  a CLI whose `exec` surface exposes neither flag fails closed instead of guessing.
 
 ---
 

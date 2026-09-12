@@ -11,6 +11,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,22 @@ class CodexCliMetadataError(ValueError):
     """Raised when installed Codex CLI capabilities or metadata are incompatible."""
 
 
+class CodexApprovalMode(StrEnum):
+    """Non-interactive unattended-approval contract observed on the installed Codex
+    CLI's `exec` surface. Codex 0.153.4 dropped `--ask-for-approval` from `exec --help`
+    in favor of `--approve-for-me` (issue #291); both keep the sandbox constrained to
+    the configured `--sandbox` mode, unlike `--dangerously-bypass-approvals-and-sandbox`,
+    which is never selected here."""
+
+    ASK_FOR_APPROVAL_NEVER = "ASK_FOR_APPROVAL_NEVER"
+    APPROVE_FOR_ME = "APPROVE_FOR_ME"
+
+
+CODEX_ASK_FOR_APPROVAL_FLAG = "--ask-for-approval"
+CODEX_APPROVE_FOR_ME_FLAG = "--approve-for-me"
+CODEX_SANDBOX_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
+
+
 @dataclass(frozen=True, slots=True)
 class CodexCliMetadata:
     version: str
@@ -37,13 +54,12 @@ class CodexCliMetadata:
     supports_strict_config: bool
     supports_ignore_rules: bool
     supports_ignore_user_config: bool
-    supports_ask_for_approval: bool
+    approval_mode: CodexApprovalMode
 
 
 REQUIRED_CODEX_HEADLESS_FLAGS = frozenset(
     {
         "--json",
-        "--ask-for-approval",
         "--output-schema",
         "--sandbox",
         "--ephemeral",
@@ -63,6 +79,20 @@ def parse_codex_cli_metadata(*, version_output: str, help_output: str) -> CodexC
         raise CodexCliMetadataError(
             f"required Codex CLI flags are missing: {', '.join(missing)}"
         )
+    # `--approve-for-me` takes priority when both flags appear in help_output: on current
+    # Codex CLI, `codex exec` rejects `--ask-for-approval` outright even though the flag
+    # is still documented under the *interactive* `codex --help` (which preflight falls
+    # back to when `exec --help` itself fails), so treating that fallback text as
+    # legacy-compatible would select an argv that Codex refuses to run.
+    if CODEX_APPROVE_FOR_ME_FLAG in help_output:
+        approval_mode = CodexApprovalMode.APPROVE_FOR_ME
+    elif CODEX_ASK_FOR_APPROVAL_FLAG in help_output:
+        approval_mode = CodexApprovalMode.ASK_FOR_APPROVAL_NEVER
+    else:
+        raise CodexCliMetadataError(
+            "required Codex CLI flags are missing: "
+            f"{CODEX_ASK_FOR_APPROVAL_FLAG} or {CODEX_APPROVE_FOR_ME_FLAG}"
+        )
     return CodexCliMetadata(
         version=version_match.group(1),
         supports_json_output=True,
@@ -72,7 +102,7 @@ def parse_codex_cli_metadata(*, version_output: str, help_output: str) -> CodexC
         supports_strict_config=True,
         supports_ignore_rules=True,
         supports_ignore_user_config=True,
-        supports_ask_for_approval=True,
+        approval_mode=approval_mode,
     )
 
 
@@ -82,6 +112,10 @@ class CodexProbeConfig:
     executable: Path
     cwd: Path
     output_schema: Path
+    # Default matches the approval contract currently confirmed against the installed
+    # Codex CLI (see #291); pass the value `parse_codex_cli_metadata()` detects for the
+    # target CLI to probe a different (e.g. pre-drift) installation explicitly.
+    approval_mode: CodexApprovalMode = CodexApprovalMode.APPROVE_FOR_ME
     timeout_seconds: float = 300
     terminate_grace_seconds: float = 5
     output_limit_bytes: int = 1_048_576
@@ -114,25 +148,50 @@ def _validate_schema(path: Path) -> None:
         raise ValueError("Codex output schema must be a JSON object")
 
 
-def build_codex_exec_argv(config: CodexProbeConfig) -> tuple[str, ...]:
-    """Build the fixed, non-interactive probe command without putting the prompt in argv."""
+def build_codex_headless_argv(
+    *,
+    executable: str,
+    approval_mode: CodexApprovalMode,
+    sandbox: str,
+    output_schema: Path,
+    cwd: Path,
+) -> tuple[str, ...]:
+    """Single source of truth for the non-interactive `codex exec` argv, shared by the
+    manual live probe (`build_codex_exec_argv`) and `NativeWorker`, so both always agree
+    on the approval-flag variant a `parse_codex_cli_metadata()` capability check selected
+    for the installed CLI. Never selects `--dangerously-bypass-approvals-and-sandbox`."""
+    approval_args = (
+        (CODEX_APPROVE_FOR_ME_FLAG,)
+        if approval_mode is CodexApprovalMode.APPROVE_FOR_ME
+        else (CODEX_ASK_FOR_APPROVAL_FLAG, "never")
+    )
     return (
-        str(config.executable),
-        "--ask-for-approval",
-        "never",
+        executable,
+        *approval_args,
         "exec",
         "--strict-config",
         "--ignore-user-config",
         "--ignore-rules",
         "--json",
         "--output-schema",
-        str(config.output_schema),
+        str(output_schema),
         "-C",
-        str(config.cwd),
+        str(cwd),
         "--sandbox",
-        "workspace-write",
+        sandbox,
         "--ephemeral",
         "-",
+    )
+
+
+def build_codex_exec_argv(config: CodexProbeConfig) -> tuple[str, ...]:
+    """Build the fixed, non-interactive probe command without putting the prompt in argv."""
+    return build_codex_headless_argv(
+        executable=str(config.executable),
+        approval_mode=config.approval_mode,
+        sandbox="workspace-write",
+        output_schema=config.output_schema,
+        cwd=config.cwd,
     )
 
 
