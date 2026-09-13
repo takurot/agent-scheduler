@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 import yaml
 
-from subsched.github.issues import GitHubCliError
+from subsched.github.issues import GitHubCliError, GitHubIssueSource
 from subsched.mcp_server import (
     GUIDELINES,
     McpToolError,
@@ -206,28 +206,43 @@ def test_queue_issues_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     store.init_directories()
     store.save_tasks((_task(1, TaskState.READY),))
 
-    issues = (Issue(number=1, title="Already queued"), Issue(number=2, title="New one"))
+    issues = (
+        Issue(number=1, title="Already queued", labels=("ai-ready",)),
+        Issue(number=2, title="New one", labels=("ai-ready",)),
+    )
     monkeypatch.setattr(
         "subsched.mcp_server.GitHubIssueSource.list_open", lambda self, repo, label=None: issues
     )
 
     result = queue_issues(str(tmp_path), dry_run=True)
 
-    assert result == {"discovered": 2, "would_queue": 1, "dry_run": True}
+    assert result == {
+        "discovered": 2,
+        "would_queue": 1,
+        "dry_run": True,
+        "issue_numbers": [1, 2],
+        "excluded": [],
+    }
 
 
 def test_queue_issues_persists_new_tasks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "subsched.yaml").write_text(
         yaml.safe_dump({"github": {"repo": "acme/widgets"}}), encoding="utf-8"
     )
-    issues = (Issue(number=5, title="Discovered issue"),)
+    issues = (Issue(number=5, title="Discovered issue", labels=("ai-ready",)),)
     monkeypatch.setattr(
         "subsched.mcp_server.GitHubIssueSource.list_open", lambda self, repo, label=None: issues
     )
 
     result = queue_issues(str(tmp_path))
 
-    assert result == {"discovered": 1, "queued": 1, "dry_run": False}
+    assert result == {
+        "discovered": 1,
+        "queued": 1,
+        "dry_run": False,
+        "issue_numbers": [5],
+        "excluded": [],
+    }
     store = JsonStateStore(tmp_path)
     assert [task.issue_number for task in store.load_tasks()] == [5]
 
@@ -814,3 +829,151 @@ def test_cli_mcp_reports_missing_dependency(
 
     assert result.exit_code == 1
     assert "The `mcp` package is required" in result.output
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize(
+    ("mode", "configured_issues", "issues", "label", "expected"),
+    [
+        ("label", [], None, None, [1]),
+        ("all-open", [], None, None, [1, 2, 3]),
+        ("list", [2, 4], None, None, [2]),
+        ("label", [], None, "override", [3]),
+        ("label", [], "2,4", None, [2]),
+        ("label", [], "2,4", "override", [2]),
+        ("label", [], "all-open", None, [1, 2, 3]),
+    ],
+)
+def test_queue_selection_config_and_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool,
+    mode: str,
+    configured_issues: list[int],
+    issues: str | None,
+    label: str | None,
+    expected: list[int],
+) -> None:
+    github: dict[str, Any] = {
+        "repo": "acme/widgets",
+        "mode": mode,
+        "include_labels": ["ai-ready", "backend"],
+        "exclude_labels": ["blocked", "human-only"],
+    }
+    if configured_issues:
+        github["issues"] = configured_issues
+    (tmp_path / "subsched.yaml").write_text(yaml.safe_dump({"github": github}))
+    snapshot = (
+        Issue(number=1, title="Both", labels=("ai-ready", "backend")),
+        Issue(number=2, title="Partial", labels=("ai-ready",)),
+        Issue(number=3, title="Override", labels=("override",)),
+        Issue(number=4, title="Blocked", labels=("ai-ready", "backend", "override", "blocked")),
+        Issue(number=5, title="Human", labels=("ai-ready", "backend", "override", "human-only")),
+        Issue(
+            number=6,
+            title="Security",
+            labels=("ai-ready", "backend", "override", "security-sensitive"),
+        ),
+    )
+    calls: list[dict[str, Any]] = []
+
+    def list_open(self: object, repo: str, **kwargs: Any) -> tuple[Issue, ...]:
+        calls.append(kwargs)
+        return snapshot
+
+    monkeypatch.setattr(GitHubIssueSource, "list_open", list_open)
+    result = queue_issues(str(tmp_path), issues=issues, label=label, dry_run=dry_run)
+    assert result["issue_numbers"] == expected
+    assert result["discovered"] == len(expected)
+    assert result["would_queue" if dry_run else "queued"] == len(expected)
+    assert {item["issue_number"] for item in result["excluded"]} == (
+        {4} if issues == "2,4" or mode == "list" else {4, 5, 6}
+    )
+    assert all(item["reason"] == "excluded label" for item in result["excluded"])
+    if mode == "label" and issues is None and label is None:
+        assert calls == [{"labels": ("ai-ready", "backend")}]
+    if issues is not None or mode in ("all-open", "list"):
+        assert calls == [{}]
+    if dry_run:
+        assert not (tmp_path / ".ai").exists()
+    else:
+        assert [task.issue_number for task in JsonStateStore(tmp_path).load_tasks()] == expected
+
+
+@pytest.mark.parametrize("issues", ["0", "-1", "1,1", "1,", "bogus", "999"])
+def test_queue_rejects_invalid_or_missing_requested_issues_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    issues: str,
+) -> None:
+    (tmp_path / "subsched.yaml").write_text("github:\n  repo: acme/widgets\n")
+    monkeypatch.setattr(GitHubIssueSource, "list_open", lambda *a, **kw: ())
+    with pytest.raises(McpToolError):
+        queue_issues(str(tmp_path), issues=issues)
+    assert not (tmp_path / ".ai").exists()
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        "{}",
+        "github: []",
+        "github:\n  repo: acme/widgets\n  mode: list",
+        "github:\n  repo: acme/widgets\n  mode: label\n  include_labels: []",
+    ],
+)
+def test_queue_invalid_config_fails_before_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config: str,
+) -> None:
+    (tmp_path / "subsched.yaml").write_text(config)
+
+    def unexpected(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("invalid config must not reach GitHub")
+
+    monkeypatch.setattr(GitHubIssueSource, "list_open", unexpected)
+    with pytest.raises(McpToolError):
+        queue_issues(str(tmp_path))
+    assert not (tmp_path / ".ai").exists()
+
+
+@pytest.mark.parametrize("label", ["", " ", ","])
+def test_queue_empty_label_fails_closed(tmp_path: Path, label: str) -> None:
+    (tmp_path / "subsched.yaml").write_text("github:\n  repo: acme/widgets\n")
+    with pytest.raises(McpToolError, match="label must not be empty"):
+        queue_issues(str(tmp_path), label=label)
+    assert not (tmp_path / ".ai").exists()
+
+
+def test_queue_rejects_symlinked_config(tmp_path: Path) -> None:
+    target = tmp_path / "other.yaml"
+    target.write_text("github:\n  repo: acme/widgets\n")
+    (tmp_path / "subsched.yaml").symlink_to(target)
+    with pytest.raises(McpToolError, match=r"regular subsched\.yaml"):
+        queue_issues(str(tmp_path), issues="1")
+    assert not (tmp_path / ".ai").exists()
+
+
+def test_queue_exclusion_reconciles_existing_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "subsched.yaml").write_text(
+        "github:\n  repo: acme/widgets\n  exclude_labels: [human-only]\n"
+    )
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    store.save_tasks((_task(1, TaskState.READY),))
+    monkeypatch.setattr(
+        GitHubIssueSource,
+        "list_open",
+        lambda *a, **kw: (Issue(number=1, title="Now excluded", labels=("human-only",)),),
+    )
+    preview = queue_issues(str(tmp_path), issues="1", dry_run=True)
+    assert store.load_tasks()[0].status is TaskState.READY
+    persisted = queue_issues(str(tmp_path), issues="1")
+    assert preview["issue_numbers"] == persisted["issue_numbers"] == []
+    assert preview["excluded"] == persisted["excluded"]
+    assert persisted["queued"] == preview["would_queue"] == 0
+    assert store.load_tasks()[0].status is TaskState.NEEDS_HUMAN

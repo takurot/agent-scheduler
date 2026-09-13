@@ -22,8 +22,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import typer
+
 from subsched.agents.native import NativeWorker
-from subsched.config import ConfigError
+from subsched.config import ConfigError, load_config
 from subsched.gitenv import git_safe_env
 from subsched.github.issues import GitHubCliError, GitHubIssueSource
 from subsched.handoff import parse_semantic_handoff
@@ -32,6 +34,7 @@ from subsched.metrics import calculate_metrics
 from subsched.models import Task, TaskState
 from subsched.router import Router
 from subsched.scheduler import Scheduler
+from subsched.selection import discover_selected_issues, excluded_issue_labels, resolve_intent
 from subsched.storage import (
     JsonStateStore,
     SchedulerLockError,
@@ -213,33 +216,41 @@ def queue_issues(
     state; `dry_run=False` persists new tasks exactly as `subsched run` does.
     """
     store = _store_for(repository_path)
+    config_path = store.state_dir.parent / "subsched.yaml"
+    if config_path.is_symlink() or not config_path.is_file():
+        raise McpToolError("github.repo is not configured in a regular subsched.yaml")
     try:
-        cfg_repo = _github_repo(store.state_dir.parent)
-    except McpToolError:
-        raise
+        cfg = load_config(config_path)
+        intent = resolve_intent(cfg=cfg, query=None, repo=None, label=label, issues=issues)
+    except (ConfigError, typer.BadParameter) as error:
+        raise McpToolError(f"invalid queue configuration or selection: {error}") from error
     try:
-        open_issues = GitHubIssueSource().list_open(cfg_repo, label=label)
+        discovered = discover_selected_issues(intent, GitHubIssueSource())
     except GitHubCliError as error:
         raise McpToolError(f"GitHub discovery failed: {error}") from error
 
-    requested: frozenset[int] | None = None
-    if issues is not None and issues != "all-open":
-        try:
-            requested = frozenset(int(item) for item in issues.split(","))
-        except ValueError as error:
-            raise McpToolError("issues must be 'all-open' or comma-separated integers") from error
-
-    discovered = tuple(
-        issue for issue in open_issues if requested is None or issue.number in requested
+    exclude_labels = frozenset(cfg.github.exclude_labels)
+    eligible = tuple(
+        issue for issue in discovered if not excluded_issue_labels(issue, exclude_labels)
     )
+    details: dict[str, Any] = {
+        "discovered": len(eligible),
+        "issue_numbers": [issue.number for issue in eligible],
+        "excluded": [
+            {"issue_number": issue.number, "reason": "excluded label", "labels": sorted(labels)}
+            for issue in discovered
+            if (labels := excluded_issue_labels(issue, exclude_labels))
+        ],
+        "dry_run": dry_run,
+    }
 
     if dry_run:
         try:
             existing = {task.issue_number for task in store.load_tasks()}
         except StateCorruptionError as error:
             raise McpToolError(f"scheduler state error: {error}") from error
-        new_count = sum(1 for issue in discovered if issue.number not in existing)
-        return {"discovered": len(discovered), "would_queue": new_count, "dry_run": True}
+        new_count = sum(1 for issue in eligible if issue.number not in existing)
+        return {**details, "would_queue": new_count}
 
     try:
         scheduler = Scheduler(
@@ -249,12 +260,12 @@ def queue_issues(
             worktree_root=store.worktrees_dir,
         )
         before = len(scheduler.tasks)
-        scheduler.discover(discovered)
+        scheduler.discover(discovered, exclude_labels=exclude_labels)
         added = len(scheduler.tasks) - before
     except (SchedulerLockError, StateCorruptionError, ValueError) as error:
         raise McpToolError(f"queueing failed: {error}") from error
 
-    return {"discovered": len(discovered), "queued": added, "dry_run": False}
+    return {**details, "queued": added}
 
 
 def _github_repo(repository: Path) -> str:
@@ -604,7 +615,11 @@ def build_server(options: ServerOptions) -> Any:
         name="subsched_queue_issues",
         description=(
             "Discover open GitHub issues (via `gh`) and persist eligible ones to the scheduler "
-            "queue. Set dry_run=True to preview counts without mutating state."
+            "queue. Selection precedence: explicit issues > explicit label > subsched.yaml "
+            "github.mode/include_labels (AND). Configured exclude_labels (OR) and "
+            "security-sensitive always apply, even to explicit issues. A valid subsched.yaml "
+            "is required. First use dry_run=True and review issue_numbers and excluded reasons; "
+            "then queue with the same arguments and verify issue_numbers again."
         ),
     )
     def _queue_issues(
@@ -612,16 +627,18 @@ def build_server(options: ServerOptions) -> Any:
             default=None,
             description=(
                 "Comma-separated issue numbers (e.g. '123,124') or 'all-open'. Defaults to "
-                "discovering all eligible open issues."
+                "github.mode/include_labels in subsched.yaml. Overrides label when both are given."
             ),
         ),
         label: str | None = Field(
-            default=None, description="Only discover issues with this GitHub label."
+            default=None,
+            description="Comma-separated labels (AND); overrides config unless issues is set.",
         ),
         dry_run: bool = Field(
             default=False,
             description=(
-                "Preview discovered/would-queue counts without persisting scheduler state. "
+                "Preview eligible issue_numbers, excluded reasons and would_queue "
+                "without state mutation. "
                 "Defaults to False."
             ),
         ),
