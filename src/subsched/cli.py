@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import functools
-import re
 import secrets
 import time
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -23,7 +21,6 @@ from subsched.config import (
     SchedulerConfig,
     load_config,
     parse_duration,
-    parse_natural_language_instruction,
     validate_repo,
 )
 from subsched.github.checks import fetch_pr_checks
@@ -47,6 +44,7 @@ from subsched.models import Capacity, TaskState
 from subsched.preflight import validate_native_preflight
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler
+from subsched.selection import ResolvedIntent, discover_selected_issues, resolve_intent
 from subsched.storage import (
     JsonStateStore,
     SchedulerLockError,
@@ -83,32 +81,6 @@ def main(ctx: typer.Context, repository: RepositoryOption = None) -> None:
     ctx.obj = Context(resolved_repository)
 
 
-def _parse_issue_numbers(value: str) -> tuple[int, ...]:
-    if not re.fullmatch(r"\d+(,\d+)*", value):
-        raise typer.BadParameter("issues must be all-open or comma-separated positive integers")
-    numbers = tuple(int(item) for item in value.split(","))
-    if any(number <= 0 for number in numbers) or len(set(numbers)) != len(numbers):
-        raise typer.BadParameter("issue numbers must be positive and unique")
-    return numbers
-
-
-@dataclass(frozen=True)
-class ResolvedIntent:
-    """The final repo/selection-mode decision after applying CLI override > natural
-    language query > config > safe default precedence (#144). Shared by `run` and
-    `config validate` so the two commands can never disagree about what a given
-    combination of flags/config actually means -- and so #98's future natural-language
-    intent echo has a single representation to build on instead of a second one.
-    """
-
-    cfg: SchedulerConfig
-    repo: str
-    label: str | None
-    # "all-open", a comma-separated issue-number string, or None (only when label is set).
-    issues: str | None
-    labels: tuple[str, ...] = ()
-
-
 def _load_effective_config(repository: Path, config: Path | None) -> SchedulerConfig:
     """Resolve the configuration `run` and `config validate` operate on: an explicit
     `--config` always wins; otherwise fall back to `subsched.yaml` in the repository
@@ -130,81 +102,10 @@ def _resolve_intent(
     label: str | None,
     issues: str | None,
 ) -> ResolvedIntent:
-    resolved_repo = repo
-    resolved_label = label
-    resolved_issues = issues
-
-    if query is not None:
-        try:
-            intent = parse_natural_language_instruction(query)
-            if intent.repo and resolved_repo is None:
-                resolved_repo = intent.repo
-            if intent.issues and resolved_issues is None and resolved_label is None:
-                resolved_issues = intent.issues
-            if intent.label and resolved_label is None and resolved_issues is None:
-                resolved_label = intent.label
-
-            parsed_parts: list[str] = []
-            if intent.repo:
-                parsed_parts.append(f"repo='{intent.repo}'")
-            if intent.label:
-                parsed_parts.append(f"label='{intent.label}'")
-            if intent.issues:
-                parsed_parts.append(f"issues='{intent.issues}'")
-            if parsed_parts:
-                typer.echo(f"Parsed intent: {', '.join(parsed_parts)}")
-        except ConfigError as error:
-            raise typer.BadParameter(str(error)) from error
-
-    if resolved_repo is None:
-        resolved_repo = cfg.github.repo
-
-    if resolved_repo is None:
-        raise typer.BadParameter(
-            "missing required --repo option or config.github.repo", param_hint="--repo"
-        )
-
-    try:
-        validate_repo(resolved_repo)
-    except ConfigError as error:
-        raise typer.BadParameter(str(error), param_hint="--repo") from error
-
-    if resolved_label is not None and resolved_issues is not None:
+    # Preserve the CLI's mutually exclusive flag validation.
+    if label is not None and issues is not None:
         raise typer.BadParameter("select exactly one of --label or --issues")
-
-    resolved_labels: tuple[str, ...] = ()
-    if resolved_label is not None:
-        resolved_labels = tuple(
-            item.strip() for item in resolved_label.split(",") if item.strip()
-        )
-
-    if resolved_label is None and resolved_issues is None:
-        # CLI --label/--issues (and natural-language query) are already applied above and
-        # take precedence over config -- this branch only runs when neither was given, so
-        # config.github.mode is consulted as the fallback, and a safe default error last.
-        if cfg.github.mode == "all-open":
-            resolved_issues = "all-open"
-        elif cfg.github.mode == "list" and cfg.github.issues:
-            resolved_issues = ",".join(str(n) for n in cfg.github.issues)
-        elif cfg.github.mode == "label" and cfg.github.include_labels:
-            resolved_labels = tuple(cfg.github.include_labels)
-            resolved_label = ", ".join(resolved_labels)
-        else:
-            raise typer.BadParameter("select exactly one of --label or --issues")
-
-    # #144 code review: validate --issues syntax here (not only inside run(), after its
-    # native-opt-in gate) so config validate actually validates it too, instead of
-    # reporting "Configuration is valid." for a value run() would reject.
-    if resolved_issues is not None and resolved_issues != "all-open":
-        _parse_issue_numbers(resolved_issues)
-
-    return ResolvedIntent(
-        cfg=cfg,
-        repo=resolved_repo,
-        label=resolved_label,
-        issues=resolved_issues,
-        labels=resolved_labels,
-    )
+    return resolve_intent(cfg=cfg, query=query, repo=repo, label=label, issues=issues)
 
 
 def _format_effective_config_summary(
@@ -497,32 +398,13 @@ def run(
             typer.echo(f"GitHub default branch resolution failed: {error}", err=True)
             raise typer.Exit(1) from error
 
-    requested: frozenset[int] | None = None
-    if resolved_issues is not None and resolved_issues != "all-open":
-        requested = frozenset(_parse_issue_numbers(resolved_issues))
     try:
-        if len(intent.labels) > 1:
-            open_issues = GitHubIssueSource().list_open(resolved_repo, labels=intent.labels)
-        elif resolved_label is not None:
-            open_issues = GitHubIssueSource().list_open(resolved_repo, label=resolved_label)
-        else:
-            open_issues = GitHubIssueSource().list_open(resolved_repo)
+        discovered = discover_selected_issues(intent, GitHubIssueSource())
     except GitHubCliError as error:
         typer.echo(f"GitHub discovery failed: {error}", err=True)
         raise typer.Exit(1) from error
 
     exclude_labels = frozenset(cfg.github.exclude_labels)
-    discovered = tuple(
-        issue
-        for issue in open_issues
-        if (requested is None or issue.number in requested)
-        and (not intent.labels or all(item in issue.labels for item in intent.labels))
-    )
-    if requested is not None:
-        missing = requested - {issue.number for issue in open_issues}
-        if missing:
-            typer.echo("Requested issues are not open or were not found", err=True)
-            raise typer.Exit(1)
 
     worktree_root = context.repository / ".ai" / "worktrees"
     worktree_adapter: WorktreeAdapter | None = None

@@ -2875,6 +2875,26 @@ subsched mcp [--repository PATH]
 確認し（存在しなければ `McpToolError` でfail-closed）、起動する `subsched run` の引数に
 明示的に `--config <path>` を付与する（#268）。
 
+
+`subsched_queue_issues` requires a valid, regular repository-root `subsched.yaml`.
+Selection precedence is explicit `issues` > explicit `label` > configured
+`github.mode`: `label` requires every `include_labels` entry (AND), `list` uses
+`github.issues`, and `all-open` selects all open issues. Explicit selectors override
+configured include selection, but every path applies `exclude_labels` (OR) and always
+excludes `security-sensitive`. Excluded explicit issues are reported, never added;
+invalid or missing requested issue numbers fail before state mutation. CLI and MCP
+share the intent/selection and label eligibility implementation; CLI retains its
+mutually exclusive `--issues`/`--label` flags.
+
+For safe MCP queueing, first call `subsched_queue_issues(dry_run=True, ...)` and review
+`issue_numbers` (eligible discovery targets) and `excluded` (issue number, reason,
+matching labels), not just `discovered`/`would_queue` counts. Repeat with the same
+selectors and `dry_run=False`, then verify returned `issue_numbers` and `queued`.
+Both paths use the same eligibility rules; GitHub labels may change between calls.
+Existing tasks do not count as new additions. Persisting also reconciles selected
+existing tasks that acquired an excluded label to `NEEDS_HUMAN` under the Scheduler's
+existing recovery rules; dry-run does not mutate them.
+
 ## 4. 排他ロックとデータ完全性
 
 状態を変更するすべてのMCPツール操作は、既存の `JsonStateStore.lock()` 排他ロックを取得して実行され、

@@ -43,6 +43,7 @@ from subsched.review import (
     worktree_touched_unexpected_paths,
 )
 from subsched.router import FRESHNESS, Router
+from subsched.selection import excluded_issue_labels
 from subsched.storage import JsonStateStore, get_process_start_time
 from subsched.structured_logger import StructuredLogger
 from subsched.tasks.worktree import WorktreeAdapter, WorktreeError
@@ -657,7 +658,6 @@ class Scheduler:
         exclude_labels: frozenset[str] = frozenset(),
         snapshot_complete: bool = False,
     ) -> None:
-        effective_exclude = frozenset({"security-sensitive"}).union(exclude_labels)
         issues_list = list(issues)
         issues_by_number = {issue.number: issue for issue in issues_list}
         existing_numbers = {task.issue_number for task in self.tasks}
@@ -707,7 +707,7 @@ class Scheduler:
             )
 
             # Check newly excluded labels
-            if effective_exclude.intersection(issue.labels):
+            if excluded_issue_labels(issue, exclude_labels):
                 if task.status is not TaskState.NEEDS_HUMAN:
                     reason = "issue is no longer eligible: excluded label"
                     task = task.transition(TaskState.NEEDS_HUMAN, reason=reason)
@@ -736,7 +736,7 @@ class Scheduler:
             for issue in issues_list
             if (
                 issue.number not in existing_numbers
-                and not effective_exclude.intersection(issue.labels)
+                and not excluded_issue_labels(issue, exclude_labels)
             )
         ]
 
