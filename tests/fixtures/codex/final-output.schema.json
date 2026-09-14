@@ -4,7 +4,16 @@
   "additionalProperties": false,
   "required": ["result", "summary"],
   "properties": {
-    "result": {"enum": ["pass", "failure"]},
-    "summary": {"type": "string"}
+    "result": {"enum": ["pass", "failure", "needs_human"]},
+    "reason_code": {
+      "type": ["string", "null"],
+      "enum": [
+        "operator_decision_required",
+        "instruction_conflict",
+        "external_prerequisite",
+        null
+      ]
+    },
+    "summary": {"type": "string", "maxLength": 1000}
   }
 }

@@ -1270,3 +1270,128 @@ def test_build_codex_headless_argv_adds_model_as_single_argv_element(tmp_path: P
     )
     assert "--model" in argv
     assert argv[argv.index("--model") + 1] == "advanced-model"
+
+
+def _make_codex_event_stream(final_json_text: str) -> str:
+    events = [
+        {"type": "thread.started", "thread_id": "thread-audit"},
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "item_msg_final",
+                "type": "agent_message",
+                "text": final_json_text,
+            },
+        },
+        {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 50}},
+    ]
+    return "\n".join(json.dumps(e) for e in events)
+
+
+def test_parse_codex_jsonl_needs_human_success() -> None:
+    """#297: Native worker structured result returns needs_human with valid reason_code."""
+    final_json = json.dumps(
+        {
+            "result": "needs_human",
+            "reason_code": "operator_decision_required",
+            "summary": "container isolation design approval required",
+        }
+    )
+    payload = _make_codex_event_stream(final_json)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.NEEDS_HUMAN
+    assert res.reason_code == "operator_decision_required"
+    assert res.output == "container isolation design approval required"
+
+
+def test_parse_codex_jsonl_needs_human_unknown_reason_code_fails_closed() -> None:
+    """#297: Unknown reason_code fails closed as malformed."""
+    final_json = json.dumps(
+        {
+            "result": "needs_human",
+            "reason_code": "unknown_decision",
+            "summary": "need help",
+        }
+    )
+    payload = _make_codex_event_stream(final_json)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.FAILURE
+    assert res.output == "codex event stream malformed"
+
+
+def test_parse_codex_jsonl_needs_human_missing_reason_code_fails_closed() -> None:
+    """#297: Missing reason_code for needs_human fails closed as malformed."""
+    final_json = json.dumps(
+        {
+            "result": "needs_human",
+            "summary": "need help",
+        }
+    )
+    payload = _make_codex_event_stream(final_json)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.FAILURE
+    assert res.output == "codex event stream malformed"
+
+
+def test_parse_codex_jsonl_needs_human_control_character_summary_fails_closed() -> None:
+    """#297: Control characters in summary fail closed as malformed."""
+    final_json = json.dumps(
+        {
+            "result": "needs_human",
+            "reason_code": "operator_decision_required",
+            "summary": "approval\x00needed\x1b[31m",
+        }
+    )
+    payload = _make_codex_event_stream(final_json)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.FAILURE
+    assert res.output == "codex event stream malformed"
+
+
+def test_parse_codex_jsonl_needs_human_oversized_summary_fails_closed() -> None:
+    """#297: Oversized summary fails closed as malformed."""
+    final_json = json.dumps(
+        {
+            "result": "needs_human",
+            "reason_code": "operator_decision_required",
+            "summary": "x" * 1500,
+        }
+    )
+    payload = _make_codex_event_stream(final_json)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.FAILURE
+    assert res.output == "codex event stream malformed"
+
+
+def test_parse_codex_jsonl_needs_human_redacts_secret_in_summary() -> None:
+    """#297: Secrets in summary are redacted."""
+    final_json = json.dumps(
+        {
+            "result": "needs_human",
+            "reason_code": "operator_decision_required",
+            "summary": "key gho_secrettoken123456789 needed",
+        }
+    )
+    payload = _make_codex_event_stream(final_json)
+    res = parse_codex_jsonl(payload, returncode=0)
+    assert res.kind is AgentResultKind.NEEDS_HUMAN
+    assert res.reason_code == "operator_decision_required"
+    assert "gho_secrettoken123456789" not in res.output
+    assert "[REDACTED]" in res.output
+
+
+def test_parse_codex_jsonl_rejects_reason_code_on_pass_or_failure() -> None:
+    """#297: Non-null reason_code on pass or failure fails closed as malformed."""
+    for r in ("pass", "failure"):
+        final_json = json.dumps(
+            {
+                "result": r,
+                "reason_code": "operator_decision_required",
+                "summary": "done",
+            }
+        )
+        payload = _make_codex_event_stream(final_json)
+        res = parse_codex_jsonl(payload, returncode=0)
+        assert res.kind is AgentResultKind.FAILURE
+        assert res.output == "codex event stream malformed"

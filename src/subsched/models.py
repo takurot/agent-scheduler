@@ -61,6 +61,23 @@ class AgentResultKind(StrEnum):
     PROCESS_CLEANUP_FAILED = "PROCESS_CLEANUP_FAILED"
     UNKNOWN = "UNKNOWN"
     FAILURE = "FAILURE"
+    # #297: a provider-neutral, typed disposition for an operator-blocked outcome (design
+    # approval, instruction conflict, external prerequisite) that no amount of retrying
+    # the same or a different Agent can resolve -- distinct from FAILURE, which is
+    # eligible for the normal per-agent retry budget.
+    NEEDS_HUMAN = "NEEDS_HUMAN"
+
+
+# #297: closed enum of reason codes an Agent may attach to a NEEDS_HUMAN result. Kept
+# small and fixed (never free text) so the durable/logged reason is safe to persist and
+# cannot be used to smuggle secret-bearing provider output into Scheduler state.
+NEEDS_HUMAN_REASON_CODES = frozenset(
+    {
+        "operator_decision_required",
+        "instruction_conflict",
+        "external_prerequisite",
+    }
+)
 
 
 class StateTransitionError(ValueError):
@@ -562,6 +579,10 @@ class AgentResult:
     kind: AgentResultKind
     reset_at: datetime | None = None
     output: str = ""
+    # #297: only meaningful (and only permitted) for AgentResultKind.NEEDS_HUMAN -- a
+    # fixed enum member of NEEDS_HUMAN_REASON_CODES, never free text, so the durable
+    # reason survives restarts without ever carrying raw provider/Issue content.
+    reason_code: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -569,3 +590,8 @@ class AgentResult:
             and self.reset_at is None
         ):
             raise ValueError("reset_at is required for capacity events")
+        if self.kind is AgentResultKind.NEEDS_HUMAN:
+            if self.reason_code not in NEEDS_HUMAN_REASON_CODES:
+                raise ValueError("NEEDS_HUMAN results require a valid reason_code")
+        elif self.reason_code is not None:
+            raise ValueError("reason_code is only valid for NEEDS_HUMAN results")

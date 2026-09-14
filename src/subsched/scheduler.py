@@ -6,6 +6,7 @@ import secrets
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,7 +47,7 @@ from subsched.review import (
 from subsched.router import FRESHNESS, Router
 from subsched.selection import excluded_issue_labels
 from subsched.storage import JsonStateStore, get_process_start_time
-from subsched.structured_logger import StructuredLogger
+from subsched.structured_logger import StructuredLogger, sanitize_agent_summary
 from subsched.tasks.worktree import WorktreeAdapter, WorktreeError
 
 logger = logging.getLogger(__name__)
@@ -1198,16 +1199,19 @@ class Scheduler:
                 if running.worktree is not None:
                     clear_process_record(Path(running.worktree), running.issue_number)
 
+            finish_data: dict[str, Any] = {
+                "result_kind": result.kind.value,
+                "duration_seconds": round(time.monotonic() - dispatch_started, 1),
+                "attempt": running.attempt,
+            }
+            if result.reason_code is not None:
+                finish_data["reason_code"] = result.reason_code
             self._log(
                 "agent_finish",
                 issue_number=running.issue_number,
                 agent=agent,
                 task_id=running.task_id,
-                data={
-                    "result_kind": result.kind.value,
-                    "duration_seconds": round(time.monotonic() - dispatch_started, 1),
-                    "attempt": running.attempt,
-                },
+                data=finish_data,
             )
 
             # #281: PR_REVIEW is strictly read-only and explicitly instructed not to
@@ -1220,7 +1224,9 @@ class Scheduler:
                 and running.worktree is not None
                 and running.dispatch_status is not TaskState.PR_REVIEW
             ):
-                escalated = self._enforce_handoff_freshness(running, agent, current, result.kind)
+                escalated = self._enforce_handoff_freshness(
+                    running, agent, current, result.kind, reason_code=result.reason_code
+                )
                 if escalated is not None:
                     self.queue = self.queue.replace(escalated)
                     self._persist()
@@ -1651,7 +1657,13 @@ class Scheduler:
     )
 
     def _enforce_handoff_freshness(
-        self, task: Task, agent: str, dispatched_at: datetime, result_kind: AgentResultKind
+        self,
+        task: Task,
+        agent: str,
+        dispatched_at: datetime,
+        result_kind: AgentResultKind,
+        *,
+        reason_code: str | None = None,
     ) -> Task | None:
         """#145: readback-validate the handoff at every worker-end boundary (normal,
         capacity, timeout, failure -- called unconditionally right after worker.run()
@@ -1675,6 +1687,12 @@ class Scheduler:
             return None
         if can_recover_from_checkpoint(worktree_dir, task, dispatched_at=dispatched_at):
             if self.structured_logger is not None:
+                recovered_data: dict[str, Any] = {
+                    "recovered_from_checkpoint": True,
+                    "result_kind": result_kind.value,
+                }
+                if reason_code is not None:
+                    recovered_data["reason_code"] = reason_code
                 self.structured_logger.log(
                     "handoff_readback",
                     level="WARN",
@@ -1682,11 +1700,18 @@ class Scheduler:
                     agent=agent,
                     task_id=task.task_id,
                     message=readback.reason,
-                    data={"recovered_from_checkpoint": True},
+                    data=recovered_data,
                 )
             return None
         non_escalating = result_kind in self._HANDOFF_NON_ESCALATING_KINDS
         if self.structured_logger is not None:
+            readback_data: dict[str, Any] = {
+                "recovered_from_checkpoint": False,
+                "escalated": not non_escalating,
+                "result_kind": result_kind.value,
+            }
+            if reason_code is not None:
+                readback_data["reason_code"] = reason_code
             self.structured_logger.log(
                 "handoff_readback",
                 level="WARN" if non_escalating else "ERROR",
@@ -1694,7 +1719,7 @@ class Scheduler:
                 agent=agent,
                 task_id=task.task_id,
                 message=readback.reason,
-                data={"recovered_from_checkpoint": False, "escalated": not non_escalating},
+                data=readback_data,
             )
         if non_escalating:
             return None
@@ -1731,6 +1756,54 @@ class Scheduler:
         *,
         effective_capacities: dict[str, Capacity] | None = None,
     ) -> None:
+        if result.kind is AgentResultKind.NEEDS_HUMAN:
+            # #297: the Agent reported an operator-blocked outcome (e.g. design approval,
+            # instruction conflict, external prerequisite). Unlike generic FAILURE, this
+            # cannot be resolved by retrying the same or another agent -- transition
+            # immediately to NEEDS_HUMAN without burning retry attempts or per-agent
+            # failure counts.
+            reason_detail = (result.output or "").strip()
+            if not reason_detail and task.worktree is not None:
+                handoff_path = Path(task.worktree) / ".ai" / "handoffs" / f"{task.issue_number}.md"
+                if handoff_path.is_file() and not handoff_path.is_symlink():
+                    with suppress(Exception):
+                        from subsched.handoff import parse_semantic_handoff
+
+                        parsed_ho = parse_semantic_handoff(
+                            handoff_path.read_text(encoding="utf-8")
+                        )
+                        if parsed_ho and parsed_ho.next_action:
+                            reason_detail = sanitize_agent_summary(parsed_ho.next_action)
+
+            if reason_detail:
+                reason = (
+                    f"agent requested human intervention ({result.reason_code}): {reason_detail}"
+                )
+            else:
+                reason = f"agent requested human intervention ({result.reason_code})"
+
+            final = task.transition(
+                TaskState.NEEDS_HUMAN, current_agent=agent, now=now, reason=reason
+            )
+            self.queue = self.queue.replace(final)
+            self._log(
+                "task_transition",
+                level="WARN",
+                issue_number=final.issue_number,
+                agent=agent,
+                task_id=final.task_id,
+                message=reason,
+                data={
+                    "from_state": task.status.value,
+                    "to_state": final.status.value,
+                    "attempt": final.attempt,
+                    "reason_code": result.reason_code,
+                    "result_kind": result.kind.value,
+                },
+            )
+            self._persist()
+            return
+
         # #281: a review/revision dispatch that did not come back PASS must not fall
         # into the generic capacity/retry handling below -- that would eventually
         # redispatch this task as if it were READY, i.e. with the normal full-issue

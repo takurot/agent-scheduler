@@ -1932,6 +1932,26 @@ Agent自体の失敗（`per_agent_failures`が`max_agent_failures`に達する�
 再試行よりも回復困難な状態を招くリスクがある。「不明な場合はfail-closedにする」という
 本SPECの方針（§1）に従い、これらの失敗は都度人間の判断を挟む。
 
+## Native WorkerによるNEEDS_HUMANの明示的シグナル（#297）
+
+設計判断の承認、指示の矛盾、外部前提条件など「再試行しても解消しない人手待ち」について、Workerはgeneric `FAILURE`ではなく`NEEDS_HUMAN` outcomeをSchedulerへ直接通知できる。
+
+### Worker Result Schema
+
+```json
+{
+  "result": "pass | failure | needs_human",
+  "reason_code": "operator_decision_required | instruction_conflict | external_prerequisite | null",
+  "summary": "<actionable summary>"
+}
+```
+
+- **reason_code**: `NEEDS_HUMAN` 時のみ必須（`pass`/`failure`時はnullまたは省略）。固定enum（`operator_decision_required`, `instruction_conflict`, `external_prerequisite`）に限定され、任意文字列はfail-closedで拒絶される。
+- **summary**: control character除去、byte limit（1,000 bytes）、secret redactionを経て保持される。
+- **リトライ抑止**: valid/fresh handoffを伴う`NEEDS_HUMAN`は、同一/別Agentへリトライせず、`attempt`や`per_agent_failures`を消費せずに直ちに`TaskState.NEEDS_HUMAN`へ遷移する。
+- **Actionable reason保持**: `Task.needs_human_reason`にvalidated `reason_code`とsanitized summary（またはsemantic handoffの`Next Action`）が永続化される。
+- **Handoff整合性の維持**: handoffがstaleまたは不正な場合は#145に従いfail-closedで`NEEDS_HUMAN`へ遷移し、integrity errorと元の`reason_code`の両方が構造化ログ（`handoff_readback`）に記録される。
+
 ---
 
 # 50. Loop Guard
