@@ -67,6 +67,9 @@ def test_build_worker_prompt_contains_mandatory_instructions() -> None:
         prompt,
         re.DOTALL,
     )
+    # #297: prompt must instruct the agent on how to return needs_human
+    assert '"result": "needs_human"' in prompt
+    assert "operator_decision_required" in prompt
 
 
 def test_validate_dispatch_preconditions_fails_if_files_missing(tmp_path: Path) -> None:

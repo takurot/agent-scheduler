@@ -14,7 +14,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.process import COMMON_ENV_ALLOWLIST, filter_environment, run_process_group
-from subsched.models import AgentResult, AgentResultKind, CapacityState
+from subsched.models import NEEDS_HUMAN_REASON_CODES, AgentResult, AgentResultKind, CapacityState
+from subsched.structured_logger import is_valid_agent_summary, sanitize_agent_summary
 
 MAX_RESULT_BYTES = 1_000_000
 REQUIRED_HEADLESS_FLAGS = frozenset(
@@ -134,6 +135,23 @@ def parse_claude_cli_metadata(*, version_output: str, help_output: str) -> Claud
     )
 
 
+def _extract_needs_human_data(payload: dict[str, Any]) -> dict[str, Any] | None:
+    so = payload.get("structured_output")
+    if isinstance(so, dict) and so.get("result") == "needs_human":
+        return so
+    raw_res = payload.get("result")
+    if isinstance(raw_res, str):
+        trimmed = raw_res.strip()
+        if trimmed.startswith("{") and trimmed.endswith("}"):
+            try:
+                parsed = json.loads(trimmed)
+                if isinstance(parsed, dict) and parsed.get("result") == "needs_human":
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+    return None
+
+
 def parse_claude_result(
     outcome: ClaudeProcessOutcome, observed_at: datetime | None = None
 ) -> AgentResult:
@@ -146,8 +164,27 @@ def parse_claude_result(
         return AgentResult(AgentResultKind.TIMEOUT, output="claude scheduler timeout")
 
     payload = _load_payload(outcome.stdout)
-    if payload is not None and _is_success(payload, outcome.exit_code):
-        return AgentResult(AgentResultKind.PASS, output="claude completed")
+    if payload is not None:
+        needs_human_data = _extract_needs_human_data(payload)
+        if needs_human_data is not None:
+            if (
+                not _is_known_result(payload)
+                or outcome.exit_code != 0
+                or payload.get("is_error") is True
+            ):
+                return AgentResult(AgentResultKind.UNKNOWN, output="claude result unknown")
+            reason_code = needs_human_data.get("reason_code")
+            summary = needs_human_data.get("summary")
+            if reason_code not in NEEDS_HUMAN_REASON_CODES or not is_valid_agent_summary(summary):
+                return AgentResult(AgentResultKind.UNKNOWN, output="claude result unknown")
+            assert isinstance(summary, str)
+            return AgentResult(
+                AgentResultKind.NEEDS_HUMAN,
+                reason_code=reason_code,
+                output=sanitize_agent_summary(summary),
+            )
+        if _is_success(payload, outcome.exit_code):
+            return AgentResult(AgentResultKind.PASS, output="claude completed")
     if outcome.stdout and (payload is None or not _is_known_result(payload)):
         return AgentResult(AgentResultKind.UNKNOWN, output="claude result unknown")
     is_api_error = payload is not None and _is_api_error_payload(payload)

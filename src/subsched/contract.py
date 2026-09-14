@@ -175,7 +175,14 @@ def build_worker_prompt(task: Task, verification_commands: Sequence[str] = ()) -
             "",
             "When you have finished, provide your final response matching the result schema:",
             '{"result": "pass", "summary": "<brief summary>"}',
-            "or if the task cannot be completed:",
+            "or if human intervention or operator decision is required that cannot be resolved",
+            "by retrying:",
+            (
+                '{"result": "needs_human", '
+                '"reason_code": "operator_decision_required" | "instruction_conflict" | '
+                '"external_prerequisite", "summary": "<actionable summary>"}'
+            ),
+            "or if the task cannot be completed due to execution failure:",
             '{"result": "failure", "summary": "<reason for failure>"}',
             "",
             "Leave the worktree in a recoverable state.",
@@ -401,7 +408,14 @@ def build_revision_prompt(task: Task, verification_commands: Sequence[str] = ())
             "",
             "When you have finished, provide your final response matching the result schema:",
             '{"result": "pass", "summary": "<brief summary>"}',
-            "or if the task cannot be completed:",
+            "or if human intervention or operator decision is required that cannot be resolved",
+            "by retrying:",
+            (
+                '{"result": "needs_human", '
+                '"reason_code": "operator_decision_required" | "instruction_conflict" | '
+                '"external_prerequisite", "summary": "<actionable summary>"}'
+            ),
+            "or if the task cannot be completed due to execution failure:",
             '{"result": "failure", "summary": "<reason for failure>"}',
             "",
             "Leave the worktree in a recoverable state.",
