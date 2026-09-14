@@ -56,6 +56,32 @@ def test_status_verbose_shows_needs_human_reason(tmp_path: Path) -> None:
     assert "push failed (PERMISSION_DENIED): denied" in res.output
 
 
+def test_status_verbose_shows_needs_human_reason_code(tmp_path: Path) -> None:
+    """#300: a NEEDS_HUMAN task's reason_code must be visible in `subsched status --verbose`."""
+    store = JsonStateStore(tmp_path)
+    task = Task.from_issue(Issue(number=104, title="Operator decision task"))
+    task = (
+        task.transition(TaskState.DISPATCHED, current_agent="claude")
+        .transition(TaskState.IN_PROGRESS, current_agent="claude")
+        .transition(
+            TaskState.NEEDS_HUMAN,
+            current_agent="claude",
+            reason=(
+                "agent requested human intervention "
+                "(operator_decision_required): need design approval"
+            ),
+            reason_code="operator_decision_required",
+        )
+    )
+    store.save_tasks((task,))
+
+    res = runner.invoke(app, ["--repository", str(tmp_path), "status", "--verbose"])
+    assert res.exit_code == 0
+    assert "#104" in res.output
+    assert "reason code: operator_decision_required" in res.output
+    assert "need design approval" in res.output
+
+
 def test_status_verbose_shows_task_runtime_start(tmp_path: Path) -> None:
     """Regression test for #137: the durable Task-level runtime start (distinct from
     execution.agent_timeout_seconds, a per-invocation config value) must be visible in

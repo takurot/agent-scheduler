@@ -370,6 +370,10 @@ class Task:
     updated_at: datetime | None = None
     description: str = ""
     needs_human_reason: str | None = None
+    # #300: structured reason code when status is NEEDS_HUMAN. Valid member of
+    # NEEDS_HUMAN_REASON_CODES (or None). Durably persisted so downstream tools,
+    # MCP, and CLI can triage operator-blocked tasks programmatically without regex.
+    needs_human_reason_code: str | None = None
     # #137: wall-clock timestamp of the task's first dispatch, preserved across
     # failover/retry/restart (never reset by .transition()) so execution.max_task_runtime
     # can be enforced as a durable budget for the whole Task, not just a single attempt.
@@ -398,6 +402,15 @@ class Task:
     # (retry, failover, next stage) resolves a new stage/model.
     dispatch_stage: str | None = None
     dispatch_model: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.needs_human_reason_code is not None
+            and self.needs_human_reason_code not in NEEDS_HUMAN_REASON_CODES
+        ):
+            raise ValueError(
+                f"invalid needs_human_reason_code: {self.needs_human_reason_code!r}"
+            )
 
     @property
     def effective_model(self) -> str:
@@ -431,16 +444,20 @@ class Task:
         increment_attempt: bool = False,
         now: datetime | None = None,
         reason: str | None = None,
+        reason_code: str | None = None,
     ) -> Task:
         if status not in ALLOWED_TRANSITIONS[self.status]:
             raise StateTransitionError(f"invalid transition: {self.status} -> {status}")
+        resolved_reason = reason if status is TaskState.NEEDS_HUMAN else None
+        resolved_reason_code = reason_code if status is TaskState.NEEDS_HUMAN else None
         return replace(
             self,
             status=status,
             current_agent=current_agent,
             attempt=self.attempt + int(increment_attempt),
             updated_at=now or datetime.now(UTC),
-            needs_human_reason=reason,
+            needs_human_reason=resolved_reason,
+            needs_human_reason_code=resolved_reason_code,
         )
 
     def with_worktree(self, worktree: str) -> Task:
@@ -468,6 +485,7 @@ class Task:
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "description": self.description,
             "needs_human_reason": self.needs_human_reason,
+            "needs_human_reason_code": self.needs_human_reason_code,
             "run_started_at": self.run_started_at.isoformat() if self.run_started_at else None,
             "plan_revisions": self.plan_revisions,
             "plan_approved": self.plan_approved,
@@ -480,6 +498,7 @@ class Task:
     def from_dict(cls, value: dict[str, Any]) -> Task:
         try:
             updated = value.get("updated_at")
+            reason_code_raw = value.get("needs_human_reason_code")
             return cls(
                 task_id=str(value["task_id"]),
                 issue_number=int(value["issue_number"]),
@@ -503,6 +522,9 @@ class Task:
                 updated_at=datetime.fromisoformat(updated) if updated else None,
                 description=str(value.get("description", "")),
                 needs_human_reason=value.get("needs_human_reason"),
+                needs_human_reason_code=(
+                    str(reason_code_raw) if reason_code_raw is not None else None
+                ),
                 run_started_at=(
                     datetime.fromisoformat(value["run_started_at"])
                     if value.get("run_started_at")

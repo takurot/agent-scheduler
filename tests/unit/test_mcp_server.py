@@ -97,6 +97,7 @@ def test_get_status_counts_and_verbose(tmp_path: Path) -> None:
     assert result["task_counts"] == {"READY": 2, "COMPLETE": 1}
     assert len(result["tasks"]) == 3
     assert result["tasks"][0]["issue_number"] == 1
+    assert "needs_human_reason_code" in result["tasks"][0]
 
 
 # --- inspect_task ----------------------------------------------------------------
@@ -142,6 +143,7 @@ def test_inspect_task_with_handoff_and_commits(tmp_path: Path) -> None:
     assert result["handoff"] is not None
     assert result["handoff"]["goal"] == "Do it"
     assert len(result["recent_commits"]) == 1
+    assert "needs_human_reason_code" in result
 
 
 def test_inspect_task_git_log_uses_safe_env(

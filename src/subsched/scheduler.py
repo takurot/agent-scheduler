@@ -1723,8 +1723,15 @@ class Scheduler:
             )
         if non_escalating:
             return None
+        reason = readback.reason
+        if reason_code is not None:
+            reason = f"{readback.reason} (agent signaled: {reason_code})"
         return task.transition(
-            TaskState.NEEDS_HUMAN, current_agent=agent, now=dispatched_at, reason=readback.reason
+            TaskState.NEEDS_HUMAN,
+            current_agent=agent,
+            now=dispatched_at,
+            reason=reason,
+            reason_code=reason_code,
         )
 
     def _has_available_alternative_agent(
@@ -1783,7 +1790,11 @@ class Scheduler:
                 reason = f"agent requested human intervention ({result.reason_code})"
 
             final = task.transition(
-                TaskState.NEEDS_HUMAN, current_agent=agent, now=now, reason=reason
+                TaskState.NEEDS_HUMAN,
+                current_agent=agent,
+                now=now,
+                reason=reason,
+                reason_code=result.reason_code,
             )
             self.queue = self.queue.replace(final)
             self._log(

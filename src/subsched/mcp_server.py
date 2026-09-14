@@ -125,6 +125,7 @@ def _task_to_summary(task: Task) -> dict[str, Any]:
         "current_agent": task.current_agent,
         "pr": task.pr,
         "needs_human_reason": task.needs_human_reason,
+        "needs_human_reason_code": task.needs_human_reason_code,
     }
 
 
