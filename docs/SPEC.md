@@ -1953,6 +1953,10 @@ Agent自体の失敗（`per_agent_failures`が`max_agent_failures`に達する�
 - **構造化 reason_code の永続化（#300）**: `Task.needs_human_reason_code`に型付けされた固定enum（`operator_decision_required`, `instruction_conflict`, `external_prerequisite`）が永続化され、`Task.to_dict()` / `from_dict()`、`subsched status --verbose`、およびMCPツール（`subsched_inspect_task`, `subsched_get_status`）で参照できる。`NEEDS_HUMAN`以外の状態へ遷移した際は自動的に`null`にリセットされる。
 - **Handoff整合性の維持**: handoffがstaleまたは不正な場合は#145に従いfail-closedで`NEEDS_HUMAN`へ遷移し、integrity errorと元の`reason_code`の両方が構造化ログ（`handoff_readback`）に記録される。さらに#300により、エスカレーション後の`Task.needs_human_reason_code`にもAgentの`reason_code`が保持され、`needs_human_reason`の文字列表現にも`f"{readback.reason} (agent signaled: {reason_code})"`として併記される。
 
+### ワークフローステージプロンプトでのサポート（#301）
+
+通常のワーカープロンプト（`build_worker_prompt()`）およびリビジョンプロンプト（`build_revision_prompt()`）に加え、マルチステージワークフロー（#280）の計画フェーズプロンプト（`build_plan_prompt()`）でも`needs_human`スキーマが指示される。要件の矛盾や前提条件の欠落、設計判断が必要な場合に計画担当Agentが`needs_human`を返すと、計画ファイルを未生成のまま即時に`TaskState.NEEDS_HUMAN`へ安全に停止し、無駄なリビジョンループや汎用エラーエスカレーションを防止する。
+
 ---
 
 # 50. Loop Guard

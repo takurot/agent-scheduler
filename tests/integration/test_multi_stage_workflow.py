@@ -156,3 +156,40 @@ def test_plan_review_exceeding_max_revisions_escalates_to_needs_human(tmp_path: 
     task = scheduler.tasks[0]
     assert task.status is TaskState.NEEDS_HUMAN
     assert task.plan_revisions == 2
+
+
+def test_planning_stage_needs_human_stops_without_creating_plan(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 12, 22, tzinfo=UTC)
+    worker = PlanWritingWorker(
+        {
+            (1, "claude"): (
+                AgentResult(
+                    AgentResultKind.NEEDS_HUMAN,
+                    output=(
+                        '{"result": "needs_human", '
+                        '"reason_code": "operator_decision_required", '
+                        '"summary": "Waiting for architectural decision"}'
+                    ),
+                    reason_code="operator_decision_required",
+                ),
+            )
+        }
+    )
+    scheduler = _scheduler(tmp_path, worker)
+    scheduler.discover((Issue(number=1, title="one"),))
+
+    scheduler.run_until_waiting((available("claude", now),), now=now)
+
+    task = scheduler.tasks[0]
+    assert task.status is TaskState.NEEDS_HUMAN
+    assert task.plan_approved is False
+    assert task.plan_revisions == 0
+    assert task.needs_human_reason is not None
+    assert "operator_decision_required" in task.needs_human_reason
+    assert "Waiting for architectural decision" in task.needs_human_reason
+    # No plan file should exist
+    assert task.worktree is not None
+    plan_file = Path(task.worktree) / plan_path(task.issue_number)
+    assert not plan_file.exists()
+    assert worker.dispatches == [(1, "claude")]
+

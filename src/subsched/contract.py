@@ -224,6 +224,18 @@ def build_plan_prompt(task: Task) -> str:
         "the tests to add or update, and any open risks or ambiguities.",
         "Keep the plan focused on what AGENTS.md §2 (Simplicity First) would accept:",
         "the minimum design that solves the problem, with no speculative scope.",
+        "",
+        "When you have finished creating the plan, provide your final response matching:",
+        '{"result": "pass", "summary": "<brief summary>"}',
+        "or if human intervention, architectural decision, or external prerequisites are",
+        "required before a plan can be formed (do NOT write the plan file in this case):",
+        (
+            '{"result": "needs_human", '
+            '"reason_code": "operator_decision_required" | "instruction_conflict" | '
+            '"external_prerequisite", "summary": "<actionable summary>"}'
+        ),
+        "or if the task cannot be completed due to execution failure:",
+        '{"result": "failure", "summary": "<reason for failure>"}',
     ]
     return "\n".join(lines) + "\n"
 
