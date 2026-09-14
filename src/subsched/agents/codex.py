@@ -55,6 +55,12 @@ class CodexCliMetadata:
     supports_ignore_rules: bool
     supports_ignore_user_config: bool
     approval_mode: CodexApprovalMode
+    # #296: whether the installed CLI's `exec --help` advertises a `--model` flag.
+    # NativeWorker/preflight consult this before adding `--model <model>` to the argv
+    # for an agent with an explicit stage/default model configured, so an unsupported
+    # CLI fails closed at preflight instead of the flag being silently ignored or
+    # rejected mid-dispatch.
+    supports_model_flag: bool = False
 
 
 REQUIRED_CODEX_HEADLESS_FLAGS = frozenset(
@@ -103,6 +109,7 @@ def parse_codex_cli_metadata(*, version_output: str, help_output: str) -> CodexC
         supports_ignore_rules=True,
         supports_ignore_user_config=True,
         approval_mode=approval_mode,
+        supports_model_flag="--model" in help_output,
     )
 
 
@@ -155,6 +162,11 @@ def build_codex_headless_argv(
     sandbox: str,
     output_schema: Path,
     cwd: Path,
+    # #296: the stage-resolved model (config `agents.codex.models`), passed through as a
+    # single argv element -- never shell-interpolated. None (the default) omits the flag
+    # entirely, which preserves the provider CLI's own default and is the only behavior
+    # possible before this option existed.
+    model: str | None = None,
 ) -> tuple[str, ...]:
     """Single source of truth for the non-interactive `codex exec` argv, shared by the
     manual live probe (`build_codex_exec_argv`) and `NativeWorker`, so both always agree
@@ -165,10 +177,12 @@ def build_codex_headless_argv(
         if approval_mode is CodexApprovalMode.APPROVE_FOR_ME
         else (CODEX_ASK_FOR_APPROVAL_FLAG, "never")
     )
+    model_args = ("--model", model) if model else ()
     return (
         executable,
         *approval_args,
         "exec",
+        *model_args,
         "--strict-config",
         "--ignore-user-config",
         "--ignore-rules",

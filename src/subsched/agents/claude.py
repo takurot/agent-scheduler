@@ -55,6 +55,11 @@ class ClaudeCliMetadata:
     dangerous_permission_bypass_available: bool
     permission_mode_is_os_sandbox: bool
     native_execution_allowed: bool
+    # #296: whether the installed CLI's `--help` advertises a `--model` flag. Consulted
+    # before NativeWorker/preflight add `--model <model>` to the argv for an agent with
+    # an explicit stage/default model configured, so an unsupported CLI fails closed at
+    # preflight instead of the flag being silently ignored or rejected mid-dispatch.
+    supports_model_flag: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +130,7 @@ def parse_claude_cli_metadata(*, version_output: str, help_output: str) -> Claud
         dangerous_permission_bypass_available="--dangerously-skip-permissions" in help_output,
         permission_mode_is_os_sandbox=False,
         native_execution_allowed=False,
+        supports_model_flag="--model" in help_output,
     )
 
 

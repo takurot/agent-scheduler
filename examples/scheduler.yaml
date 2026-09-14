@@ -20,9 +20,31 @@ agents:
   claude:
     enabled: true
     priority: 100
+    # Optional (#296). Per-execution-stage model selection. All keys are optional;
+    # `default` is used for any stage without its own entry, and a stage/agent with no
+    # model configured at all uses the provider CLI's own default (no --model flag is
+    # added). Model names are examples only -- set real model identifiers your Claude
+    # subscription supports; the installed CLI must advertise `--model` support, or
+    # preflight fails closed instead of silently dropping the flag.
+    # models:
+    #   default: sonnet
+    #   planning: opus
+    #   plan_review: opus
+    #   implementation: sonnet
+    #   pr_review: opus
+    #   revision: sonnet
   codex:
     enabled: true
     priority: 90
+    # Optional (#296). Same stage keys as agents.claude.models; resolution order is
+    # stage-specific model, then `default`, then the provider CLI's own default.
+    # models:
+    #   default: standard-model
+    #   planning: advanced-model
+    #   plan_review: advanced-model
+    #   implementation: standard-model
+    #   pr_review: advanced-model
+    #   revision: standard-model
 
 routing:
   strategy: capacity-aware
