@@ -309,6 +309,21 @@ def detect_dependency_cycles(tasks: Iterable[Task]) -> set[int]:
     return in_cycle
 
 
+def resolve_stage(task: Task) -> str:
+    """#296: resolve the fixed execution stage key ('planning', 'plan_review',
+    'implementation', 'pr_review', or 'revision') for a task based on its current
+    status and dispatch_status."""
+    if task.status is TaskState.PLANNING:
+        return "planning"
+    if task.status is TaskState.PLAN_REVIEW:
+        return "plan_review"
+    if task.dispatch_status is TaskState.PR_REVIEW:
+        return "pr_review"
+    if task.dispatch_status is TaskState.REVISING:
+        return "revision"
+    return "implementation"
+
+
 @dataclass(frozen=True, slots=True)
 class Task:
     task_id: str
@@ -360,6 +375,16 @@ class Task:
     # touched by .transition() which preserves it via dataclasses.replace) so it also
     # survives a Scheduler restart mid-dispatch.
     dispatch_status: TaskState | None = None
+    # #296: durable record of the effective execution stage and stage-resolved model for
+    # this dispatch. Survives a Scheduler crash/restart mid-dispatch so the in-flight
+    # invocation can be reproduced faithfully, and is replaced whenever a fresh dispatch
+    # (retry, failover, next stage) resolves a new stage/model.
+    dispatch_stage: str | None = None
+    dispatch_model: str | None = None
+
+    @property
+    def effective_model(self) -> str:
+        return self.dispatch_model or "provider-default"
 
     @classmethod
     def from_issue(cls, issue: Issue, *, worktree: str | None = None) -> Task:
@@ -430,6 +455,8 @@ class Task:
             "plan_revisions": self.plan_revisions,
             "plan_approved": self.plan_approved,
             "dispatch_status": self.dispatch_status.value if self.dispatch_status else None,
+            "dispatch_stage": self.dispatch_stage,
+            "dispatch_model": self.dispatch_model,
         }
 
     @classmethod
@@ -471,6 +498,8 @@ class Task:
                     if value.get("dispatch_status")
                     else None
                 ),
+                dispatch_stage=value.get("dispatch_stage"),
+                dispatch_model=value.get("dispatch_model"),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("invalid task state") from error

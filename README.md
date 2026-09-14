@@ -326,6 +326,17 @@ agents:
   claude:
     enabled: true
     priority: 100
+    # Optional (#296): per-execution-stage model selection. Keys are `default` plus the
+    # five fixed stages below; any key you omit falls back to `default`, and if neither
+    # is set for a stage, no `--model` flag is added (the provider CLI's own default is
+    # used) -- this is also the behavior when `models:` is omitted entirely.
+    # models:
+    #   default: sonnet
+    #   planning: opus
+    #   plan_review: opus
+    #   implementation: sonnet
+    #   pr_review: opus
+    #   revision: sonnet
   codex:
     enabled: false
     priority: 90
@@ -394,6 +405,16 @@ resolved branch from `origin` and rebases onto the remote-tracking ref.
 The values shown for `billing.*`, `routing.*`, `pause_running_policy`, `tie_break`, and
 `close_issue` are the only currently supported values. Unsupported alternatives fail during
 configuration loading instead of being accepted and ignored.
+
+`agents.<name>.models` (#296) resolves per dispatch as: stage-specific model > `default` >
+provider CLI default (no `--model` flag). The five stage keys are fixed --
+`planning`, `plan_review`, `implementation`, `pr_review`, `revision` -- matching each
+`workflow.mode: multi-stage` execution point; `implementation` also covers the equivalent
+dispatch under `workflow.mode: standard`. Model names must be non-empty, contain no
+whitespace/control characters, and not start with `-`; native preflight additionally
+confirms the installed CLI advertises `--model` support for any agent with a configured
+model, and fails closed (instead of silently dropping the flag or falling back to a
+different model) if it does not.
 
 ---
 

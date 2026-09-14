@@ -19,6 +19,7 @@ from subsched.agents.codex import (
     CodexProbeConfig,
     CodexProbeSafetyError,
     build_codex_exec_argv,
+    build_codex_headless_argv,
     parse_codex_jsonl,
     run_codex_probe,
 )
@@ -1245,3 +1246,27 @@ def test_parse_codex_jsonl_rejects_unknown_item_type() -> None:
     res = parse_codex_jsonl(payload, returncode=0)
     assert res.kind is AgentResultKind.FAILURE
     assert res.output == "codex event stream malformed"
+
+
+def test_build_codex_headless_argv_omits_model_flag_by_default(tmp_path: Path) -> None:
+    argv = build_codex_headless_argv(
+        executable="codex",
+        approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+        sandbox="workspace-write",
+        output_schema=tmp_path / "schema.json",
+        cwd=tmp_path,
+    )
+    assert "--model" not in argv
+
+
+def test_build_codex_headless_argv_adds_model_as_single_argv_element(tmp_path: Path) -> None:
+    argv = build_codex_headless_argv(
+        executable="codex",
+        approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+        sandbox="workspace-write",
+        output_schema=tmp_path / "schema.json",
+        cwd=tmp_path,
+        model="advanced-model",
+    )
+    assert "--model" in argv
+    assert argv[argv.index("--model") + 1] == "advanced-model"

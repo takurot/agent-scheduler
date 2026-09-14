@@ -128,6 +128,90 @@ def test_native_worker_claude_argv_uses_flags_the_real_cli_accepts(tmp_path: Pat
     assert set(tools.split(",")) == {"Bash", "Edit", "Read"}
 
 
+def test_native_worker_omits_model_flag_when_no_policy_configured(tmp_path: Path) -> None:
+    mock_claude = MagicMock()
+    mock_claude.execute.return_value = AgentResult(AgentResultKind.PASS)
+    mock_codex = MagicMock()
+    mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(
+        claude_agent=mock_claude,
+        codex_agent=mock_codex,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+    )
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "claude")
+    assert "--model" not in mock_claude.execute.call_args[0][0].argv
+
+    worker.run(task, "codex")
+    assert "--model" not in mock_codex.execute.call_args[0][0].argv
+
+
+def test_native_worker_resolves_model_per_execution_stage(tmp_path: Path) -> None:
+    """#296: planning/plan_review/pr_review/revision use their configured stage model;
+    an ordinary implementation dispatch falls back to `default`."""
+    from dataclasses import replace
+
+    from subsched.config import AgentModelPolicy, AgentSettings
+    from subsched.models import TaskState
+
+    mock_claude = MagicMock()
+    mock_claude.execute.return_value = AgentResult(AgentResultKind.PASS)
+    mock_codex = MagicMock()
+    mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(
+        claude_agent=mock_claude,
+        codex_agent=mock_codex,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+        agents={
+            "claude": AgentSettings(
+                models=AgentModelPolicy(
+                    default="sonnet",
+                    planning="opus",
+                    plan_review="opus",
+                    pr_review="opus",
+                    revision="sonnet",
+                )
+            ),
+            "codex": AgentSettings(
+                models=AgentModelPolicy(default="standard-model", planning="advanced-model")
+            ),
+        },
+    )
+    base = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, base)
+
+    def claude_model_for(task: Task) -> str | None:
+        worker.run(task, "claude")
+        argv = mock_claude.execute.call_args[0][0].argv
+        return argv[argv.index("--model") + 1] if "--model" in argv else None
+
+    def codex_model_for(task: Task) -> str | None:
+        worker.run(task, "codex")
+        argv = mock_codex.execute.call_args[0][0].argv
+        return argv[argv.index("--model") + 1] if "--model" in argv else None
+
+    planning_task = replace(base, status=TaskState.PLANNING)
+    assert claude_model_for(planning_task) == "opus"
+    assert codex_model_for(planning_task) == "advanced-model"
+
+    plan_review_task = replace(base, status=TaskState.PLAN_REVIEW)
+    assert claude_model_for(plan_review_task) == "opus"
+
+    implementation_task = base
+    assert claude_model_for(implementation_task) == "sonnet"
+    assert codex_model_for(implementation_task) == "standard-model"
+
+    pr_review_task = replace(base, dispatch_status=TaskState.PR_REVIEW)
+    assert claude_model_for(pr_review_task) == "opus"
+
+    revising_task = replace(base, dispatch_status=TaskState.REVISING)
+    assert claude_model_for(revising_task) == "sonnet"
+
+
 def test_native_worker_unsupported_agent(tmp_path: Path) -> None:
     worker = NativeWorker()
     task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))

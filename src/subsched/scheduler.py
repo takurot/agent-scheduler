@@ -5,13 +5,13 @@ import os
 import secrets
 import time
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from subsched.config import WorkflowConfig, validate_base_branch
+from subsched.config import AgentSettings, WorkflowConfig, validate_base_branch
 from subsched.contract import bootstrap_task_files
 from subsched.events import Clock, Event, EventSource, EventType, SystemClock
 from subsched.github.checks import CICheckState, PRChecksStatus
@@ -26,6 +26,7 @@ from subsched.models import (
     TaskState,
     detect_dependency_cycles,
     parse_dependencies,
+    resolve_stage,
 )
 from subsched.plan_review import PlanVerdictError, parse_verdict, plan_path
 from subsched.queue import TaskQueue
@@ -184,6 +185,8 @@ class Scheduler:
         # automated review round in between).
         pr_review_enabled: bool = False,
         max_review_cycles: int = 3,
+        # #296: per-agent model policy (config `agents.<provider>.models`).
+        agents: Mapping[str, AgentSettings] | None = None,
     ) -> None:
         self.store = store
         self.router = router
@@ -195,6 +198,7 @@ class Scheduler:
         self.structured_logger = structured_logger
         self.handoff_continuous = handoff_continuous
         self.run_id = run_id or secrets.token_hex(6)
+        self.agents = agents or {}
         if max_task_runtime_seconds is not None and max_task_runtime_seconds <= 0:
             raise ValueError("max_task_runtime_seconds must be positive")
         self.max_task_runtime_seconds = max_task_runtime_seconds
@@ -289,6 +293,16 @@ class Scheduler:
             message=message,
             data=merged_data,
         )
+
+    def _resolve_model(self, agent: str, stage: str) -> str | None:
+        """#296: resolve the effective model for this agent and stage from config."""
+        agent_settings = self.agents.get(agent)
+        if agent_settings is not None:
+            return agent_settings.models.resolve(stage)
+        worker_agents: Mapping[str, AgentSettings] = getattr(self.worker, "agents", {})
+        if agent in worker_agents:
+            return worker_agents[agent].models.resolve(stage)
+        return None
 
     def _reconcile_recovery(self) -> None:
         """#164, #203: reconcile every DISPATCHED/IN_PROGRESS/VERIFYING task against its
@@ -530,20 +544,28 @@ class Scheduler:
             # PLANNING at the bottom of this loop (to durably persist the incremented
             # plan_revisions counter before the next attempt starts); only transition
             # here on the loop's first iteration, when current_task is still DISPATCHED.
+            stage = "planning"
+            model = self._resolve_model(agent, stage)
             if current_task.status is TaskState.PLANNING:
                 planning = current_task
             else:
                 planning = current_task.transition(
                     TaskState.PLANNING, current_agent=agent, now=now
                 )
-                self.queue = self.queue.replace(planning)
-                self._persist()
+            planning = replace(planning, dispatch_stage=stage, dispatch_model=model)
+            self.queue = self.queue.replace(planning)
+            self._persist()
             self._log(
                 "dispatch",
                 issue_number=planning.issue_number,
                 agent=agent,
                 task_id=planning.task_id,
-                data={"attempt": planning.attempt, "stage": "planning"},
+                data={
+                    "attempt": planning.attempt,
+                    "stage": stage,
+                    "agent": agent,
+                    "model": model or "provider-default",
+                },
             )
             result = self._run_stage_worker(planning, agent, lease_nonce)
             if result.kind is not AgentResultKind.PASS:
@@ -576,7 +598,10 @@ class Scheduler:
                 self._persist()
                 return "approved", approved
 
+            stage = "plan_review"
+            model = self._resolve_model(agent, stage)
             review = planning.transition(TaskState.PLAN_REVIEW, current_agent=agent, now=now)
+            review = replace(review, dispatch_stage=stage, dispatch_model=model)
             self.queue = self.queue.replace(review)
             self._persist()
             self._log(
@@ -584,7 +609,12 @@ class Scheduler:
                 issue_number=review.issue_number,
                 agent=agent,
                 task_id=review.task_id,
-                data={"attempt": review.attempt, "stage": "plan_review"},
+                data={
+                    "attempt": review.attempt,
+                    "stage": stage,
+                    "agent": agent,
+                    "model": model or "provider-default",
+                },
             )
             review_result = self._run_stage_worker(review, agent, lease_nonce)
             if review_result.kind is not AgentResultKind.PASS:
@@ -1091,11 +1121,9 @@ class Scheduler:
                 )
                 if outcome == "terminal" or staged is None:
                     return True
-                running = staged
-            else:
-                running = dispatched.transition(
-                    TaskState.IN_PROGRESS, current_agent=agent, now=current
-                )
+                stage = "implementation"
+                model = self._resolve_model(agent, stage)
+                running = replace(staged, dispatch_stage=stage, dispatch_model=model)
                 self.queue = self.queue.replace(running)
                 self._persist()
                 self._log(
@@ -1103,7 +1131,33 @@ class Scheduler:
                     issue_number=running.issue_number,
                     agent=agent,
                     task_id=running.task_id,
-                    data={"attempt": running.attempt},
+                    data={
+                        "attempt": running.attempt,
+                        "stage": stage,
+                        "agent": agent,
+                        "model": model or "provider-default",
+                    },
+                )
+            else:
+                running = dispatched.transition(
+                    TaskState.IN_PROGRESS, current_agent=agent, now=current
+                )
+                stage = resolve_stage(running)
+                model = self._resolve_model(agent, stage)
+                running = replace(running, dispatch_stage=stage, dispatch_model=model)
+                self.queue = self.queue.replace(running)
+                self._persist()
+                self._log(
+                    "dispatch",
+                    issue_number=running.issue_number,
+                    agent=agent,
+                    task_id=running.task_id,
+                    data={
+                        "attempt": running.attempt,
+                        "stage": stage,
+                        "agent": agent,
+                        "model": model or "provider-default",
+                    },
                 )
 
             dispatch_started = time.monotonic()

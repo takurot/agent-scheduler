@@ -830,6 +830,46 @@ agents:
 
 これは設定可能。サポート対象エージェントは `claude` および `codex`。未知のエージェント名は設定読み込み時に fail-fast する。また、少なくとも 1 つのエージェントが enabled でなければならない。
 
+## 24.1 Per-Stage Model Policy (#296)
+
+`agents.<name>.models` はオプション。各エージェントごとに `default` と5つの固定 execution stage
+key (`planning`, `plan_review`, `implementation`, `pr_review`, `revision`) にモデル名を割り当てられる：
+
+```yaml
+agents:
+  claude:
+    enabled: true
+    priority: 100
+    models:
+      default: sonnet
+      planning: opus
+      plan_review: opus
+      implementation: sonnet
+      pr_review: opus
+      revision: sonnet
+```
+
+解決順は **stage 固有のモデル > `default` > provider CLI 自身のデフォルト（`--model` フラグなし）** で
+一意。`models:` を省略した既存 config は、全 stage で `--model` フラグを付与しない従来どおりの挙動を保つ。
+
+stage key は Router の provider 選択とは独立している。Router は従来どおり capacity-aware に
+provider（`claude`/`codex`）だけを選び、provider 決定後、dispatch 直前に `NativeWorker` が
+`task.status`/`task.dispatch_status` から一意な execution stage を導出し、選ばれた provider の
+`AgentModelPolicy.resolve(stage)` でモデルを解決する。
+
+- `planning`: `TaskState.PLANNING`
+- `plan_review`: `TaskState.PLAN_REVIEW`
+- `implementation`: 通常の実装 dispatch（`workflow.mode: standard` を含む）
+- `pr_review`: `dispatch_status == PR_REVIEW`
+- `revision`: `dispatch_status == REVISING`
+
+モデル名は空文字・制御/空白文字・`-` 始まりを拒否し（`ConfigError` で fail-closed）、単一の argv
+要素として shell 解釈なしで Claude/Codex CLI へ渡る。未知の `models` key も fail-closed。
+
+明示モデルが設定された agent は、native preflight (`validate_native_preflight`) がインストール済み
+CLI の `--help`/`exec --help` 出力から `--model` フラグの対応を確認する。未対応の CLI は dispatch 前に
+fail closed し、別モデルや API/metered usage への自動 fallback は行わない。
+
 ---
 
 # 25. Worker Prompt
@@ -2028,10 +2068,25 @@ agents:
   claude:
     enabled: true
     priority: 100
+    # optional (#296); see §24 for stage keys and resolution order
+    models:
+      default: sonnet
+      planning: opus
+      plan_review: opus
+      implementation: sonnet
+      pr_review: opus
+      revision: sonnet
 
   codex:
     enabled: true
     priority: 90
+    models:
+      default: standard-model
+      planning: advanced-model
+      plan_review: advanced-model
+      implementation: standard-model
+      pr_review: advanced-model
+      revision: standard-model
 
 
 routing:
