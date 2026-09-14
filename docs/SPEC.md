@@ -1950,7 +1950,8 @@ Agent自体の失敗（`per_agent_failures`が`max_agent_failures`に達する�
 - **summary**: control character除去、byte limit（1,000 bytes）、secret redactionを経て保持される。
 - **リトライ抑止**: valid/fresh handoffを伴う`NEEDS_HUMAN`は、同一/別Agentへリトライせず、`attempt`や`per_agent_failures`を消費せずに直ちに`TaskState.NEEDS_HUMAN`へ遷移する。
 - **Actionable reason保持**: `Task.needs_human_reason`にvalidated `reason_code`とsanitized summary（またはsemantic handoffの`Next Action`）が永続化される。
-- **Handoff整合性の維持**: handoffがstaleまたは不正な場合は#145に従いfail-closedで`NEEDS_HUMAN`へ遷移し、integrity errorと元の`reason_code`の両方が構造化ログ（`handoff_readback`）に記録される。
+- **構造化 reason_code の永続化（#300）**: `Task.needs_human_reason_code`に型付けされた固定enum（`operator_decision_required`, `instruction_conflict`, `external_prerequisite`）が永続化され、`Task.to_dict()` / `from_dict()`、`subsched status --verbose`、およびMCPツール（`subsched_inspect_task`, `subsched_get_status`）で参照できる。`NEEDS_HUMAN`以外の状態へ遷移した際は自動的に`null`にリセットされる。
+- **Handoff整合性の維持**: handoffがstaleまたは不正な場合は#145に従いfail-closedで`NEEDS_HUMAN`へ遷移し、integrity errorと元の`reason_code`の両方が構造化ログ（`handoff_readback`）に記録される。さらに#300により、エスカレーション後の`Task.needs_human_reason_code`にもAgentの`reason_code`が保持され、`needs_human_reason`の文字列表現にも`f"{readback.reason} (agent signaled: {reason_code})"`として併記される。
 
 ---
 

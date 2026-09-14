@@ -158,6 +158,7 @@ def test_issue_293_reproduction_worker_needs_human_stops_in_one_dispatch(
     assert task.status is TaskState.NEEDS_HUMAN
     assert task.attempt == 0
     assert task.per_agent_failures == ()
+    assert task.needs_human_reason_code == "operator_decision_required"
     assert task.needs_human_reason is not None
     assert "operator_decision_required" in task.needs_human_reason
     assert "container isolation design approval required" in task.needs_human_reason
@@ -196,8 +197,10 @@ def test_worker_needs_human_with_stale_handoff_escalates_and_logs_reason_code(
     assert task.status is TaskState.NEEDS_HUMAN
     assert task.attempt == 0
     assert task.per_agent_failures == ()
+    assert task.needs_human_reason_code == "external_prerequisite"
     assert task.needs_human_reason is not None
     assert "did not advance" in task.needs_human_reason
+    assert "external_prerequisite" in task.needs_human_reason
 
     # Check structured log
     log_content = log_buffer.getvalue()
@@ -309,6 +312,7 @@ def test_worker_needs_human_persists_and_restores_across_restart(
     recovered_task = restarted.tasks[0]
     assert recovered_task.status is TaskState.NEEDS_HUMAN
     assert recovered_task.attempt == 0
+    assert recovered_task.needs_human_reason_code == "operator_decision_required"
     assert recovered_task.needs_human_reason is not None
     assert "operator_decision_required" in recovered_task.needs_human_reason
     assert "approve container isolation architecture" in recovered_task.needs_human_reason
