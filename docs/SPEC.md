@@ -1952,6 +1952,10 @@ Agent自体の失敗（`per_agent_failures`が`max_agent_failures`に達する�
 - **Actionable reason保持**: `Task.needs_human_reason`にvalidated `reason_code`とsanitized summary（またはsemantic handoffの`Next Action`）が永続化される。
 - **Handoff整合性の維持**: handoffがstaleまたは不正な場合は#145に従いfail-closedで`NEEDS_HUMAN`へ遷移し、integrity errorと元の`reason_code`の両方が構造化ログ（`handoff_readback`）に記録される。
 
+### ワークフローステージプロンプトでのサポート（#301）
+
+通常のワーカープロンプト（`build_worker_prompt()`）およびリビジョンプロンプト（`build_revision_prompt()`）に加え、マルチステージワークフロー（#280）の計画フェーズプロンプト（`build_plan_prompt()`）でも`needs_human`スキーマが指示される。要件の矛盾や前提条件の欠落、設計判断が必要な場合に計画担当Agentが`needs_human`を返すと、計画ファイルを未生成のまま即時に`TaskState.NEEDS_HUMAN`へ安全に停止し、無駄なリビジョンループや汎用エラーエスカレーションを防止する。
+
 ---
 
 # 50. Loop Guard
