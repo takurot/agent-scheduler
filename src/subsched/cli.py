@@ -319,6 +319,7 @@ def run(
     # NativeWorker() then falls back to its own default, which only matters for
     # dry-run/discovery-only paths that never call worker.run().
     codex_approval_mode: CodexApprovalMode | None = None
+    isolation_runtime_executable: Path | None = None
     if allow_native and not dry_run:
         if not subscription_billing_verified:
             typer.echo(
@@ -348,6 +349,7 @@ def run(
         report = validate_native_preflight(
             enabled_agents=enabled_agents,
             write_policy_requires_auth=effective_push,
+            isolation_config=cfg.isolation,
         )
         if not report.passed:
             missing_names = [c.name for c in report.checks if not c.found]
@@ -374,6 +376,19 @@ def run(
                     err=True,
                 )
                 raise typer.Exit(2)
+        isolation_check = report.get("isolation")
+        if (
+            isolation_check is None
+            or not isolation_check.compatible
+            or isolation_check.executable_path is None
+        ):
+            typer.echo(
+                "Native execution pre-flight doctor check failed: isolation runtime "
+                "attestation is missing",
+                err=True,
+            )
+            raise typer.Exit(2)
+        isolation_runtime_executable = isolation_check.executable_path
         typer.echo(
             "Pre-flight safety checks passed: subscription verified, API fallback disabled."
         )
@@ -448,6 +463,9 @@ def run(
                 # #291: None is permitted for Claude-only construction; NativeWorker
                 # refuses any Codex dispatch unless preflight selected a concrete mode.
                 codex_approval_mode=codex_approval_mode,
+                isolation_config=cfg.isolation,
+                isolation_runtime_executable=isolation_runtime_executable,
+                isolation_state_root=context.store.runtime_dir / "native-isolation",
             ),
             worktree_root=worktree_root,
             worktree_adapter=worktree_adapter,
@@ -919,15 +937,31 @@ def cancel(ctx: typer.Context, issue: Annotated[int, typer.Argument(min=1)]) -> 
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    ctx: typer.Context,
+    config: Annotated[
+        Path | None,
+        typer.Option("--config", exists=True, dir_okay=False, resolve_path=True),
+    ] = None,
+) -> None:
     """Check required local executables and warn on an overly broad `gh` token scope.
 
     Reads the locally cached `gh` auth state to report token scopes; never prints the token
     value and never invokes Claude or Codex, so no Agent capacity is consumed.
     """
+    context: Context = ctx.obj
+    try:
+        cfg = _load_effective_config(context.repository, config)
+    except ConfigError as error:
+        typer.echo(f"Configuration error: {error}", err=True)
+        raise typer.Exit(1) from error
+    enabled_agents = tuple(
+        name for name, settings in cfg.agents.items() if settings.enabled
+    )
     report = validate_native_preflight(
-        enabled_agents=tuple(SUPPORTED_AGENTS),
+        enabled_agents=enabled_agents,
         write_policy_requires_auth=False,
+        isolation_config=cfg.isolation,
     )
     for check in report.checks:
         typer.echo(f"{check.name:<8} {'FOUND' if check.found else 'MISSING'}")

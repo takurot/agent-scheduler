@@ -2626,7 +2626,7 @@ production deploy
 
 MVPは前者まで。
 
-## 72.1 既知の制約: OSレベルsandboxは未実装
+## 72.1 Legacy unisolated native mechanism (dispatch prohibited)
 
 Native worker（`NativeWorker`）は、Claude Code CLIを`--permission-mode bypassPermissions`で起動する。これはtask worktree内での自律実行を機能させるために必要（`--print`非対話モードでは、`bypassPermissions`以外の承認モードは確認できる人間が存在しないため全アクションを拒否してしまい、実質何もできない）だが、以下を理解した上で運用すること。
 
@@ -2634,7 +2634,103 @@ Native worker（`NativeWorker`）は、Claude Code CLIを`--permission-mode bypa
 - PRレビューは、エージェントが提案するコード差分（コミット内容）のみを検証する。セッション中に実行されたBashコマンドの副作用（worktree外のファイル変更、データの持ち出し等）はPRレビューの対象に含まれない。
 - 環境変数は`COMMON_ENV_ALLOWLIST`でフィルタしてから子プロセスへ渡すため、secretの環境変数経由での露出は防いでいるが、ファイルシステム上のsecret（例: `~/.ssh`）へのアクセス自体は制限していない。
 
-したがって現状のMVPは、**信頼できるIssue・信頼できるリポジトリでのみ**使用することを前提とする。真のOSレベルsandbox（コンテナ実行、ファイルシステム・ネットワークの隔離）は本Security Boundaryが要求する将来の強化項目であり、Phase 2実装時点では未達成である。
+This historical mechanism is not an admissible execution backend. The default
+`isolation.backend: disabled` state fails closed before provider dispatch. Trusting an
+Issue or repository does not enable an unisolated fallback.
+
+
+## 72.2 Native container isolation (issue #293)
+
+The selected design is Scheduler-managed container isolation, initially targeting a
+mechanically verified Linux Docker backend. There is no legacy trusted-host
+fallback in this target design. Section 72.1 describes the unisolated execution
+mechanism, which is now blocked by native dispatch and preflight admission checks.
+`isolation.backend: container` enables dispatch only after runtime attestation succeeds.
+Native opt-in and billing verification cannot override a failed isolation check.
+
+### Threat model and authority
+
+Trust the Scheduler, host kernel/container runtime, and operator-controlled immutable
+runner configuration. Treat issue text, repository instructions, dependency scripts,
+worker commands, and worker-written state as hostile. A worker may execute arbitrary
+code, follow symlinks, traverse parent paths, use absolute paths, attempt mounts,
+connect directly to IP addresses, and create detached child processes. Prompt rules,
+CLI approval modes, environment filtering, and PR review do not enforce this boundary.
+Kernel/runtime compromise is outside the container guarantee; unavailable or
+unverified runtime controls must block dispatch rather than reduce isolation.
+
+### Filesystem, Git, and credentials
+
+Expose only the validated task workspace and invocation-specific Git metadata needed for
+local commits and recovery. Do not mount the host repository's common Git directory,
+other worktrees, Scheduler state, runtime sockets, or agent sockets. The Git metadata
+boundary must preserve local commits and existing dirty work without exposing host
+configuration, credential helpers, hooks, or sibling task data. Validate paths and
+mount sources outside worker control; reject symlinks and inconsistent state at those
+boundaries. A worker-created symlink must never make an unmounted host path reachable.
+
+The Scheduler seeds a private Git database from the task HEAD. After cleanup it accepts
+only a valid descendant commit, imports its objects, atomically advances the task HEAD
+from the expected base, and synchronizes the task index. Review-stage workspaces are
+mounted read-only and any review-stage commit is rejected.
+
+Each invocation receives a dedicated ephemeral HOME containing only the minimum
+operator-provisioned provider subscription authentication material. Never copy host
+HOME, SSH configuration, GitHub CLI configuration, or a general credential store.
+Provider authentication is necessarily visible to that provider's worker; it must not
+confer Scheduler GitHub authority or enable metered/API fallback. Keep read-only
+GitHub discovery credentials and push/PR write credentials in separate Scheduler-side
+stores outside all worker mounts. The write tier excludes merge, Actions, release,
+and deployment authority. Do not include authentication values in argv, diagnostics,
+logs, checkpoints, handoffs, or test fixtures.
+
+### Network and process enforcement
+
+Enforce default-deny egress with a Docker internal network. Before every dispatch the
+network must contain exactly the configured proxy container. The running proxy image
+and worker image must match configured RepoDigests; the proxy must also have an outbound
+network. An operator-owned, immutable proxy image permits only verified provider
+subscription endpoints. `execution.concurrency` is limited to one for this initial
+shared-proxy backend so workers cannot share the credential-bearing internal network.
+A proxy environment variable alone is insufficient: direct IP connections, alternate
+DNS, local networks, metadata services, and proxy bypass must remain blocked. Endpoint
+and authentication requirements must be measured before declaring a backend usable;
+unknown requirements and unavailable enforcement block dispatch.
+
+Use isolated mount, process, and network namespaces, an unprivileged worker, and no
+elevated capabilities. Runtime-level termination must cover detached descendants on
+normal completion, timeout, cancellation, and exceptional exits. Confirm termination;
+unknown cleanup status is a failure. Preserve the task worktree, local commits,
+handoff, and checkpoints across termination and retry.
+
+The Docker invocation uses a read-only root, ephemeral `/tmp` and HOME, `cap-drop=ALL`,
+`no-new-privileges`, PID/memory/CPU limits, and no runtime socket mount. Every invocation
+has an unguessable container name. After the provider process returns or times out, the
+Scheduler lists by exact name, force-removes any survivor, and confirms absence before
+importing Git state. Unknown cleanup blocks success.
+
+### Verification and operator visibility
+
+Native preflight and doctor must report verified backend status and the effective
+worker credential tier without secret values. An operator assertion flag alone
+cannot establish isolation. The supported engine executes Linux containers through
+Docker Engine on Linux or Docker Desktop's Linux VM on macOS. Other runtimes and
+unverifiable configurations fail closed. Existing subscription and native opt-in gates
+remain necessary.
+
+The opt-in real-Docker suite uses synthetic host/provider credential canaries and covers
+host-path and runtime-socket denial, allowed proxy egress, direct proxy bypass denial,
+task-local commit import, and timeout descendant cleanup. Mocked tests additionally cover
+absolute/parent/symlink/mount boundaries and malformed runtime attestations. Real tests
+must be explicitly enabled and configured; a skipped test is not completion evidence.
+
+Acceptance requires real adversarial integration tests with synthetic host SSH and
+GitHub credential canaries, absolute/parent/symlink/mount escape attempts, forbidden
+network destinations and bypass attempts, and detached process cleanup. Tests must
+also verify local commit/recovery behavior and preservation of existing task files.
+Mocked runtime responses and argv inspection supplement these tests but cannot replace
+them. Both the adversarial tests and the full repository quality gate must pass before
+the isolation backend is considered complete or native execution is enabled through it.
 
 ---
 

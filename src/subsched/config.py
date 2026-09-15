@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -183,6 +184,17 @@ class WorkflowConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeIsolationConfig:
+    backend: str = "disabled"
+    runtime: str = "docker"
+    image: str | None = None
+    network: str | None = None
+    proxy_url: str | None = None
+    proxy_image: str | None = None
+    auth: tuple[tuple[str, Path], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class SchedulerConfig:
     github: GitHubConfig = GitHubConfig()
     agents: dict[str, AgentSettings] = field(
@@ -198,6 +210,7 @@ class SchedulerConfig:
     handoff: HandoffConfig = HandoffConfig()
     verification: VerificationConfig = VerificationConfig()
     workflow: WorkflowConfig = WorkflowConfig()
+    isolation: NativeIsolationConfig = NativeIsolationConfig()
 
 
 ROOT_KEYS = frozenset(
@@ -211,6 +224,7 @@ ROOT_KEYS = frozenset(
         "handoff",
         "verification",
         "workflow",
+        "isolation",
     }
 )
 
@@ -242,6 +256,9 @@ SECTION_KEYS: dict[str, frozenset[str]] = {
             "pr_review_enabled",
             "max_review_cycles",
         }
+    ),
+    "isolation": frozenset(
+        {"backend", "runtime", "image", "network", "proxy_url", "proxy_image", "auth"}
     ),
     "queue": frozenset({"priority"}),
     "handoff": frozenset({"continuous"}),
@@ -556,6 +573,86 @@ def _parse_workflow_config(raw: Mapping[str, Any]) -> WorkflowConfig:
     return WorkflowConfig(mode=mode, stages=stages, limits=limits)
 
 
+_PINNED_IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[0-9a-f]{64}")
+_CONTAINER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+
+
+def _parse_isolation_config(raw: Mapping[str, Any]) -> NativeIsolationConfig:
+    backend = str(raw.get("backend", "disabled"))
+    if backend not in {"disabled", "container"}:
+        raise ConfigError("isolation.backend must be 'disabled' or 'container'")
+    runtime = str(raw.get("runtime", "docker"))
+    if runtime != "docker":
+        raise ConfigError("isolation.runtime must be 'docker'")
+
+    image_raw = raw.get("image")
+    network_raw = raw.get("network")
+    proxy_raw = raw.get("proxy_url")
+    proxy_image_raw = raw.get("proxy_image")
+    auth_raw = raw.get("auth", {})
+    if not isinstance(auth_raw, dict):
+        raise ConfigError("isolation.auth must be a mapping")
+    unknown_agents = set(auth_raw) - set(SUPPORTED_AGENTS)
+    if unknown_agents:
+        raise ConfigError(f"unknown isolation.auth keys: {join_keys(unknown_agents)}")
+
+    if backend == "disabled":
+        if any(
+            value is not None
+            for value in (image_raw, network_raw, proxy_raw, proxy_image_raw)
+        ) or auth_raw:
+            raise ConfigError("isolation backend settings require backend: container")
+        return NativeIsolationConfig(backend=backend, runtime=runtime)
+
+    if not isinstance(image_raw, str) or not _PINNED_IMAGE_RE.fullmatch(image_raw):
+        raise ConfigError("isolation.image must be a safe digest-pinned image reference")
+    if not isinstance(network_raw, str) or not _CONTAINER_NAME_RE.fullmatch(network_raw):
+        raise ConfigError("isolation.network must be a safe container network name")
+    if not isinstance(proxy_raw, str):
+        raise ConfigError("isolation.proxy_url must be an http URL without credentials")
+    if not isinstance(proxy_image_raw, str) or not _PINNED_IMAGE_RE.fullmatch(
+        proxy_image_raw
+    ):
+        raise ConfigError(
+            "isolation.proxy_image must be a safe digest-pinned image reference"
+        )
+    try:
+        parsed_proxy = urlsplit(proxy_raw)
+        proxy_port = parsed_proxy.port
+    except ValueError as error:
+        raise ConfigError("isolation.proxy_url must be an http URL without credentials") from error
+    if (
+        parsed_proxy.scheme != "http"
+        or parsed_proxy.hostname is None
+        or parsed_proxy.username is not None
+        or parsed_proxy.password is not None
+        or proxy_port is None
+        or parsed_proxy.path not in {"", "/"}
+        or parsed_proxy.query
+        or parsed_proxy.fragment
+        or not _CONTAINER_NAME_RE.fullmatch(parsed_proxy.hostname)
+    ):
+        raise ConfigError("isolation.proxy_url must be an http URL without credentials")
+
+    auth: list[tuple[str, Path]] = []
+    for agent, value in sorted(auth_raw.items()):
+        if not isinstance(value, str):
+            raise ConfigError(f"isolation.auth.{agent} must be an absolute path")
+        path = Path(value)
+        if not path.is_absolute():
+            raise ConfigError(f"isolation.auth.{agent} must be an absolute path")
+        auth.append((str(agent), path))
+    return NativeIsolationConfig(
+        backend=backend,
+        runtime=runtime,
+        image=image_raw,
+        network=network_raw,
+        proxy_url=proxy_raw.rstrip("/"),
+        proxy_image=proxy_image_raw,
+        auth=tuple(auth),
+    )
+
+
 def load_config(path: Path) -> SchedulerConfig:
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -591,6 +688,9 @@ def load_config(path: Path) -> SchedulerConfig:
     handoff = _parse_handoff_config(raw.get("handoff", {}))
     verification = _parse_verification_config(raw.get("verification", {}))
     workflow = _parse_workflow_config(raw.get("workflow", {}))
+    isolation = _parse_isolation_config(raw.get("isolation", {}))
+    if isolation.backend == "container" and execution.concurrency != 1:
+        raise ConfigError("container isolation currently requires execution.concurrency: 1")
 
     return SchedulerConfig(
         github=github,
@@ -602,6 +702,7 @@ def load_config(path: Path) -> SchedulerConfig:
         handoff=handoff,
         verification=verification,
         workflow=workflow,
+        isolation=isolation,
     )
 
 

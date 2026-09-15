@@ -21,13 +21,23 @@
 
 ---
 
-## ⚠️ Security Notice: No OS-Level Sandbox
+## ⚠️ Security Notice: Native Container Boundary
 
 `--allow-native` execution runs the Claude Code / Codex CLI with permission checks bypassed (`bypassPermissions`), so the agent can run Bash commands, edit files, and read files without per-command confirmation. This is required for unattended execution — in non-interactive mode there is no human to confirm anything, so any mode other than `bypassPermissions` denies every action and the agent can do nothing.
 
-**The task's Git worktree is a working-directory default, not an OS-level sandbox.** It does not use a container, chroot, or network isolation. A Bash command run by the agent can technically read or write files outside the worktree and reach the network. Pull request review only inspects the code diff the agent proposes to commit — it does not catch side effects of commands executed during the session (e.g. files touched outside the repo, data sent over the network). Environment variables passed to the agent process are filtered to a small allowlist (no secrets), but this does not restrict filesystem access to files such as `~/.ssh`.
+Native execution is admitted only through the configured, mechanically verified Docker
+backend. It mounts the task worktree and invocation-specific Git metadata, supplies an
+ephemeral HOME containing only dedicated provider auth, drops capabilities, uses a
+read-only root filesystem, and joins an internal network whose only egress peer is a
+digest-pinned provider allowlist proxy. Host HOME, SSH/GitHub credentials, sibling
+worktrees, Scheduler state, and runtime sockets are not mounted. Unconfigured or
+unverifiable isolation fails closed; `--allow-native` and billing assertions cannot
+override it. See [SPEC §72.2](docs/SPEC.md#722-native-container-isolation-issue-293).
 
-**Only run `--allow-native` against issues and repositories you trust.** Native runs also require `--subscription-billing-verified`; pass it only after independently confirming that each enabled CLI uses subscription billing and that metered/API fallback is disabled. This flag is an operator assertion, not a provider-capacity probe. True OS-level sandboxing (containerized execution, filesystem/network isolation) is a planned hardening item, not yet implemented.
+The Scheduler, host kernel/Docker engine, pinned worker/proxy images, and operator-owned
+proxy allowlist remain trusted. Native runs also require
+`--subscription-billing-verified`; pass it only after independently confirming that each
+enabled CLI uses subscription billing and that metered/API fallback is disabled.
 
 Repository instruction files are user-owned input. `subsched` tells each worker to read an existing
 `AGENTS.md` and `CLAUDE.md`, but never creates, edits, or removes either file. Task scope and
@@ -502,3 +512,12 @@ This is expected, fail-closed behavior, not a failure: `github.completion.close_
 - [`docs/SPEC.md`](docs/SPEC.md): Ground-truth specification and safety invariants.
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md): Operator runbook for running, monitoring, and disaster recovery.
 - [`docs/WORKFLOW.md`](docs/WORKFLOW.md): Contributor and development workflow.
+
+### Native isolation configuration (issue #293)
+
+Native dispatch requires the `isolation:` section shown in
+[`examples/scheduler.yaml`](examples/scheduler.yaml). `subsched doctor` verifies the
+Linux Docker engine, both image RepoDigests, the running allowlist proxy, an otherwise
+empty internal network, and per-provider auth permissions without reading auth values.
+The initial backend intentionally requires `execution.concurrency: 1`; unknown runtimes,
+shared worker networks, missing controls, or stale containers fail closed.

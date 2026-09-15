@@ -24,6 +24,7 @@ This runbook guides operators through running, monitoring, troubleshooting, and 
 - Git `>=2.40`
 - GitHub CLI (`gh`)
 - Coding agent CLI tools: `claude`, `codex` (optional: `ccusage`)
+- Docker Engine on Linux or Docker Desktop's Linux engine on macOS for native execution
 
 ### Clean Machine Installation
 ```bash
@@ -43,10 +44,19 @@ uv run subsched doctor
 ## 3. Daily Operations
 
 ### Health Check (`doctor`)
-Runs prerequisite checks on local executables and inspects GitHub token scopes:
+Runs prerequisite checks, validates the effective native isolation configuration, and
+inspects GitHub token scopes. Pass the same custom config used by `run`:
 ```bash
 uv run subsched doctor
+uv run subsched doctor --config /absolute/path/to/subsched.yaml
 ```
+
+Native execution requires the digest-pinned worker and proxy images, a running proxy
+attached to both its outbound network and the configured Docker internal network, and
+dedicated mode-0700 provider auth directories. The internal network must otherwise be
+empty before dispatch. Use the complete schema in `examples/scheduler.yaml`; do not put
+SSH, GitHub CLI, or Scheduler write credentials in provider auth directories. A skipped
+real-container integration test is not evidence that a deployment is ready.
 
 ### Initializing & Running Scheduler
 ```bash

@@ -13,7 +13,9 @@ from subsched.agents.codex import (
     CodexCliMetadataError,
     parse_codex_cli_metadata,
 )
+from subsched.agents.isolation import native_isolation_failure, verify_native_isolation
 from subsched.assumptions import REDACTED, SECRET_PATTERN
+from subsched.config import NativeIsolationConfig
 from subsched.github.issues import diagnose_token
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
@@ -189,6 +191,7 @@ def validate_native_preflight(
     *,
     enabled_agents: Iterable[str],
     write_policy_requires_auth: bool = False,
+    isolation_config: NativeIsolationConfig | None = None,
     executable_resolver: ExecutableResolver | None = None,
     run_cmd: RunCommand | None = None,
 ) -> PreflightReport:
@@ -200,9 +203,11 @@ def validate_native_preflight(
     resolver = executable_resolver or _default_resolver
     runner = run_cmd or subprocess.run
 
+    enabled = tuple(enabled_agents)
+
     # Core required tools
     targets: list[str] = ["git", "gh"]
-    for agent in enabled_agents:
+    for agent in enabled:
         if agent not in targets:
             targets.append(agent)
 
@@ -225,6 +230,41 @@ def validate_native_preflight(
         checks.append(res)
         if not res.compatible:
             failures.append(f"{name} compatibility check failed: {res.error}")
+
+    isolation_executable: Path | None = None
+    if isolation_config is None:
+        isolation_failure = native_isolation_failure()
+    else:
+        isolation_executable = resolver(isolation_config.runtime)
+        isolation_failure = verify_native_isolation(
+            isolation_config,
+            enabled_agents=enabled,
+            resolver=resolver,
+            run_cmd=runner,
+        )
+    if isolation_failure is not None:
+        checks.append(
+            PreflightCheckResult(
+                name="isolation",
+                found=True,
+                compatible=False,
+                error=isolation_failure,
+            )
+        )
+        failures.append(isolation_failure)
+    else:
+        checks.append(
+            PreflightCheckResult(
+                name="isolation",
+                found=True,
+                executable_path=isolation_executable,
+                compatible=True,
+                details=(
+                    "container boundary verified; worker credential tier: "
+                    "dedicated provider auth only"
+                ),
+            )
+        )
 
     # Validate GitHub token when write policy requires authentication
     if write_policy_requires_auth:
