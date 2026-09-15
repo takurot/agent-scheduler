@@ -167,7 +167,10 @@ def test_probe_command_capabilities_rejects_version_drift(tmp_path: Path) -> Non
     assert "unrecognized Claude CLI version" in (res.error or "")
 
 
-def test_validate_native_preflight_only_probes_enabled_agents(tmp_path: Path) -> None:
+def test_validate_native_preflight_only_probes_enabled_agents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("subsched.preflight.native_isolation_failure", lambda: None)
     claude_exe = tmp_path / "claude"
     claude_exe.write_text("", encoding="utf-8")
     claude_exe.chmod(0o755)
@@ -267,10 +270,11 @@ def test_validate_native_preflight_fails_closed_when_model_configured_but_unsupp
 
 
 def test_validate_native_preflight_passes_when_no_model_configured_regardless_of_cli_support(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No `agents=` mapping, or an agent with no model configured, must preserve exact
     pre-#296 behavior: no fail-closed check runs at all."""
+    monkeypatch.setattr("subsched.preflight.native_isolation_failure", lambda: None)
     claude_exe = tmp_path / "claude"
     claude_exe.write_text("", encoding="utf-8")
     claude_exe.chmod(0o755)
@@ -427,8 +431,6 @@ def test_doctor_and_run_share_capability_failure_result(
     assert run_res.exit_code == 2
     assert "Native execution pre-flight doctor check failed" in run_res.output
     assert "required Claude CLI flags are missing" in run_res.output
-
-
 def test_run_passes_configured_agent_models_to_preflight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -488,4 +490,3 @@ def test_run_passes_configured_agent_models_to_preflight(
     assert "agents" in captured
     assert captured["agents"] is not None
     assert captured["agents"]["claude"].models.default == "sonnet"
-

@@ -3,10 +3,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from subsched.agents.codex import CodexApprovalMode, parse_codex_jsonl
 from subsched.agents.native import NativeWorker
 from subsched.contract import bootstrap_task_files
 from subsched.models import AgentResultKind, Issue, Task
+
+
+@pytest.fixture(autouse=True)
+def _admit_captured_provider_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This fixture keeps the parser lifecycle test below the isolation boundary."""
+    monkeypatch.setattr("subsched.agents.native.native_isolation_failure", lambda: None)
 
 
 def test_native_codex_execution_tool_lifecycle_reproduction(tmp_path: Path) -> None:

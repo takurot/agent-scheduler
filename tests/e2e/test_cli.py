@@ -94,11 +94,41 @@ def _no_real_merged_pr_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
             )
             if not found:
                 failures.append(f"missing {name}")
+        checks.append(
+            PreflightCheckResult(
+                name="isolation",
+                found=True,
+                executable_path=Path("/usr/bin/docker"),
+                compatible=True,
+            )
+        )
         return PreflightReport(
             checks=tuple(checks), passed=len(failures) == 0, failure_reasons=tuple(failures)
         )
 
     monkeypatch.setattr("subsched.cli.validate_native_preflight", _fake_preflight)
+    monkeypatch.setattr(
+        "subsched.agents.native.verify_native_isolation", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "subsched.agents.native.wrap_native_request", lambda request, **kwargs: request
+    )
+    from subsched.agents.isolation import IsolationGitContext
+
+    monkeypatch.setattr(
+        "subsched.agents.native.prepare_isolated_git",
+        lambda worktree, state_root, task_id: IsolationGitContext(
+            state_root / task_id / "invocation-test" / "repo.git",
+            "a" * 40,
+            state_root / task_id / "invocation-test" / "worktree.git",
+        ),
+    )
+    monkeypatch.setattr(
+        "subsched.agents.native.import_isolated_git", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "subsched.agents.native.cleanup_native_container", lambda *args, **kwargs: None
+    )
 
 
 def _git(path: Path, *args: str) -> None:

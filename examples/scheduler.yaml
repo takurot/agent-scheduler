@@ -83,6 +83,23 @@ billing:
   metered_usage: false
   unknown_mode: disable
 
+# Required for native execution. Both images must be locally available and pinned
+# by RepoDigest. The proxy container name is the proxy_url hostname; it must be the
+# only container attached to the internal network before dispatch and must also have
+# an outbound network. Its pinned image owns the provider-domain allowlist policy.
+# Provider auth directories must be absolute, mode 0700, contain only regular files
+# mode 0600, and contain no Scheduler GitHub/SSH credentials.
+isolation:
+  backend: container
+  runtime: docker
+  image: registry.example/subsched-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  network: subsched-provider-internal
+  proxy_url: http://subsched-provider-proxy:3128
+  proxy_image: registry.example/subsched-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  auth:
+    claude: /absolute/path/to/dedicated/claude-auth
+    codex: /absolute/path/to/dedicated/codex-auth
+
 # Optional (defaults shown below apply when `workflow:` is omitted entirely).
 # mode: multi-stage opts in to a PLANNING -> PLAN_REVIEW gate before IN_PROGRESS: a
 # READY task is first dispatched to write an implementation plan (.ai/plans/<issue>.md,

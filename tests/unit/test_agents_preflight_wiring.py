@@ -14,6 +14,12 @@ from subsched.github.issues import GitHubIssueSource
 from subsched.preflight import PreflightCheckResult, PreflightReport
 
 runner = CliRunner()
+ISOLATION_CHECK = PreflightCheckResult(
+    "isolation",
+    True,
+    executable_path=Path("/usr/bin/docker"),
+    compatible=True,
+)
 
 
 def test_supported_agents_constant() -> None:
@@ -83,7 +89,7 @@ agents:
 
     def fake_preflight(*, enabled_agents, **kwargs):
         observed_agents.append(enabled_agents)
-        return PreflightReport(checks=(), passed=True, failure_reasons=())
+        return PreflightReport(checks=(ISOLATION_CHECK,), passed=True, failure_reasons=())
 
     monkeypatch.setattr("subsched.cli.validate_native_preflight", fake_preflight)
     monkeypatch.setattr(GitHubIssueSource, "list_open", lambda self, repo, **kwargs: ())
@@ -127,7 +133,7 @@ agents:
 
     def fake_preflight(*, enabled_agents, **kwargs):
         observed_agents.append(enabled_agents)
-        return PreflightReport(checks=(), passed=True, failure_reasons=())
+        return PreflightReport(checks=(ISOLATION_CHECK,), passed=True, failure_reasons=())
 
     monkeypatch.setattr("subsched.cli.validate_native_preflight", fake_preflight)
     monkeypatch.setattr(GitHubIssueSource, "list_open", lambda self, repo, **kwargs: ())
@@ -214,7 +220,9 @@ agents:
     monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
     monkeypatch.setattr(
         "subsched.cli.validate_native_preflight",
-        lambda *args, **kwargs: PreflightReport(checks=(), passed=True, failure_reasons=()),
+        lambda *args, **kwargs: PreflightReport(
+            checks=(ISOLATION_CHECK,), passed=True, failure_reasons=()
+        ),
     )
     monkeypatch.setattr(GitHubIssueSource, "list_open", lambda self, repo, **kwargs: ())
 
@@ -276,7 +284,7 @@ agents:
     monkeypatch.setattr(
         "subsched.cli.validate_native_preflight",
         lambda *args, **kwargs: PreflightReport(
-            checks=(codex_check,), passed=True, failure_reasons=()
+            checks=(codex_check, ISOLATION_CHECK), passed=True, failure_reasons=()
         ),
     )
     monkeypatch.setattr(GitHubIssueSource, "list_open", lambda self, repo, **kwargs: ())

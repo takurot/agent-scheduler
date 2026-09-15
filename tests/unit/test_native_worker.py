@@ -13,6 +13,12 @@ from subsched.contract import bootstrap_task_files
 from subsched.models import AgentResult, AgentResultKind, Issue, Task
 
 
+@pytest.fixture(autouse=True)
+def _admit_legacy_request_shape_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep pre-#293 request-shape tests focused below the isolation boundary."""
+    monkeypatch.setattr("subsched.agents.native.native_isolation_failure", lambda: None)
+
+
 def test_native_worker_missing_worktree() -> None:
     worker = NativeWorker()
     task = Task.from_issue(Issue(number=101, title="Test"))

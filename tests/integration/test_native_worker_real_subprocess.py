@@ -13,6 +13,12 @@ from subsched.contract import bootstrap_task_files
 from subsched.models import AgentResultKind, Issue, Task
 
 
+@pytest.fixture(autouse=True)
+def _admit_fake_provider_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This test covers provider subprocess behavior below the isolation boundary."""
+    monkeypatch.setattr("subsched.agents.native.native_isolation_failure", lambda: None)
+
+
 def _install_fake_claude_on_path(bin_dir: Path) -> None:
     """A real, executable script named `claude` resolvable only via PATH -- exercising the
     actual subprocess.Popen(argv, env=...) + PATH-resolution path, not a mock."""
