@@ -17,7 +17,8 @@ from typing import Any
 
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.process import COMMON_ENV_ALLOWLIST, filter_environment, run_process_group
-from subsched.models import AgentResult, AgentResultKind
+from subsched.models import NEEDS_HUMAN_REASON_CODES, AgentResult, AgentResultKind
+from subsched.structured_logger import is_valid_agent_summary, sanitize_agent_summary
 
 
 class CodexProbeSafetyError(RuntimeError):
@@ -55,6 +56,12 @@ class CodexCliMetadata:
     supports_ignore_rules: bool
     supports_ignore_user_config: bool
     approval_mode: CodexApprovalMode
+    # #296: whether the installed CLI's `exec --help` advertises a `--model` flag.
+    # NativeWorker/preflight consult this before adding `--model <model>` to the argv
+    # for an agent with an explicit stage/default model configured, so an unsupported
+    # CLI fails closed at preflight instead of the flag being silently ignored or
+    # rejected mid-dispatch.
+    supports_model_flag: bool = False
 
 
 REQUIRED_CODEX_HEADLESS_FLAGS = frozenset(
@@ -103,6 +110,7 @@ def parse_codex_cli_metadata(*, version_output: str, help_output: str) -> CodexC
         supports_ignore_rules=True,
         supports_ignore_user_config=True,
         approval_mode=approval_mode,
+        supports_model_flag="--model" in help_output,
     )
 
 
@@ -155,6 +163,11 @@ def build_codex_headless_argv(
     sandbox: str,
     output_schema: Path,
     cwd: Path,
+    # #296: the stage-resolved model (config `agents.codex.models`), passed through as a
+    # single argv element -- never shell-interpolated. None (the default) omits the flag
+    # entirely, which preserves the provider CLI's own default and is the only behavior
+    # possible before this option existed.
+    model: str | None = None,
 ) -> tuple[str, ...]:
     """Single source of truth for the non-interactive `codex exec` argv, shared by the
     manual live probe (`build_codex_exec_argv`) and `NativeWorker`, so both always agree
@@ -165,10 +178,12 @@ def build_codex_headless_argv(
         if approval_mode is CodexApprovalMode.APPROVE_FOR_ME
         else (CODEX_ASK_FOR_APPROVAL_FLAG, "never")
     )
+    model_args = ("--model", model) if model else ()
     return (
         executable,
         *approval_args,
         "exec",
+        *model_args,
         "--strict-config",
         "--ignore-user-config",
         "--ignore-rules",
@@ -201,8 +216,17 @@ CODEX_OUTPUT_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["result", "summary"],
     "properties": {
-        "result": {"enum": ["pass", "failure"]},
-        "summary": {"type": "string"},
+        "result": {"enum": ["pass", "failure", "needs_human"]},
+        "reason_code": {
+            "type": ["string", "null"],
+            "enum": [
+                "operator_decision_required",
+                "instruction_conflict",
+                "external_prerequisite",
+                None,
+            ],
+        },
+        "summary": {"type": "string", "maxLength": 1000},
     },
 }
 
@@ -220,9 +244,9 @@ SUPPORTED_CODEX_ITEM_TYPES = frozenset(
 
 def ensure_codex_output_schema(path: Path) -> Path:
     """Ensure the standard Codex output schema file exists at path."""
-    if not path.is_file():
+    content = json.dumps(CODEX_OUTPUT_SCHEMA, indent=2) + "\n"
+    if not path.is_file() or path.read_text(encoding="utf-8") != content:
         path.parent.mkdir(parents=True, exist_ok=True)
-        content = json.dumps(CODEX_OUTPUT_SCHEMA, indent=2) + "\n"
         path.write_text(content, encoding="utf-8")
     return path
 
@@ -361,16 +385,40 @@ def _parse_final_message(message: str) -> AgentResult:
         value: Any = json.loads(message)
     except json.JSONDecodeError:
         return _malformed_result()
-    if (
-        not isinstance(value, dict)
-        or set(value) != {"result", "summary"}
-        or value.get("result") not in {"pass", "failure"}
-        or not isinstance(value.get("summary"), str)
-    ):
+    if not isinstance(value, dict):
         return _malformed_result()
-    if value["result"] == "pass":
+
+    allowed_keys = {"result", "summary", "reason_code"}
+    if not set(value).issubset(allowed_keys) or "result" not in value or "summary" not in value:
+        return _malformed_result()
+
+    result = value.get("result")
+    summary = value.get("summary")
+    reason_code = value.get("reason_code")
+
+    if not is_valid_agent_summary(summary):
+        return _malformed_result()
+
+    assert isinstance(summary, str)
+    sanitized_summary = sanitize_agent_summary(summary)
+
+    if result == "pass":
+        if reason_code is not None:
+            return _malformed_result()
         return AgentResult(AgentResultKind.PASS, output="codex completed")
-    return AgentResult(AgentResultKind.FAILURE, output="codex reported failure")
+    elif result == "failure":
+        if reason_code is not None:
+            return _malformed_result()
+        return AgentResult(AgentResultKind.FAILURE, output="codex reported failure")
+    elif result == "needs_human":
+        if reason_code not in NEEDS_HUMAN_REASON_CODES:
+            return _malformed_result()
+        return AgentResult(
+            AgentResultKind.NEEDS_HUMAN,
+            reason_code=reason_code,
+            output=sanitized_summary,
+        )
+    return _malformed_result()
 
 
 def _classify_failure(error: dict[str, Any]) -> AgentResult:

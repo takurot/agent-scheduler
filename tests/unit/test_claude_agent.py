@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -345,3 +346,138 @@ def test_claude_agent_executes_when_verified(tmp_path: Path) -> None:
     )
     result = agent.execute(req)
     assert result.kind is AgentResultKind.PASS
+
+
+def test_parse_claude_result_needs_human_via_structured_output() -> None:
+    """#297: Claude structured_output with result=needs_human and valid reason_code."""
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 1,
+            "result": "",
+            "structured_output": {
+                "result": "needs_human",
+                "reason_code": "operator_decision_required",
+                "summary": "container isolation design approval required",
+            },
+        }
+    )
+    outcome = ClaudeProcessOutcome(exit_code=0, stdout=payload)
+    result = parse_claude_result(outcome)
+    assert result.kind is AgentResultKind.NEEDS_HUMAN
+    assert result.reason_code == "operator_decision_required"
+    assert result.output == "container isolation design approval required"
+
+
+def test_parse_claude_result_needs_human_via_result_json_string() -> None:
+    """#297: Claude result field containing json string with result=needs_human."""
+    inner = json.dumps(
+        {
+            "result": "needs_human",
+            "reason_code": "instruction_conflict",
+            "summary": "specs contradict",
+        }
+    )
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 1,
+            "result": inner,
+        }
+    )
+    outcome = ClaudeProcessOutcome(exit_code=0, stdout=payload)
+    result = parse_claude_result(outcome)
+    assert result.kind is AgentResultKind.NEEDS_HUMAN
+    assert result.reason_code == "instruction_conflict"
+    assert result.output == "specs contradict"
+
+
+def test_parse_claude_result_needs_human_unknown_reason_code_fails_closed() -> None:
+    """#297: Claude needs_human with unknown reason_code fails closed as UNKNOWN."""
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 1,
+            "result": "",
+            "structured_output": {
+                "result": "needs_human",
+                "reason_code": "unknown_reason",
+                "summary": "help",
+            },
+        }
+    )
+    outcome = ClaudeProcessOutcome(exit_code=0, stdout=payload)
+    result = parse_claude_result(outcome)
+    assert result.kind is AgentResultKind.UNKNOWN
+
+
+def test_parse_claude_result_needs_human_control_character_fails_closed() -> None:
+    """#297: Control characters in Claude summary fail closed as UNKNOWN."""
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 1,
+            "result": "",
+            "structured_output": {
+                "result": "needs_human",
+                "reason_code": "operator_decision_required",
+                "summary": "bad\x00summary\x1b",
+            },
+        }
+    )
+    outcome = ClaudeProcessOutcome(exit_code=0, stdout=payload)
+    result = parse_claude_result(outcome)
+    assert result.kind is AgentResultKind.UNKNOWN
+
+
+def test_parse_claude_result_needs_human_oversized_summary_fails_closed() -> None:
+    """#297: Oversized summary in Claude fails closed as UNKNOWN."""
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 1,
+            "result": "",
+            "structured_output": {
+                "result": "needs_human",
+                "reason_code": "operator_decision_required",
+                "summary": "a" * 1500,
+            },
+        }
+    )
+    outcome = ClaudeProcessOutcome(exit_code=0, stdout=payload)
+    result = parse_claude_result(outcome)
+    assert result.kind is AgentResultKind.UNKNOWN
+
+
+def test_parse_claude_result_needs_human_redacts_secret() -> None:
+    """#297: Secret in Claude summary is redacted."""
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 1,
+            "result": "",
+            "structured_output": {
+                "result": "needs_human",
+                "reason_code": "operator_decision_required",
+                "summary": "approval needed for gho_sec1234567890",
+            },
+        }
+    )
+    outcome = ClaudeProcessOutcome(exit_code=0, stdout=payload)
+    result = parse_claude_result(outcome)
+    assert result.kind is AgentResultKind.NEEDS_HUMAN
+    assert result.reason_code == "operator_decision_required"
+    assert "gho_sec1234567890" not in result.output
+    assert "[REDACTED]" in result.output

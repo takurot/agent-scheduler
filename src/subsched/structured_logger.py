@@ -34,6 +34,30 @@ def redact_sensitive_text(text: str) -> str:
     return redacted
 
 
+MAX_AGENT_SUMMARY_BYTES = 1000
+MAX_AGENT_SUMMARY_CHARS = 500
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def is_valid_agent_summary(text: Any) -> bool:
+    """Validate that an agent summary is within size boundaries and has no control chars."""
+    if not isinstance(text, str):
+        return False
+    if len(text.encode("utf-8")) > MAX_AGENT_SUMMARY_BYTES:
+        return False
+    return _CONTROL_CHAR_RE.search(text) is None
+
+
+def sanitize_agent_summary(text: str, *, max_chars: int = MAX_AGENT_SUMMARY_CHARS) -> str:
+    """Sanitize, redact, and bound an agent summary for durable logging and state."""
+    cleaned = _CONTROL_CHAR_RE.sub(" ", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = redact_sensitive_text(cleaned)
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars].rstrip() + "... [truncated]"
+    return cleaned
+
+
 def _redact_data(data: Any) -> Any:
     if isinstance(data, str):
         return redact_sensitive_text(data)

@@ -31,7 +31,7 @@ from subsched.github.issues import GitHubCliError, GitHubIssueSource
 from subsched.handoff import parse_semantic_handoff
 from subsched.init import InitError, build_scaffold_plan, write_scaffold_plan
 from subsched.metrics import calculate_metrics
-from subsched.models import Task, TaskState
+from subsched.models import Task, TaskState, resolve_stage
 from subsched.router import Router
 from subsched.scheduler import Scheduler
 from subsched.selection import discover_selected_issues, excluded_issue_labels, resolve_intent
@@ -125,6 +125,7 @@ def _task_to_summary(task: Task) -> dict[str, Any]:
         "current_agent": task.current_agent,
         "pr": task.pr,
         "needs_human_reason": task.needs_human_reason,
+        "needs_human_reason_code": task.needs_human_reason_code,
     }
 
 
@@ -166,6 +167,8 @@ def inspect_task(issue_number: int, repository_path: str | None = None) -> dict[
     task = matches[0]
 
     result: dict[str, Any] = task.to_dict()
+    result["effective_model"] = task.effective_model
+    result["effective_stage"] = task.dispatch_stage or resolve_stage(task)
     result["handoff"] = None
     result["recent_commits"] = ()
 

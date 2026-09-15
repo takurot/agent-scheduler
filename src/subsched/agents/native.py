@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from subsched.agents.base import ProcessExecutionRequest
@@ -22,7 +22,7 @@ from subsched.agents.isolation import (
     verify_native_isolation,
     wrap_native_request,
 )
-from subsched.config import NativeIsolationConfig
+from subsched.config import AgentSettings, NativeIsolationConfig
 from subsched.contract import (
     build_plan_prompt,
     build_plan_review_prompt,
@@ -31,7 +31,7 @@ from subsched.contract import (
     build_worker_prompt,
     validate_dispatch_preconditions,
 )
-from subsched.models import AgentResult, AgentResultKind, Task, TaskState
+from subsched.models import AgentResult, AgentResultKind, Task, TaskState, resolve_stage
 from subsched.plan_review import READ_ONLY_SANDBOX_ARGS
 from subsched.structured_logger import StructuredLogger
 
@@ -70,6 +70,11 @@ class NativeWorker:
         isolation_config: NativeIsolationConfig | None = None,
         isolation_runtime_executable: Path | None = None,
         isolation_state_root: Path | None = None,
+        # #296: per-agent stage model policy (config `agents.<provider>.models`).
+        # Defaults to {} for backward compatibility -- every existing NativeWorker()
+        # call site without an explicit models config resolves no model for any stage,
+        # so the provider CLI's own default is used and argv is unchanged.
+        agents: Mapping[str, AgentSettings] | None = None,
     ) -> None:
         if type(subscription_billing_verified) is not bool:
             raise TypeError("subscription billing verification must be a boolean")
@@ -96,6 +101,7 @@ class NativeWorker:
         self.isolation_config = isolation_config
         self.isolation_runtime_executable = isolation_runtime_executable
         self.isolation_state_root = isolation_state_root
+        self.agents = agents or {}
 
     def _execute_isolated(
         self,
@@ -197,6 +203,7 @@ class NativeWorker:
         # Multi-stage workflow prompt and sandbox routing:
         # #280: PLANNING and PLAN_REVIEW are the pre-implementation gate.
         # #281: PR_REVIEW is the post-PR evaluation gate, and REVISING re-dispatches the worker.
+        stage = resolve_stage(task)
         if task.status is TaskState.PLANNING:
             prompt = build_plan_prompt(task)
             read_only = False
@@ -225,6 +232,15 @@ class NativeWorker:
                 )
             except (OSError, ValueError) as error:
                 return AgentResult(AgentResultKind.FAILURE, output=str(error))
+        # #296: reuse persisted dispatch_model from task state (e.g. after restart),
+        # or resolve from agent_settings if this agent has an explicit stage or default
+        # model configured.
+        agent_settings = self.agents.get(agent)
+        model = (
+            task.dispatch_model
+            if task.dispatch_model is not None
+            else (agent_settings.models.resolve(stage) if agent_settings is not None else None)
+        )
         heartbeat = self._heartbeat(task, agent)
         if agent == "claude":
             claude_tools = READ_ONLY_SANDBOX_ARGS["claude"][1] if read_only else "Bash,Edit,Read"
@@ -245,6 +261,7 @@ class NativeWorker:
                     "--strict-mcp-config",
                     "--tools",
                     claude_tools,
+                    *(("--model", model) if model else ()),
                 ),
                 cwd=worktree_path,
                 # ClaudeAgent/CodexAgent.execute() apply COMMON_ENV_ALLOWLIST to this before
@@ -286,6 +303,7 @@ class NativeWorker:
                     sandbox=codex_sandbox,
                     output_schema=schema_path,
                     cwd=worktree_path,
+                    model=model,
                 ),
                 cwd=worktree_path,
                 # ClaudeAgent/CodexAgent.execute() apply COMMON_ENV_ALLOWLIST to this before

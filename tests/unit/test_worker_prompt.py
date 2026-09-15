@@ -8,6 +8,7 @@ import pytest
 from subsched.contract import (
     AgentContractError,
     bootstrap_task_files,
+    build_plan_prompt,
     build_worker_prompt,
     validate_dispatch_preconditions,
 )
@@ -67,6 +68,9 @@ def test_build_worker_prompt_contains_mandatory_instructions() -> None:
         prompt,
         re.DOTALL,
     )
+    # #297: prompt must instruct the agent on how to return needs_human
+    assert '"result": "needs_human"' in prompt
+    assert "operator_decision_required" in prompt
 
 
 def test_validate_dispatch_preconditions_fails_if_files_missing(tmp_path: Path) -> None:
@@ -99,3 +103,15 @@ def test_build_worker_prompt_contains_handoff_contract_rules() -> None:
     assert "None (task completed)" in prompt
     assert "ISO 8601" in prompt
     assert "advance" in prompt
+
+
+def test_build_plan_prompt_contains_needs_human_schema() -> None:
+    """#301: build_plan_prompt must instruct the planning agent on needs_human schema."""
+    task = Task.from_issue(Issue(number=105, title="Plan something"))
+    prompt = build_plan_prompt(task)
+
+    assert "You are planning the implementation of GitHub issue #105." in prompt
+    assert '"result": "needs_human"' in prompt
+    assert "operator_decision_required" in prompt
+    assert "instruction_conflict" in prompt
+    assert "external_prerequisite" in prompt

@@ -350,6 +350,7 @@ def run(
             enabled_agents=enabled_agents,
             write_policy_requires_auth=effective_push,
             isolation_config=cfg.isolation,
+            agents=cfg.agents,
         )
         if not report.passed:
             missing_names = [c.name for c in report.checks if not c.found]
@@ -466,6 +467,10 @@ def run(
                 isolation_config=cfg.isolation,
                 isolation_runtime_executable=isolation_runtime_executable,
                 isolation_state_root=context.store.runtime_dir / "native-isolation",
+                # #296: per-agent stage model policy, already validated by config
+                # parsing and confirmed against installed CLI capability by the
+                # preflight check above.
+                agents=cfg.agents,
             ),
             worktree_root=worktree_root,
             worktree_adapter=worktree_adapter,
@@ -496,6 +501,7 @@ def run(
             merged_pr_checker=merged_pr_checker,
             pr_review_enabled=cfg.execution.pr_review_enabled,
             max_review_cycles=cfg.execution.max_review_cycles,
+            agents=cfg.agents,
         )
     except (ValueError, StateCorruptionError) as error:
         typer.echo(f"State error: {error}", err=True)
@@ -753,6 +759,8 @@ def status(
             pr_str = f" [PR #{t.pr}]" if t.pr else ""
             agent_str = f" (agent: {t.current_agent})" if t.current_agent else ""
             typer.echo(f"  #{t.issue_number:<4} {t.status.value:<18} {t.title}{pr_str}{agent_str}")
+            if t.needs_human_reason_code:
+                typer.echo(f"        reason code: {t.needs_human_reason_code}")
             if t.needs_human_reason:
                 typer.echo(f"        reason: {t.needs_human_reason}")
             if t.run_started_at:

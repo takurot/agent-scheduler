@@ -95,10 +95,48 @@ class GitHubConfig:
     issues: tuple[int, ...] = ()
 
 
+# #296: fixed execution-stage keys a per-agent model policy may target, plus "default"
+# as the fallback used when a stage-specific model is not configured. Kept as a module
+# constant (not derived from Task/TaskState) so config parsing can validate against it
+# without importing the scheduler's state machine, and so the resolution order (stage >
+# default > provider CLI default) is defined in exactly one place.
+MODEL_POLICY_STAGE_KEYS = frozenset(
+    {"planning", "plan_review", "implementation", "pr_review", "revision"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentModelPolicy:
+    """Per-agent model selection, one optional model per fixed execution stage plus a
+    `default` fallback. All-None (the default) preserves pre-#296 behavior: NativeWorker
+    adds no `--model` argv element and the provider CLI's own default is used."""
+
+    default: str | None = None
+    planning: str | None = None
+    plan_review: str | None = None
+    implementation: str | None = None
+    pr_review: str | None = None
+    revision: str | None = None
+
+    def resolve(self, stage: str) -> str | None:
+        if stage not in MODEL_POLICY_STAGE_KEYS:
+            raise ConfigError(f"unknown execution stage: {stage!r}")
+        return getattr(self, stage) or self.default
+
+    @property
+    def has_any_model(self) -> bool:
+        """True if any stage or `default` model is configured, meaning preflight must
+        confirm the installed CLI actually supports a `--model` flag before dispatch."""
+        return any(
+            getattr(self, key) is not None for key in (*MODEL_POLICY_STAGE_KEYS, "default")
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class AgentSettings:
     enabled: bool = True
     priority: int = 100
+    models: AgentModelPolicy = AgentModelPolicy()
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,6 +383,33 @@ def join_keys(keys: set[str]) -> str:
     return ", ".join(sorted(keys))
 
 
+# #296: model names are passed as a single argv element to the provider CLI (never
+# shell-interpolated), but must still be rejected here -- before that argv is ever built
+# -- if they are blank, contain control/whitespace characters, or start with "-" (which
+# would otherwise be parsed by the CLI as another option rather than a model value).
+_MODEL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*")
+
+
+def _validate_model_name(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not _MODEL_NAME_RE.fullmatch(value):
+        raise ConfigError(f"{name} must be a non-empty, safe model name")
+    return value
+
+
+def _parse_agent_models(raw: Any, agent_name: str) -> AgentModelPolicy:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"agents.{agent_name}.models must be a mapping")
+    allowed = MODEL_POLICY_STAGE_KEYS | {"default"}
+    extras = set(raw) - allowed
+    if extras:
+        raise ConfigError(f"unknown agents.{agent_name}.models keys: {join_keys(extras)}")
+    values = {
+        str(key): _validate_model_name(value, f"agents.{agent_name}.models.{key}")
+        for key, value in raw.items()
+    }
+    return AgentModelPolicy(**values)
+
+
 def _parse_agents_config(raw: Any) -> dict[str, AgentSettings]:
     if not isinstance(raw, dict):
         raise ConfigError("agents must be a mapping")
@@ -358,12 +423,17 @@ def _parse_agents_config(raw: Any) -> dict[str, AgentSettings]:
             )
         if not isinstance(item, dict):
             raise ConfigError(f"agents.{name} must be a mapping")
-        extras = set(item) - {"enabled", "priority"}
+        extras = set(item) - {"enabled", "priority", "models"}
         if extras:
             raise ConfigError(f"unknown agents.{name} keys: {join_keys(extras)}")
         enabled = _strict_bool(item.get("enabled", True), f"agents.{name}.enabled")
         priority = _strict_pos_int(item.get("priority", 100), f"agents.{name}.priority", min_val=0)
-        agents[str(name)] = AgentSettings(enabled=enabled, priority=priority)
+        models = (
+            _parse_agent_models(item["models"], name)
+            if "models" in item
+            else AgentModelPolicy()
+        )
+        agents[str(name)] = AgentSettings(enabled=enabled, priority=priority, models=models)
 
     if not any(s.enabled for s in agents.values()):
         raise ConfigError("all agents are disabled; at least one agent must be enabled")

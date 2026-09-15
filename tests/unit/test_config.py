@@ -639,6 +639,151 @@ def test_parse_agents_config_error_branches(tmp_path: Path) -> None:
         load_config(write_cfg("github:\n  repo: o/r\nagents:\n  codex:\n    unknown_key: 1\n"))
 
 
+def test_agent_models_default_policy_is_all_none() -> None:
+    from subsched.config import AgentModelPolicy
+
+    policy = AgentModelPolicy()
+    for stage in ("planning", "plan_review", "implementation", "pr_review", "revision"):
+        assert policy.resolve(stage) is None
+
+
+def test_agent_models_resolution_order_stage_then_default_then_none() -> None:
+    from subsched.config import AgentModelPolicy
+
+    policy = AgentModelPolicy(default="sonnet", planning="opus")
+    assert policy.resolve("planning") == "opus"
+    assert policy.resolve("implementation") == "sonnet"
+
+    default_only = AgentModelPolicy(default="sonnet")
+    assert default_only.resolve("pr_review") == "sonnet"
+
+    none_configured = AgentModelPolicy()
+    assert none_configured.resolve("revision") is None
+
+
+def test_agent_models_resolve_rejects_unknown_stage() -> None:
+    from subsched.config import AgentModelPolicy
+
+    with pytest.raises(ConfigError, match="unknown execution stage"):
+        AgentModelPolicy().resolve("bogus-stage")
+
+
+def test_agent_models_has_any_model() -> None:
+    from subsched.config import AgentModelPolicy
+
+    assert AgentModelPolicy().has_any_model is False
+    assert AgentModelPolicy(default="sonnet").has_any_model is True
+    assert AgentModelPolicy(planning="opus").has_any_model is True
+
+
+def test_parse_agents_config_models_full_stage_map(tmp_path: Path) -> None:
+    content = """
+github:
+  repo: o/r
+agents:
+  claude:
+    enabled: true
+    priority: 100
+    models:
+      default: sonnet
+      planning: opus
+      plan_review: opus
+      implementation: sonnet
+      pr_review: opus
+      revision: sonnet
+  codex:
+    enabled: true
+    priority: 90
+    models:
+      default: standard-model
+      planning: advanced-model
+"""
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(content, encoding="utf-8")
+    config = load_config(path)
+
+    claude_models = config.agents["claude"].models
+    assert claude_models.default == "sonnet"
+    assert claude_models.planning == "opus"
+    assert claude_models.plan_review == "opus"
+    assert claude_models.implementation == "sonnet"
+    assert claude_models.pr_review == "opus"
+    assert claude_models.revision == "sonnet"
+
+    codex_models = config.agents["codex"].models
+    assert codex_models.default == "standard-model"
+    assert codex_models.planning == "advanced-model"
+    assert codex_models.plan_review is None
+
+
+def test_parse_agents_config_models_missing_defaults_to_all_none(tmp_path: Path) -> None:
+    content = "github:\n  repo: o/r\nagents:\n  claude:\n    enabled: true\n    priority: 100\n"
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(content, encoding="utf-8")
+    config = load_config(path)
+    assert config.agents["claude"].models.default is None
+
+
+def test_parse_agents_config_models_error_branches(tmp_path: Path) -> None:
+    def write_cfg(content: str) -> Path:
+        p = tmp_path / f"cfg_{hash(content)}.yaml"
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    with pytest.raises(ConfigError, match=r"agents\.claude\.models must be a mapping"):
+        load_config(
+            write_cfg(
+                "github:\n  repo: o/r\nagents:\n  claude:\n    models: not-a-map\n"
+            )
+        )
+
+    with pytest.raises(ConfigError, match=r"unknown agents\.claude\.models keys"):
+        load_config(
+            write_cfg(
+                "github:\n  repo: o/r\nagents:\n  claude:\n    models:\n      bogus_stage: sonnet\n"
+            )
+        )
+
+    with pytest.raises(
+        ConfigError, match=r"agents\.claude\.models\.default must be a non-empty, safe model name"
+    ):
+        load_config(
+            write_cfg(
+                "github:\n  repo: o/r\nagents:\n  claude:\n    models:\n      default: ''\n"
+            )
+        )
+
+    with pytest.raises(
+        ConfigError, match=r"agents\.claude\.models\.default must be a non-empty, safe model name"
+    ):
+        load_config(
+            write_cfg(
+                "github:\n  repo: o/r\nagents:\n"
+                "  claude:\n    models:\n      default: '--dangerous-flag'\n"
+            )
+        )
+
+    with pytest.raises(
+        ConfigError, match=r"agents\.claude\.models\.default must be a non-empty, safe model name"
+    ):
+        load_config(
+            write_cfg(
+                "github:\n  repo: o/r\nagents:\n"
+                "  claude:\n    models:\n      default: \"sonnet\\x00\"\n"
+            )
+        )
+
+    with pytest.raises(
+        ConfigError, match=r"agents\.claude\.models\.default must be a non-empty, safe model name"
+    ):
+        load_config(
+            write_cfg(
+                "github:\n  repo: o/r\nagents:\n"
+                "  claude:\n    models:\n      default: 3\n"
+            )
+        )
+
+
 def test_parse_routing_and_execution_error_branches(tmp_path: Path) -> None:
     def write_cfg(content: str) -> Path:
         p = tmp_path / f"cfg_{hash(content)}.yaml"

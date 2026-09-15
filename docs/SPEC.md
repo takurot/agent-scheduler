@@ -830,6 +830,46 @@ agents:
 
 これは設定可能。サポート対象エージェントは `claude` および `codex`。未知のエージェント名は設定読み込み時に fail-fast する。また、少なくとも 1 つのエージェントが enabled でなければならない。
 
+## 24.1 Per-Stage Model Policy (#296)
+
+`agents.<name>.models` はオプション。各エージェントごとに `default` と5つの固定 execution stage
+key (`planning`, `plan_review`, `implementation`, `pr_review`, `revision`) にモデル名を割り当てられる：
+
+```yaml
+agents:
+  claude:
+    enabled: true
+    priority: 100
+    models:
+      default: sonnet
+      planning: opus
+      plan_review: opus
+      implementation: sonnet
+      pr_review: opus
+      revision: sonnet
+```
+
+解決順は **stage 固有のモデル > `default` > provider CLI 自身のデフォルト（`--model` フラグなし）** で
+一意。`models:` を省略した既存 config は、全 stage で `--model` フラグを付与しない従来どおりの挙動を保つ。
+
+stage key は Router の provider 選択とは独立している。Router は従来どおり capacity-aware に
+provider（`claude`/`codex`）だけを選び、provider 決定後、dispatch 直前に `NativeWorker` が
+`task.status`/`task.dispatch_status` から一意な execution stage を導出し、選ばれた provider の
+`AgentModelPolicy.resolve(stage)` でモデルを解決する。
+
+- `planning`: `TaskState.PLANNING`
+- `plan_review`: `TaskState.PLAN_REVIEW`
+- `implementation`: 通常の実装 dispatch（`workflow.mode: standard` を含む）
+- `pr_review`: `dispatch_status == PR_REVIEW`
+- `revision`: `dispatch_status == REVISING`
+
+モデル名は空文字・制御/空白文字・`-` 始まりを拒否し（`ConfigError` で fail-closed）、単一の argv
+要素として shell 解釈なしで Claude/Codex CLI へ渡る。未知の `models` key も fail-closed。
+
+明示モデルが設定された agent は、native preflight (`validate_native_preflight`) がインストール済み
+CLI の `--help`/`exec --help` 出力から `--model` フラグの対応を確認する。未対応の CLI は dispatch 前に
+fail closed し、別モデルや API/metered usage への自動 fallback は行わない。
+
 ---
 
 # 25. Worker Prompt
@@ -1892,6 +1932,31 @@ Agent自体の失敗（`per_agent_failures`が`max_agent_failures`に達する�
 再試行よりも回復困難な状態を招くリスクがある。「不明な場合はfail-closedにする」という
 本SPECの方針（§1）に従い、これらの失敗は都度人間の判断を挟む。
 
+## Native WorkerによるNEEDS_HUMANの明示的シグナル（#297）
+
+設計判断の承認、指示の矛盾、外部前提条件など「再試行しても解消しない人手待ち」について、Workerはgeneric `FAILURE`ではなく`NEEDS_HUMAN` outcomeをSchedulerへ直接通知できる。
+
+### Worker Result Schema
+
+```json
+{
+  "result": "pass | failure | needs_human",
+  "reason_code": "operator_decision_required | instruction_conflict | external_prerequisite | null",
+  "summary": "<actionable summary>"
+}
+```
+
+- **reason_code**: `NEEDS_HUMAN` 時のみ必須（`pass`/`failure`時はnullまたは省略）。固定enum（`operator_decision_required`, `instruction_conflict`, `external_prerequisite`）に限定され、任意文字列はfail-closedで拒絶される。
+- **summary**: control character除去、byte limit（1,000 bytes）、secret redactionを経て保持される。
+- **リトライ抑止**: valid/fresh handoffを伴う`NEEDS_HUMAN`は、同一/別Agentへリトライせず、`attempt`や`per_agent_failures`を消費せずに直ちに`TaskState.NEEDS_HUMAN`へ遷移する。
+- **Actionable reason保持**: `Task.needs_human_reason`にvalidated `reason_code`とsanitized summary（またはsemantic handoffの`Next Action`）が永続化される。
+- **構造化 reason_code の永続化（#300）**: `Task.needs_human_reason_code`に型付けされた固定enum（`operator_decision_required`, `instruction_conflict`, `external_prerequisite`）が永続化され、`Task.to_dict()` / `from_dict()`、`subsched status --verbose`、およびMCPツール（`subsched_inspect_task`, `subsched_get_status`）で参照できる。`NEEDS_HUMAN`以外の状態へ遷移した際は自動的に`null`にリセットされる。
+- **Handoff整合性の維持**: handoffがstaleまたは不正な場合は#145に従いfail-closedで`NEEDS_HUMAN`へ遷移し、integrity errorと元の`reason_code`の両方が構造化ログ（`handoff_readback`）に記録される。さらに#300により、エスカレーション後の`Task.needs_human_reason_code`にもAgentの`reason_code`が保持され、`needs_human_reason`の文字列表現にも`f"{readback.reason} (agent signaled: {reason_code})"`として併記される。
+
+### ワークフローステージプロンプトでのサポート（#301）
+
+通常のワーカープロンプト（`build_worker_prompt()`）およびリビジョンプロンプト（`build_revision_prompt()`）に加え、マルチステージワークフロー（#280）の計画フェーズプロンプト（`build_plan_prompt()`）でも`needs_human`スキーマが指示される。要件の矛盾や前提条件の欠落、設計判断が必要な場合に計画担当Agentが`needs_human`を返すと、計画ファイルを未生成のまま即時に`TaskState.NEEDS_HUMAN`へ安全に停止し、無駄なリビジョンループや汎用エラーエスカレーションを防止する。
+
 ---
 
 # 50. Loop Guard
@@ -2028,10 +2093,25 @@ agents:
   claude:
     enabled: true
     priority: 100
+    # optional (#296); see §24 for stage keys and resolution order
+    models:
+      default: sonnet
+      planning: opus
+      plan_review: opus
+      implementation: sonnet
+      pr_review: opus
+      revision: sonnet
 
   codex:
     enabled: true
     priority: 90
+    models:
+      default: standard-model
+      planning: advanced-model
+      plan_review: advanced-model
+      implementation: standard-model
+      pr_review: advanced-model
+      revision: standard-model
 
 
 routing:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,7 +15,7 @@ from subsched.agents.codex import (
 )
 from subsched.agents.isolation import native_isolation_failure, verify_native_isolation
 from subsched.assumptions import REDACTED, SECRET_PATTERN
-from subsched.config import NativeIsolationConfig
+from subsched.config import AgentSettings, NativeIsolationConfig
 from subsched.github.issues import diagnose_token
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
@@ -36,6 +36,11 @@ class PreflightCheckResult:
     # CLI, instead of the two independently re-deriving (and potentially disagreeing
     # on) which flag is safe to use.
     codex_approval_mode: CodexApprovalMode | None = None
+    # #296: set only for the "claude"/"codex" checks, from the installed CLI's own
+    # --help output. Consulted by validate_native_preflight() to fail closed, before any
+    # dispatch, when an agent has an explicit stage/default model configured but the
+    # installed CLI does not advertise a `--model` flag.
+    supports_model_flag: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +141,7 @@ def probe_command_capabilities(
                 version=metadata.version,
                 compatible=True,
                 details=f"version {metadata.version}, headless flags verified",
+                supports_model_flag=metadata.supports_model_flag,
             )
 
         if name == "codex":
@@ -163,6 +169,7 @@ def probe_command_capabilities(
                 compatible=True,
                 details=f"version {metadata_codex.version}, headless flags verified",
                 codex_approval_mode=metadata_codex.approval_mode,
+                supports_model_flag=metadata_codex.supports_model_flag,
             )
 
         return PreflightCheckResult(
@@ -194,6 +201,10 @@ def validate_native_preflight(
     isolation_config: NativeIsolationConfig | None = None,
     executable_resolver: ExecutableResolver | None = None,
     run_cmd: RunCommand | None = None,
+    # #296: per-agent model policy (config `agents.<provider>.models`), keyed by agent
+    # name. Only consulted for agents that have an explicit stage/default model
+    # configured; unset (None, the default) preserves pre-#296 behavior exactly.
+    agents: Mapping[str, AgentSettings] | None = None,
 ) -> PreflightReport:
     """Validate installed CLI capabilities before task discovery and dispatch.
 
@@ -230,6 +241,22 @@ def validate_native_preflight(
         checks.append(res)
         if not res.compatible:
             failures.append(f"{name} compatibility check failed: {res.error}")
+            continue
+
+        # #296: an agent with an explicit stage/default model configured must have its
+        # installed CLI confirm `--model` support here, before any dispatch -- an
+        # unsupported/ambiguous CLI fails closed instead of the flag being silently
+        # ignored or rejected mid-dispatch, and never falls back to a different model.
+        agent_settings = agents.get(name) if agents is not None else None
+        if (
+            agent_settings is not None
+            and agent_settings.models.has_any_model
+            and not res.supports_model_flag
+        ):
+            failures.append(
+                f"{name} has a configured model but the installed CLI does not support "
+                "a --model flag"
+            )
 
     isolation_executable: Path | None = None
     if isolation_config is None:

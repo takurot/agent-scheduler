@@ -336,6 +336,17 @@ agents:
   claude:
     enabled: true
     priority: 100
+    # Optional (#296): per-execution-stage model selection. Keys are `default` plus the
+    # five fixed stages below; any key you omit falls back to `default`, and if neither
+    # is set for a stage, no `--model` flag is added (the provider CLI's own default is
+    # used) -- this is also the behavior when `models:` is omitted entirely.
+    # models:
+    #   default: sonnet
+    #   planning: opus
+    #   plan_review: opus
+    #   implementation: sonnet
+    #   pr_review: opus
+    #   revision: sonnet
   codex:
     enabled: false
     priority: 90
@@ -404,6 +415,16 @@ resolved branch from `origin` and rebases onto the remote-tracking ref.
 The values shown for `billing.*`, `routing.*`, `pause_running_policy`, `tie_break`, and
 `close_issue` are the only currently supported values. Unsupported alternatives fail during
 configuration loading instead of being accepted and ignored.
+
+`agents.<name>.models` (#296) resolves per dispatch as: stage-specific model > `default` >
+provider CLI default (no `--model` flag). The five stage keys are fixed --
+`planning`, `plan_review`, `implementation`, `pr_review`, `revision` -- matching each
+`workflow.mode: multi-stage` execution point; `implementation` also covers the equivalent
+dispatch under `workflow.mode: standard`. Model names must be non-empty, contain no
+whitespace/control characters, and not start with `-`; native preflight additionally
+confirms the installed CLI advertises `--model` support for any agent with a configured
+model, and fails closed (instead of silently dropping the flag or falling back to a
+different model) if it does not.
 
 ---
 
@@ -490,7 +511,7 @@ Work is never lost or discarded:
 Yes. `subsched` is built with a deterministic CLI and durable JSON state, making it ideal to be driven by higher-level orchestrators (such as Gemini, autonomous supervisor agents, or CI pipelines):
 - **Command & Control**: Orchestrators can drive `subsched` via standard commands: `subsched run --issues <id>` to queue or run specific issues, `subsched pause` / `subsched resume` to control execution flow, and `subsched cancel <id>` to abort specific tasks safely.
 - **State & Health Inspection**: The scheduler's state is stored durably in `.ai/scheduler.json`. Orchestrators can query queue status with `subsched status --verbose` or export machine-readable metrics via `subsched metrics --json`.
-- **Fail-Closed Escalation for Supervisory AI**: If an unrecoverable event occurs (such as Git rebase merge conflicts, ambiguous existing PR matches, or unexpected agent termination), `subsched` transitions the task to `NEEDS_HUMAN` and records the exact reason in `needs_human_reason`. An external AI orchestrator can inspect this field, triage the root cause, and either remediate the issue programmatically or notify a human operator.
+- **Fail-Closed Escalation for Supervisory AI**: If an unrecoverable event occurs (such as Git rebase merge conflicts, ambiguous existing PR matches, unexpected agent termination, or an explicit `NEEDS_HUMAN` signal from a native worker requesting design approval or operator decision), `subsched` transitions the task to `NEEDS_HUMAN` and records the exact validated reason code in `needs_human_reason`. An external AI orchestrator can inspect this field, triage the root cause, and either remediate the issue programmatically or notify a human operator.
 
 ### 5. Are intermediate execution logs and agent transcripts saved?
 Yes, execution details are captured and persisted across multiple layers:
