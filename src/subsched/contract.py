@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from subsched.config import validate_base_branch
 from subsched.models import Issue, Task
 from subsched.plan_review import plan_path
 from subsched.storage import atomic_write_secure_bytes, secure_directory
@@ -272,7 +273,7 @@ def build_plan_review_prompt(task: Task) -> str:
     return "\n".join(lines) + "\n"
 
 
-def build_review_prompt(task: Task, round_number: int) -> str:
+def build_review_prompt(task: Task, round_number: int, base_branch: str = "main") -> str:
     """Construct the strict, read-only reviewer prompt for a PR_REVIEW dispatch.
 
     Unlike build_worker_prompt, the reviewer must never edit source, commit, push, or
@@ -281,6 +282,7 @@ def build_review_prompt(task: Task, round_number: int) -> str:
     (see subsched.review.read_review_report) and, separately, posts as a PR comment.
     """
     report_path = f".ai/reviews/{task.issue_number}-r{round_number}.md"
+    remote_base = f"origin/{validate_base_branch(base_branch)}"
     return (
         "\n".join(
             [
@@ -296,8 +298,8 @@ def build_review_prompt(task: Task, round_number: int) -> str:
                 f"- .ai/handoffs/{task.issue_number}.md",
                 "",
                 "Inspect the changes already committed on this branch, for example with:",
-                "- git diff origin/main...HEAD",
-                "- git log origin/main..HEAD",
+                f"- git diff {remote_base}...HEAD",
+                f"- git log {remote_base}..HEAD",
                 "",
                 "You are strictly read-only:",
                 "Do not edit, create, or delete any file other than the review report below.",

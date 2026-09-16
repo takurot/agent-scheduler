@@ -534,6 +534,140 @@ def test_prepared_isolated_git_resolves_worktree_without_ambient_env_vars(
     assert commit.returncode == 0, commit.stderr
 
 
+def test_prepared_isolated_git_seeds_remote_base_ref_for_diff_and_log(tmp_path: Path) -> None:
+    from subsched.agents.isolation import prepare_isolated_git
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    run(["git", "init", "--quiet", "-b", "main", str(worktree)], check=True)
+    run(["git", "-C", str(worktree), "config", "user.name", "Test"], check=True)
+    run(
+        ["git", "-C", str(worktree), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    tracked = worktree / "tracked.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    run(["git", "-C", str(worktree), "add", "tracked.txt"], check=True)
+    run(["git", "-C", str(worktree), "commit", "--quiet", "-m", "base"], check=True)
+    base_commit = run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    run(
+        ["git", "-C", str(worktree), "update-ref", "refs/remotes/origin/develop", base_commit],
+        check=True,
+    )
+    run(["git", "-C", str(worktree), "switch", "--quiet", "-c", "feature"], check=True)
+    tracked.write_text("feature\n", encoding="utf-8")
+    run(["git", "-C", str(worktree), "commit", "--quiet", "-am", "feature"], check=True)
+    run(["git", "-C", str(worktree), "branch", "develop", "HEAD"], check=True)
+
+    context = prepare_isolated_git(
+        worktree, tmp_path / "state", "github-327", base_branch="develop"
+    )
+
+    resolved_base = run(
+        ["git", f"--git-dir={context.git_dir}", "rev-parse", "origin/develop"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    diff = run(
+        [
+            "git",
+            f"--git-dir={context.git_dir}",
+            f"--work-tree={worktree}",
+            "diff",
+            "origin/develop...HEAD",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    log = run(
+        ["git", f"--git-dir={context.git_dir}", "log", "--format=%s", "origin/develop..HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    assert resolved_base == base_commit
+    assert "+feature" in diff
+    assert log.strip() == "feature"
+
+
+def test_prepared_isolated_git_falls_back_to_local_base_branch(tmp_path: Path) -> None:
+    from subsched.agents.isolation import prepare_isolated_git
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    run(["git", "init", "--quiet", "-b", "main", str(worktree)], check=True)
+    run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "--quiet",
+            "-m",
+            "base",
+        ],
+        check=True,
+    )
+    base_commit = run(
+        ["git", "-C", str(worktree), "rev-parse", "main"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    run(["git", "-C", str(worktree), "switch", "--quiet", "-c", "feature"], check=True)
+
+    context = prepare_isolated_git(worktree, tmp_path / "state", "github-327")
+
+    resolved_base = run(
+        ["git", f"--git-dir={context.git_dir}", "rev-parse", "origin/main"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert resolved_base == base_commit
+
+
+def test_prepared_isolated_git_rejects_missing_base_branch(tmp_path: Path) -> None:
+    from subsched.agents.isolation import prepare_isolated_git
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    run(["git", "init", "--quiet", "-b", "feature", str(worktree)], check=True)
+    run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "--quiet",
+            "-m",
+            "feature",
+        ],
+        check=True,
+    )
+
+    with pytest.raises(ValueError, match="base branch"):
+        prepare_isolated_git(worktree, tmp_path / "state", "github-327")
+
+
 def test_container_cleanup_force_removes_a_surviving_invocation() -> None:
     from subsched.agents.isolation import cleanup_native_container
 
@@ -739,10 +873,11 @@ def test_native_dispatch_uses_attested_container_request(
         "subsched.agents.native.verify_native_isolation", lambda *args, **kwargs: None
     )
     git_context = IsolationGitContext(tmp_path / "sandbox.git", "a" * 40, tmp_path / "worktree.git")
-    monkeypatch.setattr(
-        "subsched.agents.native.prepare_isolated_git",
-        lambda *args, **kwargs: git_context,
-    )
+    def prepare(*args: object, **kwargs: object) -> IsolationGitContext:
+        observed["prepare_base_branch"] = kwargs.get("base_branch")
+        return git_context
+
+    monkeypatch.setattr("subsched.agents.native.prepare_isolated_git", prepare)
     monkeypatch.setattr("subsched.agents.native.import_isolated_git", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "subsched.agents.native.cleanup_native_container", lambda *args, **kwargs: None
@@ -761,6 +896,7 @@ def test_native_dispatch_uses_attested_container_request(
         isolation_config=_runtime_config(auth),
         isolation_runtime_executable=Path("/usr/bin/docker"),
         isolation_state_root=tmp_path / "state",
+        base_branch="develop",
     )
 
     result = worker.run(task, "codex")
@@ -770,6 +906,7 @@ def test_native_dispatch_uses_attested_container_request(
     assert observed["config"] == _runtime_config(auth)
     assert observed["runtime_executable"] == Path("/usr/bin/docker")
     assert observed["git_dir"] == git_context.git_dir
+    assert observed["prepare_base_branch"] == "develop"
     codex.execute.assert_called_once_with(observed["request"])
 
 
@@ -820,6 +957,7 @@ def test_native_dispatch_mounts_review_reports_dir_writable_for_pr_review(
         isolation_config=_runtime_config(auth, agent="claude"),
         isolation_runtime_executable=Path("/usr/bin/docker"),
         isolation_state_root=tmp_path / "state",
+        base_branch="develop",
     )
 
     result = worker.run(task, "claude")
@@ -828,6 +966,9 @@ def test_native_dispatch_mounts_review_reports_dir_writable_for_pr_review(
     assert observed["read_only"] is True
     assert observed["review_reports_dir"] == worktree / ".ai" / "reviews"
     assert (worktree / ".ai" / "reviews").is_dir()
+    request = observed["request"]
+    assert b"git diff origin/develop...HEAD" in request.stdin_payload  # type: ignore[attr-defined]
+    assert b"git log origin/develop..HEAD" in request.stdin_payload  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize(

@@ -8,12 +8,22 @@ from pathlib import Path
 
 import pytest
 
-from subsched.contract import bootstrap_task_files
+from subsched.contract import bootstrap_task_files, build_review_prompt
 from subsched.models import Issue, Task
 
 _POSIX_ONLY = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX file permission bits are not meaningful on Windows"
 )
+
+
+def test_review_prompt_uses_configured_base_branch() -> None:
+    task = Task.from_issue(Issue(number=327, title="Review base ref"))
+
+    prompt = build_review_prompt(task, round_number=2, base_branch="develop")
+
+    assert "git diff origin/develop...HEAD" in prompt
+    assert "git log origin/develop..HEAD" in prompt
+    assert "origin/main" not in prompt
 
 
 def test_bootstrap_task_files_preserves_repository_instructions_byte_for_byte(

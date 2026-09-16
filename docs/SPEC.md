@@ -2798,10 +2798,15 @@ configuration, credential helpers, hooks, or sibling task data. Validate paths a
 mount sources outside worker control; reject symlinks and inconsistent state at those
 boundaries. A worker-created symlink must never make an unmounted host path reachable.
 
-The Scheduler seeds a private Git database from the task HEAD. After cleanup it accepts
-only a valid descendant commit, imports its objects, atomically advances the task HEAD
-from the expected base, and synchronizes the task index. Review-stage workspaces are
-mounted read-only and any review-stage commit is rejected. PR_REVIEW is the one
+The Scheduler seeds a private Git database from the task HEAD and the validated base
+branch. It exposes only the selected base as `refs/remotes/origin/<base_branch>`,
+preferring the host remote-tracking ref and falling back to the same-named local branch;
+an unavailable base blocks dispatch. This lets review workers run `git diff` and `git log`
+against the configured base without exposing the host's shared Git database. After
+cleanup the Scheduler accepts only a valid descendant commit, imports its objects,
+atomically advances the task HEAD from the expected base, and synchronizes the task
+index. Review-stage workspaces are mounted read-only and any review-stage commit is
+rejected. PR_REVIEW is the one
 exception: since the reviewer must persist `.ai/reviews/<issue>-r<round>.md` into the
 task worktree, that single subdirectory is additionally bind-mounted writable inside the
 otherwise read-only workspace; a mechanical post-dispatch check still fails closed if any

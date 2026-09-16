@@ -471,6 +471,7 @@ def run(
                 # parsing and confirmed against installed CLI capability by the
                 # preflight check above.
                 agents=cfg.agents,
+                base_branch=base_branch or "main",
             ),
             worktree_root=worktree_root,
             worktree_adapter=worktree_adapter,

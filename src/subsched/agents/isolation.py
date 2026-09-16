@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from subsched.agents.base import ProcessExecutionRequest
-from subsched.config import NativeIsolationConfig
+from subsched.config import NativeIsolationConfig, validate_base_branch
 from subsched.gitenv import git_safe_env
 from subsched.storage import atomic_write_secure_bytes, secure_directory
 
@@ -103,11 +103,13 @@ def prepare_isolated_git(
     state_root: Path,
     task_id: str,
     *,
+    base_branch: str = "main",
     run_cmd: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> IsolationGitContext:
-    """Create a private Git database seeded only from the task's current HEAD."""
+    """Create a private Git database seeded from the task HEAD and its review base."""
     if not _TASK_ID_RE.fullmatch(task_id):
         raise ValueError("native isolation task id is unsafe")
+    validated_base = validate_base_branch(base_branch)
     if not state_root.is_absolute() or state_root.is_symlink():
         raise ValueError("native isolation state root must be an absolute non-symlink path")
     resolved_worktree = worktree.resolve(strict=True)
@@ -125,6 +127,26 @@ def prepare_isolated_git(
     base_commit = head.stdout.strip()
     if head.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", base_commit):
         raise ValueError("native isolation could not resolve the task Git HEAD")
+    remote_base_ref = f"refs/remotes/origin/{validated_base}"
+    local_base_ref = f"refs/heads/{validated_base}"
+    if (
+        _git(
+            ["git", "-C", str(worktree), "show-ref", "--verify", "--quiet", remote_base_ref],
+            run_cmd=run_cmd,
+        ).returncode
+        == 0
+    ):
+        base_source_ref = remote_base_ref
+    elif (
+        _git(
+            ["git", "-C", str(worktree), "show-ref", "--verify", "--quiet", local_base_ref],
+            run_cmd=run_cmd,
+        ).returncode
+        == 0
+    ):
+        base_source_ref = local_base_ref
+    else:
+        raise ValueError("native isolation could not resolve the configured base branch")
     commands = (
         ["git", "init", "--quiet", "--bare", str(git_dir)],
         [
@@ -135,6 +157,24 @@ def prepare_isolated_git(
             "--no-tags",
             str(worktree),
             f"HEAD:refs/heads/{task_id}",
+        ],
+        [
+            "git",
+            f"--git-dir={git_dir}",
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-write-fetch-head",
+            str(worktree),
+            f"{base_source_ref}:{remote_base_ref}",
+        ],
+        [
+            "git",
+            f"--git-dir={git_dir}",
+            "rev-parse",
+            "--quiet",
+            "--verify",
+            f"{remote_base_ref}^{{commit}}",
         ],
         [
             "git",
