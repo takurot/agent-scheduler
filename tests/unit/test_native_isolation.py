@@ -1,6 +1,7 @@
 """Issue #293 admission regressions; these do not prove runtime containment."""
 
 import dataclasses
+import os
 from pathlib import Path
 from subprocess import CompletedProcess, run
 from unittest.mock import MagicMock
@@ -325,6 +326,116 @@ def test_container_request_has_only_explicit_isolated_mounts_and_environment(
     assert "HOME=/isolated-home" in joined
     assert "HTTP_PROXY=http://subsched-provider-proxy:3128" in joined
     assert wrapped.stdin_payload == b"prompt"
+
+
+def test_container_request_omits_ambient_git_env_when_git_dir_is_wired(
+    tmp_path: Path,
+) -> None:
+    from subsched.agents.base import ProcessExecutionRequest
+    from subsched.agents.isolation import prepare_isolated_git, wrap_native_request
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    run(["git", "init", "--quiet", "-b", "main", str(worktree)], check=True)
+    run(["git", "-C", str(worktree), "config", "user.name", "Test"], check=True)
+    run(
+        ["git", "-C", str(worktree), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    run(
+        ["git", "-C", str(worktree), "commit", "--allow-empty", "--quiet", "-m", "initial"],
+        check=True,
+    )
+    context = prepare_isolated_git(worktree, tmp_path / "state", "github-293")
+    auth = _secure_auth_dir(tmp_path / "auth")
+    original = ProcessExecutionRequest(
+        argv=("codex", "exec", "-"),
+        cwd=worktree,
+        env={"HOME": "/host/home", "PATH": "/host/bin"},
+    )
+
+    wrapped = wrap_native_request(
+        original,
+        agent="codex",
+        config=_runtime_config(auth),
+        runtime_executable=Path("/usr/bin/docker"),
+        git_dir=context.git_dir,
+        worktree_git_mount=context.worktree_git_mount,
+    )
+
+    joined = " ".join(wrapped.argv)
+    assert "GIT_DIR" not in joined
+    assert "GIT_WORK_TREE" not in joined
+
+
+def test_prepared_isolated_git_resolves_worktree_without_ambient_env_vars(
+    tmp_path: Path,
+) -> None:
+    """Mirrors the container's `.git` file mount so a subprocess (like a test fixture's
+    ad-hoc `git init`) never inherits GIT_DIR/GIT_WORK_TREE from the parent environment."""
+    from subsched.agents.isolation import prepare_isolated_git
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    run(["git", "init", "--quiet", "-b", "main", str(worktree)], check=True)
+    run(["git", "-C", str(worktree), "config", "user.name", "Test"], check=True)
+    run(
+        ["git", "-C", str(worktree), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    tracked = worktree / "tracked.txt"
+    tracked.write_text("before\n", encoding="utf-8")
+    run(["git", "-C", str(worktree), "add", "tracked.txt"], check=True)
+    run(["git", "-C", str(worktree), "commit", "--quiet", "-m", "initial"], check=True)
+
+    context = prepare_isolated_git(worktree, tmp_path / "state", "github-293")
+
+    bare_config = run(
+        ["git", f"--git-dir={context.git_dir}", "config", "core.bare"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert bare_config == "false"
+
+    mount_point = tmp_path / "container-view"
+    mount_point.mkdir()
+    (mount_point / "tracked.txt").write_text("after\n", encoding="utf-8")
+    (mount_point / ".git").write_bytes(f"gitdir: {context.git_dir}\n".encode())
+    env_without_git_vars = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"GIT_DIR", "GIT_WORK_TREE"}
+    }
+
+    status = run(
+        ["git", "-C", str(mount_point), "status", "--short"],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env_without_git_vars,
+    ).stdout
+    assert status.strip() == "M tracked.txt"
+
+    commit = run(
+        [
+            "git",
+            "-C",
+            str(mount_point),
+            "-c",
+            "user.name=Worker",
+            "-c",
+            "user.email=worker@example.invalid",
+            "commit",
+            "--quiet",
+            "-am",
+            "worker commit",
+        ],
+        capture_output=True,
+        text=True,
+        env=env_without_git_vars,
+    )
+    assert commit.returncode == 0, commit.stderr
 
 
 def test_container_cleanup_force_removes_a_surviving_invocation() -> None:

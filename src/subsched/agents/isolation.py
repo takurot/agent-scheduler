@@ -161,6 +161,13 @@ def prepare_isolated_git(
             "core.hooksPath",
             "/dev/null",
         ],
+        [
+            "git",
+            f"--git-dir={git_dir}",
+            "config",
+            "core.bare",
+            "false",
+        ],
     )
     for command in commands:
         if _git(command, run_cmd=run_cmd).returncode != 0:
@@ -627,8 +634,6 @@ def wrap_native_request(
         f"HTTPS_PROXY={config.proxy_url}",
         "--env",
         "NO_PROXY=localhost,127.0.0.1",
-        *(("--env", "GIT_DIR=/run/subsched-git") if git_dir is not None else ()),
-        *(("--env", f"GIT_WORK_TREE={request.cwd}") if git_dir is not None else ()),
         *(("--mount", _mount_value(git_dir, "/run/subsched-git")) if git_dir else ()),
         *(
             (
