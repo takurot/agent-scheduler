@@ -158,7 +158,9 @@ def _extract_needs_human_data(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def parse_claude_result(
-    outcome: ClaudeProcessOutcome, observed_at: datetime | None = None
+    outcome: ClaudeProcessOutcome,
+    observed_at: datetime | None = None,
+    plan_review: bool = False,
 ) -> AgentResult:
     if outcome.timed_out:
         if outcome.cleanup_succeeded is not True:
@@ -189,7 +191,30 @@ def parse_claude_result(
                 output=sanitize_agent_summary(summary),
             )
         if _is_success(payload, outcome.exit_code):
+            if plan_review:
+                from subsched.plan_review import PlanVerdictError, parse_verdict
+
+                raw_result = payload.get("result")
+                if isinstance(raw_result, dict):
+                    raw_str = json.dumps(raw_result)
+                elif isinstance(raw_result, str):
+                    raw_str = raw_result
+                elif isinstance(payload.get("structured_output"), dict):
+                    raw_str = json.dumps(payload["structured_output"])
+                else:
+                    raw_str = ""
+
+                try:
+                    verdict = parse_verdict(raw_str)
+                except PlanVerdictError:
+                    return AgentResult(AgentResultKind.UNKNOWN, output="claude result unknown")
+                return AgentResult(
+                    AgentResultKind.PASS,
+                    output="claude completed",
+                    plan_verdict=verdict,
+                )
             return AgentResult(AgentResultKind.PASS, output="claude completed")
+
     if outcome.stdout and (payload is None or not _is_known_result(payload)):
         return AgentResult(AgentResultKind.UNKNOWN, output="claude result unknown")
     is_api_error = payload is not None and _is_api_error_payload(payload)
@@ -472,4 +497,4 @@ class ClaudeAgent:
             timed_out=res.timed_out,
             cleanup_succeeded=res.cleanup_succeeded,
         )
-        return parse_claude_result(outcome)
+        return parse_claude_result(outcome, plan_review=request.plan_review)

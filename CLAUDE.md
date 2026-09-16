@@ -75,6 +75,7 @@ All development in this repository must strictly adhere to [`docs/WORKFLOW.md`](
 - Fast-forward sync with `main` before starting: `git switch main && git pull --ff-only`.
 - Development branches follow: `issue/<ISSUE>-<short-description>`.
 - The `subsched/issue-N` branch pattern is reserved exclusively for Scheduler-managed task worktrees.
+- Inside Scheduler-managed worktrees (`subsched/issue-N`), branch preparation and isolation are handled by Scheduler; agents must work in the existing worktree without switching branches or syncing main.
 
 ### Testing & Quality Gate (`docs/WORKFLOW.md` §4, §7)
 - **TDD Workflow**:

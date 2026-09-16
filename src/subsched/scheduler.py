@@ -216,9 +216,7 @@ class Scheduler:
         self.repo = repo
         if push_enabled and create_pr_enabled and base_branch is None:
             raise ValueError("base_branch must be resolved before enabling push/PR")
-        self.base_branch = (
-            validate_base_branch(base_branch) if base_branch is not None else None
-        )
+        self.base_branch = validate_base_branch(base_branch) if base_branch is not None else None
         self.concurrency = concurrency
         if max_agent_failures <= 0:
             raise ValueError("max_agent_failures must be positive")
@@ -325,9 +323,7 @@ class Scheduler:
         threshold `_handle_result` uses for a live agent failure. An interrupted VERIFYING
         task is reconciled via _reconcile_verifying_task into a safe resumable state.
         """
-        in_flight = [
-            task for task in self.queue.tasks if task.status in _IN_FLIGHT_RECOVERY_STATES
-        ]
+        in_flight = [task for task in self.queue.tasks if task.status in _IN_FLIGHT_RECOVERY_STATES]
         changed = False
         for task in in_flight:
             from_state = task.status
@@ -356,10 +352,7 @@ class Scheduler:
                     reconciled, reason = reconcile_task_recovery(Path(task.worktree), task)
                     if reconciled.status is TaskState.RETRY:
                         if recovery_agent is None:
-                            reason = (
-                                f"{reason}; {recovery_agent_error}; "
-                                "escalated to NEEDS_HUMAN"
-                            )
+                            reason = f"{reason}; {recovery_agent_error}; escalated to NEEDS_HUMAN"
                             resolved = reconciled.transition(TaskState.NEEDS_HUMAN, reason=reason)
                         else:
                             failures_dict = dict(reconciled.per_agent_failures)
@@ -378,8 +371,7 @@ class Scheduler:
                             next_state = (
                                 TaskState.NEEDS_HUMAN
                                 if agent_failure_count >= self.max_agent_failures
-                                or task.dispatch_status
-                                in (TaskState.PR_REVIEW, TaskState.REVISING)
+                                or task.dispatch_status in (TaskState.PR_REVIEW, TaskState.REVISING)
                                 else TaskState.READY
                             )
                             resolved = reconciled.transition(next_state, reason=reason)
@@ -441,19 +433,14 @@ class Scheduler:
                 base=self.base_branch or "main",
                 repo=self.repo,
             )
-            if (
-                existing_pr.kind is ExistingPrCheckKind.CONFIRMED
-                and existing_pr.info is not None
-            ):
+            if existing_pr.kind is ExistingPrCheckKind.CONFIRMED and existing_pr.info is not None:
                 with_pr = replace(task, pr=existing_pr.info.number)
                 reason = (
                     f"interrupted verifying task already has PR #{existing_pr.info.number}; "
                     "recovered to READY_FOR_REVIEW"
                 )
                 pr_ready = with_pr.transition(TaskState.PR_READY, reason=reason)
-                ready_for_review = pr_ready.transition(
-                    TaskState.READY_FOR_REVIEW, reason=reason
-                )
+                ready_for_review = pr_ready.transition(TaskState.READY_FOR_REVIEW, reason=reason)
                 return ready_for_review, reason
 
         # Otherwise, verification was interrupted; recover to READY (or
@@ -463,9 +450,7 @@ class Scheduler:
             TaskState.RETRY, current_agent=None, increment_attempt=True, reason=reason
         )
         next_state = (
-            TaskState.NEEDS_HUMAN
-            if retry.attempt >= self.max_agent_failures
-            else TaskState.READY
+            TaskState.NEEDS_HUMAN if retry.attempt >= self.max_agent_failures else TaskState.READY
         )
         return retry.transition(next_state, reason=reason), reason
 
@@ -561,9 +546,7 @@ class Scheduler:
             if current_task.status is TaskState.PLANNING:
                 planning = current_task
             else:
-                planning = current_task.transition(
-                    TaskState.PLANNING, current_agent=agent, now=now
-                )
+                planning = current_task.transition(TaskState.PLANNING, current_agent=agent, now=now)
             planning = replace(
                 planning,
                 dispatch_stage=stage,
@@ -590,9 +573,10 @@ class Scheduler:
                 self._handle_result(planning, agent, result, now)
                 return "terminal", None
 
-            plan_file_exists = planning.worktree is not None and (
-                Path(planning.worktree) / plan_path(planning.issue_number)
-            ).is_file()
+            plan_file_exists = (
+                planning.worktree is not None
+                and (Path(planning.worktree) / plan_path(planning.issue_number)).is_file()
+            )
             if not plan_file_exists:
                 self._escalate_stage(
                     planning,
@@ -605,12 +589,8 @@ class Scheduler:
             if not self.workflow.stages.plan_review:
                 # #280: plan_review is opt-out -- an existing plan file is enough to
                 # auto-approve and proceed straight to implementation.
-                approved = planning.transition(
-                    TaskState.PLAN_REVIEW, current_agent=agent, now=now
-                )
-                approved = approved.transition(
-                    TaskState.IN_PROGRESS, current_agent=agent, now=now
-                )
+                approved = planning.transition(TaskState.PLAN_REVIEW, current_agent=agent, now=now)
+                approved = approved.transition(TaskState.IN_PROGRESS, current_agent=agent, now=now)
                 approved = replace(approved, plan_approved=True)
                 self.queue = self.queue.replace(approved)
                 self._persist()
@@ -646,18 +626,18 @@ class Scheduler:
                 self._handle_result(review, agent, review_result, now)
                 return "terminal", None
 
-            try:
-                verdict = parse_verdict(review_result.output)
-            except PlanVerdictError as error:
-                self._escalate_stage(
-                    review, agent, now, f"malformed plan review verdict: {error}"
-                )
-                return "terminal", None
+            verdict = review_result.plan_verdict
+            if verdict is None:
+                try:
+                    verdict = parse_verdict(review_result.output)
+                except PlanVerdictError as error:
+                    self._escalate_stage(
+                        review, agent, now, f"malformed plan review verdict: {error}"
+                    )
+                    return "terminal", None
 
             if verdict.verdict == "APPROVE":
-                approved = review.transition(
-                    TaskState.IN_PROGRESS, current_agent=agent, now=now
-                )
+                approved = review.transition(TaskState.IN_PROGRESS, current_agent=agent, now=now)
                 approved = replace(approved, plan_approved=True)
                 self.queue = self.queue.replace(approved)
                 self._persist()
@@ -686,9 +666,7 @@ class Scheduler:
                 )
                 return "terminal", None
 
-            back_to_planning = review.transition(
-                TaskState.PLANNING, current_agent=agent, now=now
-            )
+            back_to_planning = review.transition(TaskState.PLANNING, current_agent=agent, now=now)
             back_to_planning = replace(back_to_planning, plan_revisions=new_revisions)
             self.queue = self.queue.replace(back_to_planning)
             self._persist()
@@ -775,10 +753,7 @@ class Scheduler:
                     task = task.transition(TaskState.BLOCKED, reason="self-dependency detected")
             elif task.status is TaskState.READY and new_deps:
                 task = task.transition(TaskState.WAITING_DEPENDENCY)
-            elif (
-                task.status in (TaskState.WAITING_DEPENDENCY, TaskState.BLOCKED)
-                and not new_deps
-            ):
+            elif task.status in (TaskState.WAITING_DEPENDENCY, TaskState.BLOCKED) and not new_deps:
                 task = task.transition(TaskState.READY)
 
             reconciled_tasks.append(task)
@@ -808,8 +783,7 @@ class Scheduler:
                     notes.append(
                         (
                             issue.number,
-                            f"excluded: merged PR #{check.pr_number} already implements "
-                            "this issue",
+                            f"excluded: merged PR #{check.pr_number} already implements this issue",
                         )
                     )
                     continue
@@ -1367,13 +1341,12 @@ class Scheduler:
             elif status.overall_state is CICheckState.FAIL:
                 from subsched.agents.process import redact_sensitive_command_audit
 
-                failed = ", ".join(
-                    c.name for c in status.checks if c.state is CICheckState.FAIL
-                ) or "unknown check"
+                failed = (
+                    ", ".join(c.name for c in status.checks if c.state is CICheckState.FAIL)
+                    or "unknown check"
+                )
                 reason = "\n".join(
-                    redact_sensitive_command_audit(
-                        (f"CI failed for PR #{task.pr}: {failed}",)
-                    )
+                    redact_sensitive_command_audit((f"CI failed for PR #{task.pr}: {failed}",))
                 )
                 updated = task.transition(
                     TaskState.NEEDS_HUMAN,
@@ -1414,8 +1387,7 @@ class Scheduler:
                 )
             else:
                 reason = (
-                    f"could not read a valid review report for round {round_number}; "
-                    "failing closed"
+                    f"could not read a valid review report for round {round_number}; failing closed"
                 )
             final = task.transition(
                 TaskState.NEEDS_HUMAN, current_agent=agent, now=now, reason=reason
@@ -1566,9 +1538,7 @@ class Scheduler:
                 "post_rebase": True,
             },
         )
-        result_kind = (
-            AgentResultKind.PASS if post_rebase_report.passed else AgentResultKind.FAILURE
-        )
+        result_kind = AgentResultKind.PASS if post_rebase_report.passed else AgentResultKind.FAILURE
         cp = capture_mechanical_checkpoint(
             worktree_dir,
             verifying.issue_number,
@@ -1596,7 +1566,6 @@ class Scheduler:
             return retry.transition(next_state, now=now)
 
         verification_summary = post_rebase_report.summary
-
 
         # #140: never push a commit whose message contains a GitHub auto-close keyword
         # (Fixes/Closes/Resolves #N) -- that would let a merge auto-close the issue,
@@ -1814,9 +1783,7 @@ class Scheduler:
                     with suppress(Exception):
                         from subsched.handoff import parse_semantic_handoff
 
-                        parsed_ho = parse_semantic_handoff(
-                            handoff_path.read_text(encoding="utf-8")
-                        )
+                        parsed_ho = parse_semantic_handoff(handoff_path.read_text(encoding="utf-8"))
                         if parsed_ho and parsed_ho.next_action:
                             reason_detail = sanitize_agent_summary(parsed_ho.next_action)
 
@@ -2006,10 +1973,9 @@ class Scheduler:
             from subsched.capacity.base import BLOCKER_SEVERITY
 
             existing_cap = self._cooldowns.get(agent)
-            should_update_cooldown = (
-                existing_cap is None
-                or BLOCKER_SEVERITY.get(state, 0) >= BLOCKER_SEVERITY.get(existing_cap.state, 0)
-            )
+            should_update_cooldown = existing_cap is None or BLOCKER_SEVERITY.get(
+                state, 0
+            ) >= BLOCKER_SEVERITY.get(existing_cap.state, 0)
             if should_update_cooldown:
                 self._cooldowns = {
                     **self._cooldowns,
@@ -2101,11 +2067,9 @@ class Scheduler:
             from subsched.capacity.base import BLOCKER_SEVERITY
 
             existing_cap = self._cooldowns.get(agent)
-            should_update_cooldown = (
-                existing_cap is None
-                or BLOCKER_SEVERITY.get(target_state, 0)
-                >= BLOCKER_SEVERITY.get(existing_cap.state, 0)
-            )
+            should_update_cooldown = existing_cap is None or BLOCKER_SEVERITY.get(
+                target_state, 0
+            ) >= BLOCKER_SEVERITY.get(existing_cap.state, 0)
             if should_update_cooldown:
                 self._cooldowns = {
                     **self._cooldowns,
@@ -2140,9 +2104,7 @@ class Scheduler:
                 )
             else:
                 error_label = (
-                    "auth error"
-                    if result.kind is AgentResultKind.AUTH_ERROR
-                    else "billing error"
+                    "auth error" if result.kind is AgentResultKind.AUTH_ERROR else "billing error"
                 )
                 reason = f"{error_label} for agent '{agent}': no alternative agent available"
                 final = task.transition(

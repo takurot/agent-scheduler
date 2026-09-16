@@ -120,12 +120,8 @@ def test_pr_review_round_trip_request_changes_then_reverify() -> None:
     pr_ready = running.transition(TaskState.VERIFYING).transition(TaskState.PR_READY)
     in_review = pr_ready.transition(TaskState.PR_REVIEW)
     revising = in_review.transition(TaskState.REVISING)
-    revision_running = revising.transition(TaskState.DISPATCHED).transition(
-        TaskState.IN_PROGRESS
-    )
-    reverified = revision_running.transition(TaskState.VERIFYING).transition(
-        TaskState.PR_READY
-    )
+    revision_running = revising.transition(TaskState.DISPATCHED).transition(TaskState.IN_PROGRESS)
+    reverified = revision_running.transition(TaskState.VERIFYING).transition(TaskState.PR_READY)
     back_in_review = reverified.transition(TaskState.PR_REVIEW)
     assert back_in_review.status is TaskState.PR_REVIEW
 
@@ -134,9 +130,7 @@ def test_dispatch_status_persists_through_transition_and_round_trips() -> None:
     """dispatch_status is preserved by .transition() (dataclasses.replace) and by
     to_dict/from_dict, unlike status itself which is overwritten on every dispatch."""
     task = Task.from_issue(Issue(number=1, title="one"))
-    running = replace(task, dispatch_status=TaskState.PR_REVIEW).transition(
-        TaskState.DISPATCHED
-    )
+    running = replace(task, dispatch_status=TaskState.PR_REVIEW).transition(TaskState.DISPATCHED)
     running = running.transition(TaskState.IN_PROGRESS)
     assert running.status is TaskState.IN_PROGRESS
     assert running.dispatch_status is TaskState.PR_REVIEW
@@ -305,3 +299,21 @@ def test_detect_dependency_cycles_self_cycle() -> None:
     t1 = Task("gh-1", 1, "1", (), TaskState.WAITING_DEPENDENCY, dependencies=(1,))
     t2 = Task("gh-2", 2, "2", (), TaskState.READY, dependencies=())
     assert detect_dependency_cycles((t1, t2)) == {1}
+
+
+def test_agent_result_supports_plan_verdict_only_on_pass() -> None:
+    from subsched.plan_review import PlanVerdict
+
+    verdict = PlanVerdict(verdict="APPROVE", summary="LGTM", findings=())
+    res = AgentResult(AgentResultKind.PASS, plan_verdict=verdict)
+    assert res.plan_verdict == verdict
+
+    with pytest.raises(ValueError, match="plan_verdict is only permitted for PASS results"):
+        AgentResult(AgentResultKind.FAILURE, plan_verdict=verdict)
+
+    with pytest.raises(ValueError, match="plan_verdict is only permitted for PASS results"):
+        AgentResult(
+            AgentResultKind.NEEDS_HUMAN,
+            reason_code="instruction_conflict",
+            plan_verdict=verdict,
+        )

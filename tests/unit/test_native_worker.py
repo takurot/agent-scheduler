@@ -10,7 +10,7 @@ from subsched.agents.claude import ClaudeBillingMode
 from subsched.agents.codex import CodexApprovalMode
 from subsched.agents.native import NativeWorker
 from subsched.contract import bootstrap_task_files
-from subsched.models import AgentResult, AgentResultKind, Issue, Task
+from subsched.models import AgentResult, AgentResultKind, Issue, Task, TaskState
 
 
 @pytest.fixture(autouse=True)
@@ -38,8 +38,7 @@ def test_native_worker_accepts_explicit_subscription_billing_verification() -> N
     worker = NativeWorker(subscription_billing_verified=True)
 
     assert (
-        worker.claude_agent.execution_policy.billing_mode
-        is ClaudeBillingMode.SUBSCRIPTION_VERIFIED
+        worker.claude_agent.execution_policy.billing_mode is ClaudeBillingMode.SUBSCRIPTION_VERIFIED
     )
     assert worker.codex_agent.subscription_billing_verified is True
 
@@ -237,8 +236,7 @@ def test_native_worker_omits_effort_flag_when_no_policy_configured(tmp_path: Pat
 
     worker.run(task, "codex")
     assert not any(
-        arg.startswith("model_reasoning_effort=")
-        for arg in mock_codex.execute.call_args[0][0].argv
+        arg.startswith("model_reasoning_effort=") for arg in mock_codex.execute.call_args[0][0].argv
     )
 
 
@@ -269,9 +267,7 @@ def test_native_worker_resolves_effort_per_execution_stage(tmp_path: Path) -> No
                     revision="medium",
                 )
             ),
-            "codex": AgentSettings(
-                effort=AgentEffortPolicy(default="low", planning="high")
-            ),
+            "codex": AgentSettings(effort=AgentEffortPolicy(default="low", planning="high")),
         },
     )
     base = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
@@ -422,10 +418,7 @@ def test_native_worker_includes_configured_verification_commands_in_claude_promp
 
     assert "uv run ruff check ." in prompt
     assert "uv run pytest -q" in prompt
-    assert (
-        "Do not reset, clean, overwrite, or delete existing dirty worktree changes."
-        in prompt
-    )
+    assert "Do not reset, clean, overwrite, or delete existing dirty worktree changes." in prompt
 
 
 def test_native_worker_includes_configured_verification_commands_in_codex_prompt(
@@ -448,10 +441,7 @@ def test_native_worker_includes_configured_verification_commands_in_codex_prompt
     prompt = stdin_payload.decode("utf-8")
 
     assert "uv run mypy src" in prompt
-    assert (
-        "Do not reset, clean, overwrite, or delete existing dirty worktree changes."
-        in prompt
-    )
+    assert "Do not reset, clean, overwrite, or delete existing dirty worktree changes." in prompt
 
 
 def test_native_worker_defaults_to_no_verification_commands(tmp_path: Path) -> None:
@@ -520,7 +510,7 @@ def test_native_worker_codex_requests_output_schema_and_mentions_schema_in_promp
     assert schema_path.is_file()
 
     schema_data = json.loads(schema_path.read_text(encoding="utf-8"))
-    assert schema_data.get("required") == ["result", "summary"]
+    assert set(schema_data.get("required", [])) == {"result", "summary", "reason_code"}
 
     prompt = req.stdin_payload.decode("utf-8")
     assert '{"result"' in prompt
@@ -585,6 +575,59 @@ def test_native_worker_codex_uses_preflight_detected_legacy_approval_mode(
     worker.run(task, "codex")
 
     argv = mock_codex.execute.call_args[0][0].argv
+
     assert "--ask-for-approval" in argv
     assert argv[argv.index("--ask-for-approval") + 1] == "never"
     assert "--approve-for-me" not in argv
+
+
+def test_native_worker_plan_review_codex_uses_plan_review_schema(tmp_path: Path) -> None:
+    """#306: NativeWorker during PLAN_REVIEW passes plan_review=True and uses plan review schema."""
+    import json
+    from dataclasses import replace
+
+    mock_codex = MagicMock()
+    mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(
+        codex_agent=mock_codex,
+        subscription_billing_verified=True,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+    )
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    task = replace(task, status=TaskState.PLAN_REVIEW)
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "codex")
+
+    req = mock_codex.execute.call_args[0][0]
+    assert req.plan_review is True
+    assert "--output-schema" in req.argv
+    schema_idx = req.argv.index("--output-schema")
+    schema_path = Path(req.argv[schema_idx + 1])
+    assert schema_path.name == "plan-review-output.schema.json"
+    assert schema_path.is_file()
+
+    schema_data = json.loads(schema_path.read_text(encoding="utf-8"))
+    assert set(schema_data.get("required", [])) == {"verdict", "summary", "findings"}
+
+
+def test_native_worker_plan_review_claude_passes_flag(tmp_path: Path) -> None:
+    """#306: NativeWorker during PLAN_REVIEW passes plan_review=True to Claude."""
+    from dataclasses import replace
+
+    mock_claude = MagicMock()
+    mock_claude.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(
+        claude_agent=mock_claude,
+        subscription_billing_verified=True,
+    )
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    task = replace(task, status=TaskState.PLAN_REVIEW)
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "claude")
+
+    req = mock_claude.execute.call_args[0][0]
+    assert req.plan_review is True

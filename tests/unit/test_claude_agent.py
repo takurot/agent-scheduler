@@ -316,7 +316,6 @@ def test_verified_subscription_and_explicit_opt_in_allow_probe() -> None:
     assert policy.worker_state is CapacityState.AVAILABLE
 
 
-
 def test_claude_agent_blocked_when_unverified(tmp_path: Path) -> None:
     agent = ClaudeAgent()
     req = ProcessExecutionRequest(
@@ -481,3 +480,74 @@ def test_parse_claude_result_needs_human_redacts_secret() -> None:
     assert result.reason_code == "operator_decision_required"
     assert "gho_sec1234567890" not in result.output
     assert "[REDACTED]" in result.output
+
+
+def test_parse_claude_result_plan_review_approve() -> None:
+    from subsched.plan_review import PlanVerdict
+
+    verdict_json = json.dumps(
+        {
+            "verdict": "APPROVE",
+            "summary": "Implementation plan looks solid",
+            "findings": [],
+        }
+    )
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 1,
+            "result": verdict_json,
+        }
+    )
+    outcome = ClaudeProcessOutcome(exit_code=0, stdout=payload)
+    res = parse_claude_result(outcome, plan_review=True)
+    assert res.kind is AgentResultKind.PASS
+    assert res.output == "claude completed"
+    assert res.plan_verdict == PlanVerdict(
+        verdict="APPROVE", summary="Implementation plan looks solid", findings=()
+    )
+
+
+def test_parse_claude_result_plan_review_request_changes() -> None:
+    from subsched.plan_review import PlanVerdict
+
+    verdict_json = json.dumps(
+        {
+            "verdict": "REQUEST_CHANGES",
+            "summary": "Missing error handling",
+            "findings": ["Add tests"],
+        }
+    )
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 1,
+            "result": verdict_json,
+        }
+    )
+    outcome = ClaudeProcessOutcome(exit_code=0, stdout=payload)
+    res = parse_claude_result(outcome, plan_review=True)
+    assert res.kind is AgentResultKind.PASS
+    assert res.output == "claude completed"
+    assert res.plan_verdict == PlanVerdict(
+        verdict="REQUEST_CHANGES", summary="Missing error handling", findings=("Add tests",)
+    )
+
+
+def test_parse_claude_result_plan_review_malformed_verdict() -> None:
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 1,
+            "result": "not json",
+        }
+    )
+    outcome = ClaudeProcessOutcome(exit_code=0, stdout=payload)
+    res = parse_claude_result(outcome, plan_review=True)
+    assert res.kind is AgentResultKind.UNKNOWN

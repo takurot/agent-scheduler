@@ -14,12 +14,14 @@ import pytest
 
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.codex import (
+    CODEX_OUTPUT_SCHEMA,
     CodexAgent,
     CodexApprovalMode,
     CodexProbeConfig,
     CodexProbeSafetyError,
     build_codex_exec_argv,
     build_codex_headless_argv,
+    ensure_codex_output_schema,
     parse_codex_jsonl,
     resolve_codex_sandbox_mode,
     run_codex_probe,
@@ -240,7 +242,6 @@ def test_parse_codex_cli_metadata_fails_closed_when_approval_flag_unknown() -> N
         parse_codex_cli_metadata(version_output=version, help_output=help_output)
 
 
-
 @pytest.mark.parametrize(
     ("fixture", "kind", "output"),
     [
@@ -251,9 +252,7 @@ def test_parse_codex_cli_metadata_fails_closed_when_approval_flag_unknown() -> N
         ("approval-error.jsonl", AgentResultKind.FAILURE, "codex approval required"),
     ],
 )
-def test_failure_fixtures_are_classified(
-    fixture: str, kind: AgentResultKind, output: str
-) -> None:
+def test_failure_fixtures_are_classified(fixture: str, kind: AgentResultKind, output: str) -> None:
     result = parse_codex_jsonl(_fixture(fixture), returncode=1)
 
     assert result.kind is kind
@@ -456,10 +455,7 @@ def test_probe_kills_descendant_that_holds_stdout_after_leader_exits(tmp_path: P
     child_pid_file = tmp_path / "child.pid"
     executable = tmp_path / "codex"
     executable.write_text(
-        "#!/bin/sh\n"
-        "trap '' TERM\n"
-        "sleep 30 &\n"
-        f"printf '%s' \"$!\" > {child_pid_file}\n",
+        f"#!/bin/sh\ntrap '' TERM\nsleep 30 &\nprintf '%s' \"$!\" > {child_pid_file}\n",
         encoding="utf-8",
     )
     executable.chmod(0o700)
@@ -550,6 +546,7 @@ def test_process_exit_race_during_timeout_cleanup_is_safe(
     process = _ExitedDuringCleanupProcess()
 
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
+
     def process_already_exited(pid: int, signal: int) -> None:
         raise ProcessLookupError
 
@@ -716,7 +713,6 @@ class _ReapErrorProcess(_TimedOutProcess):
         raise OSError("unsafe cleanup detail")
 
 
-
 def test_codex_agent_blocked_without_opt_in(tmp_path: Path) -> None:
     agent = CodexAgent(allow_live=False)
     req = ProcessExecutionRequest(
@@ -742,7 +738,7 @@ def test_codex_agent_blocked_without_verified_billing(tmp_path: Path) -> None:
 
 def test_codex_agent_executes_when_verified(tmp_path: Path) -> None:
     agent = CodexAgent(allow_live=True, subscription_billing_verified=True)
-    msg = "{\"result\": \"pass\", \"summary\": \"all good\"}"
+    msg = '{"result": "pass", "summary": "all good"}'
     script = (
         "import json; "
         "print(json.dumps({'type': 'thread.started', 'thread_id': 'th_123'})); "
@@ -788,6 +784,7 @@ def test_codex_probe_config_validations(tmp_path: Path) -> None:
 
     # Non-dict schema
     from subsched.agents.codex import _validate_schema
+
     bad_schema = tmp_path / "bad.json"
     bad_schema.write_text("[]", encoding="utf-8")
     with pytest.raises(ValueError, match="must be a JSON object"):
@@ -817,7 +814,7 @@ def test_codex_parse_jsonl_malformed_variations() -> None:
 
 
 def test_codex_parse_jsonl_returncode_error() -> None:
-    msg = "{\"result\": \"pass\", \"summary\": \"all good\"}"
+    msg = '{"result": "pass", "summary": "all good"}'
     payload = "\n".join(
         [
             json.dumps({"type": "thread.started", "thread_id": "th_1"}),
@@ -856,9 +853,7 @@ def test_codex_jsonl_additional_malformed_and_failure_branches() -> None:
     events_bad_turn_start = [
         json.dumps({"type": "thread.started", "thread_id": "th_1"}),
         json.dumps({"type": "something_else"}),
-        json.dumps(
-            {"type": "item.completed", "item": {"type": "agent_message", "text": pass_msg}}
-        ),
+        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": pass_msg}}),
         json.dumps({"type": "turn.completed", "usage": {}}),
     ]
     res_bad_start = parse_codex_jsonl("\n".join(events_bad_turn_start), returncode=0)
@@ -1280,10 +1275,7 @@ def test_build_codex_headless_argv_adds_model_as_single_argv_element(tmp_path: P
 def test_resolve_codex_sandbox_mode_uses_per_stage_mode_outside_containers(
     read_only: bool, expected: str
 ) -> None:
-    assert (
-        resolve_codex_sandbox_mode(read_only=read_only, container_isolated=False)
-        == expected
-    )
+    assert resolve_codex_sandbox_mode(read_only=read_only, container_isolated=False) == expected
 
 
 @pytest.mark.parametrize("read_only", [False, True])
@@ -1423,3 +1415,68 @@ def test_parse_codex_jsonl_rejects_reason_code_on_pass_or_failure() -> None:
         res = parse_codex_jsonl(payload, returncode=0)
         assert res.kind is AgentResultKind.FAILURE
         assert res.output == "codex event stream malformed"
+
+
+def test_codex_output_schema_complies_with_openai_strict_mode(tmp_path: Path) -> None:
+    """OpenAI Structured Outputs in strict mode requires every property key to be
+    explicitly listed in `required`. Missing any key causes HTTP 400 invalid_json_schema."""
+    schema = CODEX_OUTPUT_SCHEMA
+    assert schema["additionalProperties"] is False
+    assert set(schema["properties"].keys()) == set(schema["required"])
+    assert "reason_code" in schema["required"]
+    assert "result" in schema["required"]
+    assert "summary" in schema["required"]
+
+    # ensure_codex_output_schema writes the compliant schema to file
+    schema_file = tmp_path / "schema.json"
+    ensure_codex_output_schema(schema_file)
+    assert schema_file.is_file()
+    saved = json.loads(schema_file.read_text(encoding="utf-8"))
+    assert set(saved["properties"].keys()) == set(saved["required"])
+
+
+def test_parse_codex_jsonl_plan_review_approve() -> None:
+    from subsched.plan_review import PlanVerdict
+
+    verdict_json = json.dumps(
+        {
+            "verdict": "APPROVE",
+            "summary": "Implementation plan looks solid",
+            "findings": [],
+        }
+    )
+    payload = _make_codex_event_stream(verdict_json)
+    res = parse_codex_jsonl(payload, returncode=0, plan_review=True)
+    assert res.kind is AgentResultKind.PASS
+    assert res.output == "codex completed"
+    assert res.plan_verdict == PlanVerdict(
+        verdict="APPROVE", summary="Implementation plan looks solid", findings=()
+    )
+
+
+def test_parse_codex_jsonl_plan_review_request_changes() -> None:
+    from subsched.plan_review import PlanVerdict
+
+    verdict_json = json.dumps(
+        {
+            "verdict": "REQUEST_CHANGES",
+            "summary": "Missing error handling and tests",
+            "findings": ["Add tests for edge cases", "Harden validation"],
+        }
+    )
+    payload = _make_codex_event_stream(verdict_json)
+    res = parse_codex_jsonl(payload, returncode=0, plan_review=True)
+    assert res.kind is AgentResultKind.PASS
+    assert res.output == "codex completed"
+    assert res.plan_verdict == PlanVerdict(
+        verdict="REQUEST_CHANGES",
+        summary="Missing error handling and tests",
+        findings=("Add tests for edge cases", "Harden validation"),
+    )
+
+
+def test_parse_codex_jsonl_plan_review_rejects_malformed_verdict() -> None:
+    payload = _make_codex_event_stream("I think this plan is fine, not valid json")
+    res = parse_codex_jsonl(payload, returncode=0, plan_review=True)
+    assert res.kind is AgentResultKind.FAILURE
+    assert "malformed plan review verdict" in res.output

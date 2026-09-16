@@ -33,7 +33,7 @@ from subsched.contract import (
     validate_dispatch_preconditions,
 )
 from subsched.models import AgentResult, AgentResultKind, Task, TaskState, resolve_stage
-from subsched.plan_review import READ_ONLY_SANDBOX_ARGS
+from subsched.plan_review import READ_ONLY_SANDBOX_ARGS, ensure_plan_review_output_schema
 from subsched.structured_logger import StructuredLogger
 
 # #141: default heartbeat cadence for a long-running agent invocation. Kept as a module
@@ -149,9 +149,7 @@ class NativeWorker:
             )
         if cleanup_failure is not None:
             return AgentResult(AgentResultKind.FAILURE, output=cleanup_failure)
-        import_failure = import_isolated_git(
-            request.cwd, git_context, read_only=read_only
-        )
+        import_failure = import_isolated_git(request.cwd, git_context, read_only=read_only)
         if import_failure is not None:
             return AgentResult(AgentResultKind.FAILURE, output=import_failure)
         if execution_failed:
@@ -251,6 +249,7 @@ class NativeWorker:
             else (agent_settings.effort.resolve(stage) if agent_settings is not None else None)
         )
         heartbeat = self._heartbeat(task, agent)
+        is_plan_review = task.status is TaskState.PLAN_REVIEW
         if agent == "claude":
             claude_tools = READ_ONLY_SANDBOX_ARGS["claude"][1] if read_only else "Bash,Edit,Read"
             req = ProcessExecutionRequest(
@@ -286,6 +285,7 @@ class NativeWorker:
                 timeout_seconds=self.agent_timeout_seconds,
                 heartbeat=heartbeat,
                 heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS,
+                plan_review=is_plan_review,
             )
             if self.isolation_config is None:
                 return self.claude_agent.execute(req)
@@ -299,10 +299,16 @@ class NativeWorker:
                     AgentResultKind.FAILURE,
                     output="missing preflight-detected Codex approval mode",
                 )
-            schema_path = self.codex_output_schema or (
-                worktree_path / ".ai" / "codex-output.schema.json"
-            )
-            ensure_codex_output_schema(schema_path)
+            if is_plan_review:
+                schema_path = self.codex_output_schema or (
+                    worktree_path / ".ai" / "plan-review-output.schema.json"
+                )
+                ensure_plan_review_output_schema(schema_path)
+            else:
+                schema_path = self.codex_output_schema or (
+                    worktree_path / ".ai" / "codex-output.schema.json"
+                )
+                ensure_codex_output_schema(schema_path)
             # #314: Codex's own OS-level sandbox conflicts with the outer container
             # boundary, so under container isolation it is told to trust that outer
             # sandbox instead -- see resolve_codex_sandbox_mode().
@@ -336,6 +342,7 @@ class NativeWorker:
                 timeout_seconds=self.agent_timeout_seconds,
                 heartbeat=heartbeat,
                 heartbeat_interval_seconds=HEARTBEAT_INTERVAL_SECONDS,
+                plan_review=is_plan_review,
             )
             if self.isolation_config is None:
                 return self.codex_agent.execute(req)
