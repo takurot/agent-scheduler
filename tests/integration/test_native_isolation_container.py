@@ -108,7 +108,9 @@ test "$HOME" = /isolated-home
 test -f "$HOME/auth.json"
 test ! -e "$1"
 test ! -e /var/run/docker.sock
-test "$GIT_DIR" = /run/subsched-git
+test -z "${GIT_DIR:-}"
+test -z "${GIT_WORK_TREE:-}"
+test "$(git rev-parse --absolute-git-dir)" = /run/subsched-git
 test -z "$(git config --get credential.helper || true)"
 curl --silent --show-error --connect-timeout 10 https://api.openai.com/v1/models >/dev/null
 if curl --noproxy '*' --silent --show-error --connect-timeout 3 \
