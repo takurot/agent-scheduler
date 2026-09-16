@@ -93,6 +93,9 @@ All development in this repository must strictly adhere to [`docs/WORKFLOW.md`](
   bash scripts/quality_gate.sh
   ```
   (Executes `ruff check .`, `mypy src`, `pytest` with `--cov-fail-under=80`, `scripts/check_branch_coverage.py` requiring >=80% branch coverage, and `pip-audit`). Never report a task complete without running and displaying the gate output. Do not rely on summary claims as proof — command output is the source of truth.
+- **Scheduler-Managed Container Worktrees (`subsched/issue-N`)**:
+  - Inside Scheduler-managed worktrees under container isolation, workers practice strict TDD and verify their changes using scoped tests (`uv run pytest <targeted_tests>`, `uv run mypy <path>`).
+  - If container-specific environmental limitations (such as missing `ps`/`procps` or filesystem permission quirks) cause unrelated full-suite tests in `bash scripts/quality_gate.sh` to fail, workers must NOT escalate to `NEEDS_HUMAN` as an `external_prerequisite` when all scoped tests for the issue pass. Record the scoped test results in the handoff and commit locally; the full repository quality gate is independently executed by the Scheduler on the host in the `VERIFYING` stage.
 
 ### Documentation Synchronization (`docs/WORKFLOW.md` §8)
 - When modifying CLI commands, configuration options, task states/transitions, or schemas, update `README.md`, `docs/SPEC.md`, `docs/WORKFLOW.md`, or `examples/scheduler.yaml` within the **same PR**.
