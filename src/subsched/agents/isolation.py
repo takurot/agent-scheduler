@@ -627,7 +627,12 @@ def wrap_native_request(
         "/bin/sh",
         config.image,
         "-ceu",
-        'cp -R /run/subsched-auth/. /isolated-home/ && exec "$@"',
+        (
+            'cp -R /run/subsched-auth/. /isolated-home/ && '
+            'if [ -f /isolated-home/oauth-token ]; then '
+            'export CLAUDE_CODE_OAUTH_TOKEN="$(cat /isolated-home/oauth-token)"; '
+            'fi && exec "$@"'
+        ),
         "subsched-entrypoint",
         *request.argv,
     )

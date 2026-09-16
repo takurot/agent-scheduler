@@ -114,7 +114,7 @@ def test_container_isolation_rejects_shared_concurrent_worker_network(
         load_config(config_path)
 
 
-def _runtime_config(auth_root: Path) -> NativeIsolationConfig:
+def _runtime_config(auth_root: Path, *, agent: str = "codex") -> NativeIsolationConfig:
     return NativeIsolationConfig(
         backend="container",
         runtime="docker",
@@ -122,7 +122,7 @@ def _runtime_config(auth_root: Path) -> NativeIsolationConfig:
         network="subsched-provider-egress",
         proxy_url="http://subsched-provider-proxy:3128",
         proxy_image=f"registry.invalid/subsched-proxy@{_PROXY_DIGEST}",
-        auth=(("codex", auth_root),),
+        auth=((agent, auth_root),),
     )
 
 
@@ -318,6 +318,39 @@ def test_container_request_has_only_explicit_isolated_mounts_and_environment(
     assert "HOME=/isolated-home" in joined
     assert "HTTP_PROXY=http://subsched-provider-proxy:3128" in joined
     assert wrapped.stdin_payload == b"prompt"
+
+
+def test_container_request_propagates_claude_oauth_token_when_present(
+    tmp_path: Path,
+) -> None:
+    from subsched.agents.base import ProcessExecutionRequest
+    from subsched.agents.isolation import wrap_native_request
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    auth = tmp_path / "claude-auth"
+    auth.mkdir(mode=0o700)
+    (auth / "oauth-token").write_text("synthetic-token\n", encoding="utf-8")
+    (auth / "oauth-token").chmod(0o600)
+
+    original = ProcessExecutionRequest(
+        argv=("claude", "--print", "hello"),
+        cwd=worktree,
+        env={"HOME": "/host/home", "PATH": "/host/bin"},
+        stdin_payload=b"prompt",
+    )
+
+    wrapped = wrap_native_request(
+        original,
+        agent="claude",
+        config=_runtime_config(auth, agent="claude"),
+        runtime_executable=Path("/usr/bin/docker"),
+    )
+
+    joined = " ".join(wrapped.argv)
+    assert "CLAUDE_CONFIG_DIR=/isolated-home" in joined
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in joined
+    assert "/isolated-home/oauth-token" in joined
 
 
 def test_container_request_omits_ambient_git_env_when_git_dir_is_wired(
