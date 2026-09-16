@@ -57,6 +57,7 @@ def test_probe_command_capabilities_codex_success(tmp_path: Path) -> None:
     assert res.version == "0.147.0"
     assert "headless flags verified" in res.details
     assert res.codex_approval_mode is CodexApprovalMode.ASK_FOR_APPROVAL_NEVER
+    assert res.supports_effort_flag is False
 
 
 def test_probe_command_capabilities_codex_detects_approve_for_me_drift(tmp_path: Path) -> None:
@@ -81,6 +82,7 @@ def test_probe_command_capabilities_codex_detects_approve_for_me_drift(tmp_path:
     assert res.compatible is True
     assert res.version == "0.153.4"
     assert res.codex_approval_mode is CodexApprovalMode.APPROVE_FOR_ME
+    assert res.supports_effort_flag is True
 
 
 def test_probe_command_capabilities_codex_fails_closed_when_approval_flag_unknown(
@@ -267,6 +269,198 @@ def test_validate_native_preflight_fails_closed_when_model_configured_but_unsupp
     # requirement fails closed.
     assert report.get("claude").compatible is True
     assert report.get("claude").supports_model_flag is False
+
+
+def test_validate_native_preflight_fails_when_effort_configured_and_cli_lacks_support(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from subsched.config import AgentEffortPolicy, AgentSettings
+
+    monkeypatch.setattr("subsched.preflight.native_isolation_failure", lambda: None)
+    claude_exe = tmp_path / "claude"
+    claude_exe.write_text("", encoding="utf-8")
+    claude_exe.chmod(0o755)
+    git_exe = tmp_path / "git"
+    git_exe.write_text("", encoding="utf-8")
+    git_exe.chmod(0o755)
+    gh_exe = tmp_path / "gh"
+    gh_exe.write_text("", encoding="utf-8")
+    gh_exe.chmod(0o755)
+
+    def resolver(cmd: str) -> Path | None:
+        return {"claude": claude_exe, "git": git_exe, "gh": gh_exe}.get(cmd)
+
+    claude_v = (FIXTURES / "claude" / "cli-version.txt").read_text(encoding="utf-8")
+    # cli-help.txt does not advertise --effort
+    claude_h = (FIXTURES / "claude" / "cli-help.txt").read_text(encoding="utf-8")
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        name = Path(argv[0]).name
+        if name == "git":
+            return subprocess.CompletedProcess(argv, 0, stdout="git version 2.40.0\n", stderr="")
+        if name == "gh":
+            return subprocess.CompletedProcess(argv, 0, stdout="gh version 2.50.0\n", stderr="")
+        if name == "claude" and "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=claude_v, stderr="")
+        if name == "claude" and "--help" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=claude_h, stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+
+    report = validate_native_preflight(
+        enabled_agents=("claude",),
+        executable_resolver=resolver,
+        run_cmd=fake_run,
+        agents={"claude": AgentSettings(effort=AgentEffortPolicy(default="high"))},
+    )
+    assert report.passed is False
+    assert any(
+        "does not support reasoning effort flags" in reason
+        for reason in report.failure_reasons
+    )
+    assert report.get("claude").compatible is True
+    assert report.get("claude").supports_effort_flag is False
+
+
+def test_validate_native_preflight_passes_when_effort_configured_and_cli_supports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from subsched.config import AgentEffortPolicy, AgentSettings
+
+    monkeypatch.setattr("subsched.preflight.native_isolation_failure", lambda: None)
+    claude_exe = tmp_path / "claude"
+    claude_exe.write_text("", encoding="utf-8")
+    claude_exe.chmod(0o755)
+    git_exe = tmp_path / "git"
+    git_exe.write_text("", encoding="utf-8")
+    git_exe.chmod(0o755)
+    gh_exe = tmp_path / "gh"
+    gh_exe.write_text("", encoding="utf-8")
+    gh_exe.chmod(0o755)
+
+    def resolver(cmd: str) -> Path | None:
+        return {"claude": claude_exe, "git": git_exe, "gh": gh_exe}.get(cmd)
+
+    claude_v = (FIXTURES / "claude" / "cli-version.txt").read_text(encoding="utf-8")
+    claude_h = (
+        (FIXTURES / "claude" / "cli-help.txt").read_text(encoding="utf-8")
+        + "\n  --effort <level>  Effort level\n"
+    )
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        name = Path(argv[0]).name
+        if name == "git":
+            return subprocess.CompletedProcess(argv, 0, stdout="git version 2.40.0\n", stderr="")
+        if name == "gh":
+            return subprocess.CompletedProcess(argv, 0, stdout="gh version 2.50.0\n", stderr="")
+        if name == "claude" and "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=claude_v, stderr="")
+        if name == "claude" and "--help" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=claude_h, stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+
+    report = validate_native_preflight(
+        enabled_agents=("claude",),
+        executable_resolver=resolver,
+        run_cmd=fake_run,
+        agents={"claude": AgentSettings(effort=AgentEffortPolicy(default="high"))},
+    )
+    assert report.passed is True
+    assert report.get("claude").supports_effort_flag is True
+
+
+def test_validate_native_preflight_fails_when_codex_effort_configured_and_cli_lacks_support(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from subsched.config import AgentEffortPolicy, AgentSettings
+
+    monkeypatch.setattr("subsched.preflight.native_isolation_failure", lambda: None)
+    codex_exe = tmp_path / "codex"
+    codex_exe.write_text("", encoding="utf-8")
+    codex_exe.chmod(0o755)
+    git_exe = tmp_path / "git"
+    git_exe.write_text("", encoding="utf-8")
+    git_exe.chmod(0o755)
+    gh_exe = tmp_path / "gh"
+    gh_exe.write_text("", encoding="utf-8")
+    gh_exe.chmod(0o755)
+
+    def resolver(cmd: str) -> Path | None:
+        return {"codex": codex_exe, "git": git_exe, "gh": gh_exe}.get(cmd)
+
+    codex_v = (FIXTURES / "codex" / "cli-version.txt").read_text(encoding="utf-8")
+    # cli-exec-help.txt does not advertise -c or --config
+    codex_h = (FIXTURES / "codex" / "cli-exec-help.txt").read_text(encoding="utf-8")
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        name = Path(argv[0]).name
+        if name == "git":
+            return subprocess.CompletedProcess(argv, 0, stdout="git version 2.40.0\n", stderr="")
+        if name == "gh":
+            return subprocess.CompletedProcess(argv, 0, stdout="gh version 2.50.0\n", stderr="")
+        if name == "codex" and "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=codex_v, stderr="")
+        if name == "codex" and "exec" in argv and "--help" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=codex_h, stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+
+    report = validate_native_preflight(
+        enabled_agents=("codex",),
+        executable_resolver=resolver,
+        run_cmd=fake_run,
+        agents={"codex": AgentSettings(effort=AgentEffortPolicy(default="high"))},
+    )
+    assert report.passed is False
+    assert any(
+        "does not support reasoning effort flags" in reason
+        for reason in report.failure_reasons
+    )
+    assert report.get("codex").compatible is True
+    assert report.get("codex").supports_effort_flag is False
+
+
+def test_validate_native_preflight_passes_when_codex_effort_configured_and_cli_supports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from subsched.config import AgentEffortPolicy, AgentSettings
+
+    monkeypatch.setattr("subsched.preflight.native_isolation_failure", lambda: None)
+    codex_exe = tmp_path / "codex"
+    codex_exe.write_text("", encoding="utf-8")
+    codex_exe.chmod(0o755)
+    git_exe = tmp_path / "git"
+    git_exe.write_text("", encoding="utf-8")
+    git_exe.chmod(0o755)
+    gh_exe = tmp_path / "gh"
+    gh_exe.write_text("", encoding="utf-8")
+    gh_exe.chmod(0o755)
+
+    def resolver(cmd: str) -> Path | None:
+        return {"codex": codex_exe, "git": git_exe, "gh": gh_exe}.get(cmd)
+
+    codex_v = (FIXTURES / "codex" / "cli-version-0.153.4.txt").read_text(encoding="utf-8")
+    # cli-exec-help-0.153.4.txt advertises -c, --config
+    codex_h = (FIXTURES / "codex" / "cli-exec-help-0.153.4.txt").read_text(encoding="utf-8")
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        name = Path(argv[0]).name
+        if name == "git":
+            return subprocess.CompletedProcess(argv, 0, stdout="git version 2.40.0\n", stderr="")
+        if name == "gh":
+            return subprocess.CompletedProcess(argv, 0, stdout="gh version 2.50.0\n", stderr="")
+        if name == "codex" and "--version" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=codex_v, stderr="")
+        if name == "codex" and "exec" in argv and "--help" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=codex_h, stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+
+    report = validate_native_preflight(
+        enabled_agents=("codex",),
+        executable_resolver=resolver,
+        run_cmd=fake_run,
+        agents={"codex": AgentSettings(effort=AgentEffortPolicy(default="high"))},
+    )
+    assert report.passed is True
+    assert report.get("codex").supports_effort_flag is True
 
 
 def test_validate_native_preflight_passes_when_no_model_configured_regardless_of_cli_support(

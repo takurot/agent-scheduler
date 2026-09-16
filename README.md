@@ -347,6 +347,16 @@ agents:
     #   implementation: sonnet
     #   pr_review: opus
     #   revision: sonnet
+    # Optional (#313): per-execution-stage reasoning effort level. Same stage keys as
+    # `models:`. Valid levels: low, medium, high, xhigh, max (Claude); low, medium,
+    # high (Codex). Passed via `--effort <level>` (Claude) or `-c model_reasoning_effort="<level>"` (Codex).
+    # effort:
+    #   default: medium
+    #   planning: high
+    #   plan_review: high
+    #   implementation: medium
+    #   pr_review: high
+    #   revision: medium
   codex:
     enabled: false
     priority: 90

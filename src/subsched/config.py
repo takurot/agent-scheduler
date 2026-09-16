@@ -132,11 +132,47 @@ class AgentModelPolicy:
         )
 
 
+CLAUDE_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+CODEX_EFFORT_LEVELS = frozenset({"low", "medium", "high"})
+AGENT_ALLOWED_EFFORT_LEVELS: dict[str, frozenset[str]] = {
+    "claude": CLAUDE_EFFORT_LEVELS,
+    "codex": CODEX_EFFORT_LEVELS,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class AgentEffortPolicy:
+    """Per-agent reasoning effort selection, one optional effort level per fixed execution
+    stage plus a `default` fallback. All-None (the default) preserves prior behavior: NativeWorker
+    adds no effort flags and the provider CLI's own default is used."""
+
+    default: str | None = None
+    planning: str | None = None
+    plan_review: str | None = None
+    implementation: str | None = None
+    pr_review: str | None = None
+    revision: str | None = None
+
+    def resolve(self, stage: str) -> str | None:
+        if stage not in MODEL_POLICY_STAGE_KEYS:
+            raise ConfigError(f"unknown execution stage: {stage!r}")
+        return getattr(self, stage) or self.default
+
+    @property
+    def has_any_effort(self) -> bool:
+        """True if any stage or `default` effort is configured, meaning preflight must
+        confirm the installed CLI actually supports reasoning effort flags before dispatch."""
+        return any(
+            getattr(self, key) is not None for key in (*MODEL_POLICY_STAGE_KEYS, "default")
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class AgentSettings:
     enabled: bool = True
     priority: int = 100
     models: AgentModelPolicy = AgentModelPolicy()
+    effort: AgentEffortPolicy = AgentEffortPolicy()
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +446,32 @@ def _parse_agent_models(raw: Any, agent_name: str) -> AgentModelPolicy:
     return AgentModelPolicy(**values)
 
 
+def _validate_effort_level(value: Any, name: str, agent_name: str) -> str:
+    allowed_levels = AGENT_ALLOWED_EFFORT_LEVELS.get(agent_name)
+    if (
+        not isinstance(value, str)
+        or allowed_levels is None
+        or value not in allowed_levels
+    ):
+        levels_str = ", ".join(sorted(allowed_levels)) if allowed_levels else "none"
+        raise ConfigError(f"{name} must be one of: {levels_str}")
+    return value
+
+
+def _parse_agent_effort(raw: Any, agent_name: str) -> AgentEffortPolicy:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"agents.{agent_name}.effort must be a mapping")
+    allowed = MODEL_POLICY_STAGE_KEYS | {"default"}
+    extras = set(raw) - allowed
+    if extras:
+        raise ConfigError(f"unknown agents.{agent_name}.effort keys: {join_keys(extras)}")
+    values = {
+        str(key): _validate_effort_level(value, f"agents.{agent_name}.effort.{key}", agent_name)
+        for key, value in raw.items()
+    }
+    return AgentEffortPolicy(**values)
+
+
 def _parse_agents_config(raw: Any) -> dict[str, AgentSettings]:
     if not isinstance(raw, dict):
         raise ConfigError("agents must be a mapping")
@@ -423,7 +485,7 @@ def _parse_agents_config(raw: Any) -> dict[str, AgentSettings]:
             )
         if not isinstance(item, dict):
             raise ConfigError(f"agents.{name} must be a mapping")
-        extras = set(item) - {"enabled", "priority", "models"}
+        extras = set(item) - {"enabled", "priority", "models", "effort"}
         if extras:
             raise ConfigError(f"unknown agents.{name} keys: {join_keys(extras)}")
         enabled = _strict_bool(item.get("enabled", True), f"agents.{name}.enabled")
@@ -433,7 +495,14 @@ def _parse_agents_config(raw: Any) -> dict[str, AgentSettings]:
             if "models" in item
             else AgentModelPolicy()
         )
-        agents[str(name)] = AgentSettings(enabled=enabled, priority=priority, models=models)
+        effort = (
+            _parse_agent_effort(item["effort"], name)
+            if "effort" in item
+            else AgentEffortPolicy()
+        )
+        agents[str(name)] = AgentSettings(
+            enabled=enabled, priority=priority, models=models, effort=effort
+        )
 
     if not any(s.enabled for s in agents.values()):
         raise ConfigError("all agents are disabled; at least one agent must be enabled")

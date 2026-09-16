@@ -218,6 +218,101 @@ def test_native_worker_resolves_model_per_execution_stage(tmp_path: Path) -> Non
     assert claude_model_for(revising_task) == "sonnet"
 
 
+def test_native_worker_omits_effort_flag_when_no_policy_configured(tmp_path: Path) -> None:
+    mock_claude = MagicMock()
+    mock_claude.execute.return_value = AgentResult(AgentResultKind.PASS)
+    mock_codex = MagicMock()
+    mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(
+        claude_agent=mock_claude,
+        codex_agent=mock_codex,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+    )
+    task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    worker.run(task, "claude")
+    assert "--effort" not in mock_claude.execute.call_args[0][0].argv
+
+    worker.run(task, "codex")
+    assert not any(
+        arg.startswith("model_reasoning_effort=")
+        for arg in mock_codex.execute.call_args[0][0].argv
+    )
+
+
+def test_native_worker_resolves_effort_per_execution_stage(tmp_path: Path) -> None:
+    """#313: planning/plan_review/pr_review/revision use their configured stage effort;
+    an ordinary implementation dispatch falls back to `default`."""
+    from dataclasses import replace
+
+    from subsched.config import AgentEffortPolicy, AgentSettings
+    from subsched.models import TaskState
+
+    mock_claude = MagicMock()
+    mock_claude.execute.return_value = AgentResult(AgentResultKind.PASS)
+    mock_codex = MagicMock()
+    mock_codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+
+    worker = NativeWorker(
+        claude_agent=mock_claude,
+        codex_agent=mock_codex,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+        agents={
+            "claude": AgentSettings(
+                effort=AgentEffortPolicy(
+                    default="medium",
+                    planning="high",
+                    plan_review="high",
+                    pr_review="high",
+                    revision="medium",
+                )
+            ),
+            "codex": AgentSettings(
+                effort=AgentEffortPolicy(default="low", planning="high")
+            ),
+        },
+    )
+    base = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))
+    bootstrap_task_files(tmp_path, base)
+
+    def claude_effort_for(task: Task) -> str | None:
+        worker.run(task, "claude")
+        argv = mock_claude.execute.call_args[0][0].argv
+        return argv[argv.index("--effort") + 1] if "--effort" in argv else None
+
+    def codex_effort_for(task: Task) -> str | None:
+        worker.run(task, "codex")
+        argv = mock_codex.execute.call_args[0][0].argv
+        for i, arg in enumerate(argv):
+            if (
+                arg == "-c"
+                and i + 1 < len(argv)
+                and argv[i + 1].startswith("model_reasoning_effort=")
+            ):
+                val = argv[i + 1].split("=", 1)[1]
+                return val.strip('"')
+        return None
+
+    planning_task = replace(base, status=TaskState.PLANNING)
+    assert claude_effort_for(planning_task) == "high"
+    assert codex_effort_for(planning_task) == "high"
+
+    plan_review_task = replace(base, status=TaskState.PLAN_REVIEW)
+    assert claude_effort_for(plan_review_task) == "high"
+
+    implementation_task = base
+    assert claude_effort_for(implementation_task) == "medium"
+    assert codex_effort_for(implementation_task) == "low"
+
+    pr_review_task = replace(base, dispatch_status=TaskState.PR_REVIEW)
+    assert claude_effort_for(pr_review_task) == "high"
+
+    revising_task = replace(base, dispatch_status=TaskState.REVISING)
+    assert claude_effort_for(revising_task) == "medium"
+
+
 def test_native_worker_unsupported_agent(tmp_path: Path) -> None:
     worker = NativeWorker()
     task = Task.from_issue(Issue(number=101, title="Test")).with_worktree(str(tmp_path))

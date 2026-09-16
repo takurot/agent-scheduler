@@ -157,6 +157,20 @@ def test_review_cycles_defaults_to_zero_and_round_trips() -> None:
     assert Task.from_dict(incremented.to_dict()).review_cycles == 2
 
 
+def test_dispatch_effort_and_effective_effort() -> None:
+    task = Task.from_issue(Issue(number=1, title="one"))
+    assert task.dispatch_effort is None
+    assert task.effective_effort == "provider-default"
+
+    with_effort = replace(task, dispatch_effort="high")
+    assert with_effort.dispatch_effort == "high"
+    assert with_effort.effective_effort == "high"
+
+    restored = Task.from_dict(with_effort.to_dict())
+    assert restored.dispatch_effort == "high"
+    assert restored.effective_effort == "high"
+
+
 def test_capacity_reports_availability_and_remaining_percentage() -> None:
     now = datetime.now(UTC)
     capacity = Capacity(

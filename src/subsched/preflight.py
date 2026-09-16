@@ -41,6 +41,8 @@ class PreflightCheckResult:
     # dispatch, when an agent has an explicit stage/default model configured but the
     # installed CLI does not advertise a `--model` flag.
     supports_model_flag: bool = False
+    # #313: whether the installed CLI advertises reasoning effort support.
+    supports_effort_flag: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +144,7 @@ def probe_command_capabilities(
                 compatible=True,
                 details=f"version {metadata.version}, headless flags verified",
                 supports_model_flag=metadata.supports_model_flag,
+                supports_effort_flag=metadata.supports_effort_flag,
             )
 
         if name == "codex":
@@ -170,6 +173,7 @@ def probe_command_capabilities(
                 details=f"version {metadata_codex.version}, headless flags verified",
                 codex_approval_mode=metadata_codex.approval_mode,
                 supports_model_flag=metadata_codex.supports_model_flag,
+                supports_effort_flag=metadata_codex.supports_effort_flag,
             )
 
         return PreflightCheckResult(
@@ -256,6 +260,18 @@ def validate_native_preflight(
             failures.append(
                 f"{name} has a configured model but the installed CLI does not support "
                 "a --model flag"
+            )
+
+        # #313: an agent with an explicit stage/default effort configured must have its
+        # installed CLI confirm effort support here, before any dispatch.
+        if (
+            agent_settings is not None
+            and agent_settings.effort.has_any_effort
+            and not res.supports_effort_flag
+        ):
+            failures.append(
+                f"{name} has a configured effort policy but the installed CLI does not support "
+                "reasoning effort flags"
             )
 
     isolation_executable: Path | None = None
