@@ -11,6 +11,7 @@ from subsched.agents.codex import (
     CodexApprovalMode,
     build_codex_headless_argv,
     ensure_codex_output_schema,
+    resolve_codex_sandbox_mode,
 )
 from subsched.agents.isolation import (
     IsolationGitContext,
@@ -293,8 +294,15 @@ class NativeWorker:
                 worktree_path / ".ai" / "codex-output.schema.json"
             )
             ensure_codex_output_schema(schema_path)
-            codex_sandbox = (
-                READ_ONLY_SANDBOX_ARGS["codex"][1] if read_only else "workspace-write"
+            # #314: Codex's own OS-level sandbox conflicts with the outer container
+            # boundary, so under container isolation it is told to trust that outer
+            # sandbox instead -- see resolve_codex_sandbox_mode().
+            codex_sandbox = resolve_codex_sandbox_mode(
+                read_only=read_only,
+                container_isolated=(
+                    self.isolation_config is not None
+                    and self.isolation_config.backend == "container"
+                ),
             )
             req = ProcessExecutionRequest(
                 argv=build_codex_headless_argv(

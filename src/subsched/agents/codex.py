@@ -199,6 +199,31 @@ def build_codex_headless_argv(
     )
 
 
+CODEX_SANDBOX_DANGER_FULL_ACCESS = "danger-full-access"
+
+
+def resolve_codex_sandbox_mode(*, read_only: bool, container_isolated: bool) -> str:
+    """Select the Codex CLI `--sandbox` mode for a dispatch.
+
+    Codex's own `workspace-write`/`read-only` sandbox modes shell out to Bubblewrap
+    (`bwrap`) on Linux to create an unprivileged user namespace. Under Scheduler-managed
+    container isolation (`isolation.backend: container`), the outer Docker boundary's
+    `--cap-drop ALL` and `--security-opt no-new-privileges=true` cause the kernel to
+    refuse that namespace creation, so every Codex command fails with "bwrap: No
+    permissions to create a new namespace" regardless of task stage (issue #314).
+
+    The container already enforces the equivalent restriction at the OS level (default-
+    deny network egress through the proxy, and a read-only bind mount of the worktree
+    for review stages -- see `wrap_native_request`), so under container isolation Codex
+    is told to trust that outer sandbox (`danger-full-access`) instead of doubling up
+    with its own. Outside container isolation, the existing per-stage sandbox mode is
+    unchanged.
+    """
+    if container_isolated:
+        return CODEX_SANDBOX_DANGER_FULL_ACCESS
+    return "read-only" if read_only else "workspace-write"
+
+
 def build_codex_exec_argv(config: CodexProbeConfig) -> tuple[str, ...]:
     """Build the fixed, non-interactive probe command without putting the prompt in argv."""
     return build_codex_headless_argv(

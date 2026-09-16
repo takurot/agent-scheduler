@@ -2812,6 +2812,23 @@ Mocked runtime responses and argv inspection supplement these tests but cannot r
 them. Both the adversarial tests and the full repository quality gate must pass before
 the isolation backend is considered complete or native execution is enabled through it.
 
+### Codex sandbox mode under container isolation (issue #314)
+
+Codex's own `--sandbox workspace-write`/`read-only` modes shell out to Bubblewrap
+(`bwrap`) on Linux to create an unprivileged user namespace. Inside the container
+boundary above (`--cap-drop ALL`, `--security-opt no-new-privileges=true`), the kernel
+refuses that namespace creation, so every Codex-issued shell command fails with
+`bwrap: No permissions to create a new namespace` regardless of task stage -- this is a
+correctness/availability defect, not a security gap. The container already enforces the
+equivalent restriction at the OS level (default-deny egress through the proxy, and a
+read-only bind mount of the worktree for review-stage dispatch), so under
+`isolation.backend: container` Codex is dispatched with `--sandbox danger-full-access`
+unconditionally (`resolve_codex_sandbox_mode()` in `agents/codex.py`), telling it to
+trust the outer sandbox instead of creating its own nested one. Outside container
+isolation this dispatch path is inadmissible (see 72.2 above), so the legacy
+per-stage `workspace-write`/`read-only` selection there is unaffected and unused in
+practice.
+
 ---
 
 # 73. Success Criteria

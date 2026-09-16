@@ -1,5 +1,6 @@
 """Issue #293 admission regressions; these do not prove runtime containment."""
 
+import dataclasses
 from pathlib import Path
 from subprocess import CompletedProcess, run
 from unittest.mock import MagicMock
@@ -12,7 +13,7 @@ from subsched.agents.native import NativeWorker
 from subsched.cli import app
 from subsched.config import ConfigError, NativeIsolationConfig, load_config
 from subsched.contract import bootstrap_task_files
-from subsched.models import AgentResult, AgentResultKind, Issue, Task
+from subsched.models import AgentResult, AgentResultKind, Issue, Task, TaskState
 from subsched.preflight import PreflightCheckResult, validate_native_preflight
 
 _DIGEST = "sha256:" + "a" * 64
@@ -567,6 +568,85 @@ def test_native_dispatch_uses_attested_container_request(
     assert observed["runtime_executable"] == Path("/usr/bin/docker")
     assert observed["git_dir"] == git_context.git_dir
     codex.execute.assert_called_once_with(observed["request"])
+
+
+@pytest.mark.parametrize(
+    ("task_state", "read_only"),
+    [
+        (None, False),
+        ("PLAN_REVIEW", True),
+    ],
+)
+def test_native_dispatch_uses_danger_full_access_sandbox_under_container_isolation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    task_state: str | None,
+    read_only: bool,
+) -> None:
+    """#314: Codex's own `workspace-write`/`read-only` sandbox shells out to bwrap to
+    create an unprivileged user namespace, which the outer container's
+    `--cap-drop ALL` + `--security-opt no-new-privileges=true` boundary refuses --
+    failing every command with "bwrap: No permissions to create a new namespace" no
+    matter the task stage. Container isolation already enforces the equivalent
+    (network proxy, cap-drop, read-only bind mount for review stages), so under
+    `isolation.backend: container` Codex must be told to trust that outer sandbox
+    (`--sandbox danger-full-access`) instead of doubling up with its own.
+    """
+    from subsched.agents.isolation import IsolationGitContext
+
+    auth = _secure_auth_dir(tmp_path / "auth")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    task = Task.from_issue(Issue(number=314, title="bwrap regression")).with_worktree(
+        str(worktree)
+    )
+    bootstrap_task_files(worktree, task)
+    if task_state is not None:
+        task = dataclasses.replace(task, status=TaskState[task_state])
+    codex = MagicMock()
+    codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "subsched.agents.native.verify_native_isolation", lambda *args, **kwargs: None
+    )
+    git_context = IsolationGitContext(
+        tmp_path / "sandbox.git", "a" * 40, tmp_path / "worktree.git"
+    )
+    monkeypatch.setattr(
+        "subsched.agents.native.prepare_isolated_git",
+        lambda *args, **kwargs: git_context,
+    )
+    monkeypatch.setattr(
+        "subsched.agents.native.import_isolated_git", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "subsched.agents.native.cleanup_native_container", lambda *args, **kwargs: None
+    )
+
+    def wrap(request: object, **kwargs: object) -> object:
+        observed["request"] = request
+        return request
+
+    monkeypatch.setattr("subsched.agents.native.wrap_native_request", wrap)
+    worker = NativeWorker(
+        codex_agent=codex,
+        subscription_billing_verified=True,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+        isolation_config=_runtime_config(auth),
+        isolation_runtime_executable=Path("/usr/bin/docker"),
+        isolation_state_root=tmp_path / "state",
+    )
+
+    result = worker.run(task, "codex")
+
+    assert result.kind is AgentResultKind.PASS
+    argv = observed["request"].argv  # type: ignore[attr-defined]
+    assert "--sandbox" in argv
+    sandbox_value = argv[argv.index("--sandbox") + 1]
+    assert sandbox_value == "danger-full-access"
+    assert "workspace-write" not in argv
+    assert "read-only" not in argv
 
 
 def test_native_dispatch_cleans_up_when_adapter_raises(
