@@ -41,6 +41,7 @@ from subsched.recovery import (
 from subsched.review import (
     ReviewVerdict,
     build_pr_comment_body,
+    git_head_commit,
     read_review_report,
     worktree_touched_unexpected_paths,
 )
@@ -1101,6 +1102,14 @@ class Scheduler:
             if task.worktree is not None:
                 bootstrap_task_files(Path(task.worktree), task, now=current)
 
+            # #307: snapshot HEAD before a PR_REVIEW dispatch runs, so
+            # worktree_touched_unexpected_paths can detect a reviewer that committed its
+            # changes (which would otherwise show a clean `git status` and bypass the
+            # unexpected-path check entirely).
+            pre_dispatch_head: str | None = None
+            if task.dispatch_status is TaskState.PR_REVIEW and task.worktree is not None:
+                pre_dispatch_head = git_head_commit(Path(task.worktree))
+
             actual_switches = task.actual_agent_switches
             if task.last_dispatched_agent is not None and task.last_dispatched_agent != agent:
                 actual_switches += 1
@@ -1247,7 +1256,14 @@ class Scheduler:
                     self._backoff_step = 0
                     return True
 
-            self._handle_result(running, agent, result, current, effective_capacities=effective)
+            self._handle_result(
+                running,
+                agent,
+                result,
+                current,
+                effective_capacities=effective,
+                pre_dispatch_head=pre_dispatch_head,
+            )
         finally:
             self.lease_manager.release(task.issue_number, nonce=lease.nonce)
         self._effective_capacities(supplied, current)
@@ -1358,7 +1374,9 @@ class Scheduler:
                 self._persist()
             # PENDING/UNKNOWN: leave the task in READY_FOR_REVIEW unchanged.
 
-    def _process_pr_review(self, task: Task, agent: str, now: datetime) -> None:
+    def _process_pr_review(
+        self, task: Task, agent: str, now: datetime, *, pre_dispatch_head: str | None = None
+    ) -> None:
         """Read back the reviewer's report for a PR_REVIEW dispatch that reported PASS,
         and transition on its verdict.
 
@@ -1374,7 +1392,10 @@ class Scheduler:
         if task.worktree is not None:
             worktree_dir = Path(task.worktree)
             touched_unexpected = worktree_touched_unexpected_paths(
-                worktree_dir, task.issue_number, round_number
+                worktree_dir,
+                task.issue_number,
+                round_number,
+                pre_dispatch_head=pre_dispatch_head,
             )
             if touched_unexpected is False:
                 report = read_review_report(worktree_dir, task.issue_number, round_number)
@@ -1422,10 +1443,10 @@ class Scheduler:
                 data={"result_kind": post_result.kind.value, "attempt": task.attempt},
             )
 
+        reviewed = replace(task, review_cycles=round_number)
         if report.verdict is ReviewVerdict.APPROVE:
-            final = task.transition(TaskState.READY_FOR_REVIEW, current_agent=agent, now=now)
+            final = reviewed.transition(TaskState.READY_FOR_REVIEW, current_agent=agent, now=now)
         else:
-            reviewed = replace(task, review_cycles=round_number)
             if round_number >= self.max_review_cycles:
                 reason = (
                     f"exceeded max_review_cycles ({self.max_review_cycles}) with "
@@ -1769,6 +1790,7 @@ class Scheduler:
         now: datetime,
         *,
         effective_capacities: dict[str, Capacity] | None = None,
+        pre_dispatch_head: str | None = None,
     ) -> None:
         if result.kind is AgentResultKind.NEEDS_HUMAN:
             # #297: the Agent reported an operator-blocked outcome (e.g. design approval,
@@ -1882,7 +1904,7 @@ class Scheduler:
         # gates, so a PASS result here is routed to reading back the review report
         # instead of into the normal VERIFYING path below.
         if task.dispatch_status is TaskState.PR_REVIEW and result.kind is AgentResultKind.PASS:
-            self._process_pr_review(task, agent, now)
+            self._process_pr_review(task, agent, now, pre_dispatch_head=pre_dispatch_head)
             return
         if result.kind is AgentResultKind.PASS:
             verifying = task.transition(TaskState.VERIFYING, current_agent=agent, now=now)

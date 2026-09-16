@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
@@ -85,9 +86,28 @@ def read_review_report(
         return None
     try:
         content = report_file.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return parse_review_report(content)
+
+
+def git_head_commit(worktree_dir: Path, timeout_seconds: float = 30.0) -> str | None:
+    """Resolve the current HEAD commit hash of `worktree_dir`, or None on git failure."""
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(worktree_dir), "rev-parse", "HEAD"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    return res.stdout.strip() or None
 
 
 def worktree_touched_unexpected_paths(
@@ -95,24 +115,34 @@ def worktree_touched_unexpected_paths(
     issue_number: int,
     round_number: int,
     timeout_seconds: float = 30.0,
+    pre_dispatch_head: str | None = None,
 ) -> bool | None:
     """#281: PR_REVIEW is meant to be strictly read-only, but neither agent CLI's tool
     restrictions are a hard OS-level guarantee against Bash writing files (see
-    NativeWorker.run). Enforce it mechanically instead: the only working-tree change a
-    reviewer dispatch may make is creating its own review report file. Returns True if
-    any other tracked or untracked path changed, False if the change set is clean (only
-    the expected review report, or nothing at all), or None if this could not be
-    determined at all (git failure) -- callers must fail closed on None, same as
-    find_close_keyword_commits elsewhere in this codebase.
+    NativeWorker.run). Enforce it mechanically instead: the only working-tree changes a
+    reviewer dispatch may make are creating its own review report file (past rounds'
+    report files are also tolerated, since they legitimately persist across rounds).
+    Returns True if any other tracked or untracked path changed, or if `pre_dispatch_head`
+    is given and HEAD has moved (#307: a reviewer that commits its changes would
+    otherwise show a clean `git status` and bypass this check entirely); False if the
+    change set is clean; or None if this could not be determined at all (git failure) --
+    callers must fail closed on None, same as find_close_keyword_commits elsewhere in
+    this codebase.
+
+    `git status --porcelain -uall` is required (not the default `--porcelain`): without
+    `-uall`, git collapses an untracked directory's contents into a single `?? dir/`
+    line instead of listing the files inside it, so a freshly-created `.ai/reviews/`
+    directory would always look like an unexpected path.
     """
     expected = review_report_path(worktree_dir, issue_number, round_number)
     try:
         expected_rel = expected.relative_to(worktree_dir).as_posix()
     except ValueError:
         return True
+    prior_round_pattern = re.compile(rf"^\.ai/reviews/{re.escape(str(issue_number))}-r\d+\.md$")
     try:
         res = subprocess.run(
-            ["git", "-C", str(worktree_dir), "status", "--porcelain"],
+            ["git", "-C", str(worktree_dir), "status", "--porcelain", "-uall"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -132,7 +162,11 @@ def worktree_touched_unexpected_paths(
         path = line[3:].strip()
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
-        if path != expected_rel:
+        if path != expected_rel and not prior_round_pattern.match(path):
+            return True
+    if pre_dispatch_head is not None:
+        current_head = git_head_commit(worktree_dir, timeout_seconds)
+        if current_head is None or current_head != pre_dispatch_head:
             return True
     return False
 
