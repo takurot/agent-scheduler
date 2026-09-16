@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from subsched.config import WorkflowConfig, WorkflowLimitsConfig
 from subsched.models import (
     AgentResult,
@@ -48,6 +50,10 @@ class PlanWritingWorker:
     @property
     def dispatches(self) -> list[tuple[int, str]]:
         return self._inner.dispatches
+
+    @property
+    def worktrees(self) -> list[tuple[int, str, str | None]]:
+        return self._inner.worktrees
 
     def run(self, task: Task, agent: str) -> AgentResult:
         result = self._inner.run(task, agent)
@@ -123,6 +129,55 @@ def test_plan_review_request_changes_then_approve(tmp_path: Path) -> None:
     assert task.status is TaskState.COMPLETE
     assert task.plan_approved is True
     assert task.plan_revisions == 1
+
+
+@pytest.mark.parametrize("capacity_stage", (TaskState.PLANNING, TaskState.PLAN_REVIEW))
+def test_capacity_during_planning_stage_fails_over_to_another_agent(
+    tmp_path: Path, capacity_stage: TaskState
+) -> None:
+    now = datetime(2026, 8, 12, 22, tzinfo=UTC)
+    reset = now + timedelta(hours=1)
+    claude_results = [AgentResult(AgentResultKind.CAPACITY_SESSION, reset_at=reset)]
+    if capacity_stage is TaskState.PLAN_REVIEW:
+        claude_results.insert(0, AgentResult(AgentResultKind.PASS))
+    worker = PlanWritingWorker(
+        {
+            (1, "claude"): tuple(claude_results),
+            (1, "codex"): (
+                AgentResult(AgentResultKind.PASS),
+                AgentResult(
+                    AgentResultKind.PASS,
+                    output='{"verdict": "APPROVE", "summary": "ok"}',
+                ),
+                AgentResult(AgentResultKind.PASS),
+            ),
+        }
+    )
+    scheduler = _scheduler(
+        tmp_path,
+        worker,
+        router=Router((AgentConfig("claude", 100), AgentConfig("codex", 90))),
+    )
+    scheduler.discover((Issue(number=1, title="one"),))
+
+    scheduler.run_until_waiting(
+        (available("claude", now), available("codex", now)),
+        now=now,
+    )
+
+    task = scheduler.tasks[0]
+    assert task.status is TaskState.COMPLETE
+    assert task.capacity_events == 1
+    assert task.agent_switches == 1
+    assert task.actual_agent_switches == 1
+    assert task.attempt == 0
+    assert task.worktree is not None
+    assert worker.dispatches == [(1, "claude")] * len(claude_results) + [
+        (1, "codex"),
+        (1, "codex"),
+        (1, "codex"),
+    ]
+    assert len({path for issue, _, path in worker.worktrees if issue == 1}) == 1
 
 
 def test_plan_review_exceeding_max_revisions_escalates_to_needs_human(tmp_path: Path) -> None:
