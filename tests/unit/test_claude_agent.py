@@ -550,4 +550,6 @@ def test_parse_claude_result_plan_review_malformed_verdict() -> None:
     )
     outcome = ClaudeProcessOutcome(exit_code=0, stdout=payload)
     res = parse_claude_result(outcome, plan_review=True)
-    assert res.kind is AgentResultKind.UNKNOWN
+    assert res.kind is AgentResultKind.NEEDS_HUMAN
+    assert res.reason_code == "instruction_conflict"
+    assert "malformed plan review verdict" in res.output

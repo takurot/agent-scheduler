@@ -1478,5 +1478,6 @@ def test_parse_codex_jsonl_plan_review_request_changes() -> None:
 def test_parse_codex_jsonl_plan_review_rejects_malformed_verdict() -> None:
     payload = _make_codex_event_stream("I think this plan is fine, not valid json")
     res = parse_codex_jsonl(payload, returncode=0, plan_review=True)
-    assert res.kind is AgentResultKind.FAILURE
+    assert res.kind is AgentResultKind.NEEDS_HUMAN
+    assert res.reason_code == "instruction_conflict"
     assert "malformed plan review verdict" in res.output

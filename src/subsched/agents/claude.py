@@ -206,13 +206,18 @@ def parse_claude_result(
 
                 try:
                     verdict = parse_verdict(raw_str)
-                except PlanVerdictError:
-                    return AgentResult(AgentResultKind.UNKNOWN, output="claude result unknown")
+                except PlanVerdictError as error:
+                    return AgentResult(
+                        AgentResultKind.NEEDS_HUMAN,
+                        reason_code="instruction_conflict",
+                        output=f"malformed plan review verdict: {error}",
+                    )
                 return AgentResult(
                     AgentResultKind.PASS,
                     output="claude completed",
                     plan_verdict=verdict,
                 )
+
             return AgentResult(AgentResultKind.PASS, output="claude completed")
 
     if outcome.stdout and (payload is None or not _is_known_result(payload)):

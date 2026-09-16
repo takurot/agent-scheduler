@@ -376,7 +376,8 @@ def parse_codex_jsonl(
             verdict = parse_verdict(final_message)
         except PlanVerdictError as error:
             return AgentResult(
-                AgentResultKind.FAILURE,
+                AgentResultKind.NEEDS_HUMAN,
+                reason_code="instruction_conflict",
                 output=f"malformed plan review verdict: {error}",
             )
         return AgentResult(
@@ -384,6 +385,7 @@ def parse_codex_jsonl(
             output="codex completed",
             plan_verdict=verdict,
         )
+
     return _parse_final_message(final_message)
 
 

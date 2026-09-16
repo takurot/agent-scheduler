@@ -1820,22 +1820,42 @@ class Scheduler:
             self._persist()
             return
 
-        # #281: a review/revision dispatch that did not come back PASS must not fall
+        # #281, #306: a review/revision dispatch that did not come back PASS must not fall
         # into the generic capacity/retry handling below -- that would eventually
         # redispatch this task as if it were READY, i.e. with the normal full-issue
         # worker prompt instead of the review/revision-specific one, silently changing
         # what the task is doing mid-flight. Fail closed to NEEDS_HUMAN instead.
         if (
-            task.dispatch_status in (TaskState.PR_REVIEW, TaskState.REVISING)
+            (
+                task.status is TaskState.PLAN_REVIEW
+                or task.dispatch_status in (TaskState.PR_REVIEW, TaskState.REVISING)
+            )
             and result.kind is not AgentResultKind.PASS
         ):
-            kind_label = "review" if task.dispatch_status is TaskState.PR_REVIEW else "revision"
+            if task.status is TaskState.PLAN_REVIEW:
+                kind_label = "plan review"
+            elif task.dispatch_status is TaskState.PR_REVIEW:
+                kind_label = "review"
+            else:
+                kind_label = "revision"
             reason = (
                 f"{kind_label} dispatch did not complete successfully "
                 f"({result.kind.value}); failing closed"
+                if not result.output
+                or result.output
+                in (
+                    f"{agent} execution failed",
+                    "claude result unknown",
+                    "claude execution failed",
+                )
+                else f"{kind_label} dispatch did not complete successfully: {result.output}"
             )
             final = task.transition(
-                TaskState.NEEDS_HUMAN, current_agent=agent, now=now, reason=reason
+                TaskState.NEEDS_HUMAN,
+                current_agent=agent,
+                now=now,
+                reason=reason,
+                reason_code=result.reason_code,
             )
             self.queue = self.queue.replace(final)
             self._log(
@@ -1849,10 +1869,13 @@ class Scheduler:
                     "from_state": task.status.value,
                     "to_state": final.status.value,
                     "attempt": final.attempt,
+                    "reason_code": result.reason_code,
+                    "result_kind": result.kind.value,
                 },
             )
             self._persist()
             return
+
 
         # #281: a PR_REVIEW dispatch is strictly read-only (see build_review_prompt) --
         # it never touches source and never runs the pytest/ruff/mypy verification

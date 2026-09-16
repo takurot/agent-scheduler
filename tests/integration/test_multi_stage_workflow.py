@@ -249,3 +249,64 @@ def test_plan_review_missing_verdict_escalates_to_needs_human(tmp_path: Path) ->
     assert task.plan_approved is False
     assert task.needs_human_reason is not None
     assert "malformed plan review verdict" in task.needs_human_reason
+
+
+def test_plan_review_malformed_verdict_fails_closed_without_retry(tmp_path: Path) -> None:
+    """#306 review: Malformed plan-review verdict must fail closed to NEEDS_HUMAN
+    immediately without retry.
+    """
+    now = datetime(2026, 8, 12, 22, tzinfo=UTC)
+    worker = PlanWritingWorker(
+        {
+            (1, "claude"): (
+                AgentResult(AgentResultKind.PASS),  # PLANNING
+                AgentResult(  # PLAN_REVIEW: adapter caught malformed verdict
+                    AgentResultKind.NEEDS_HUMAN,
+                    reason_code="instruction_conflict",
+                    output="malformed plan review verdict: plan review verdict is not valid JSON",
+                ),
+            )
+        }
+    )
+    scheduler = _scheduler(tmp_path, worker)
+    scheduler.discover((Issue(number=1, title="one"),))
+
+    scheduler.run_until_waiting((available("claude", now),), now=now)
+
+    task = scheduler.tasks[0]
+    assert task.status is TaskState.NEEDS_HUMAN
+    assert task.attempt == 0
+    assert task.needs_human_reason_code == "instruction_conflict"
+    assert task.needs_human_reason is not None
+    assert "malformed plan review verdict" in task.needs_human_reason
+    assert worker.dispatches == [(1, "claude"), (1, "claude")]
+
+
+def test_plan_review_failure_dispatch_fails_closed_without_retry(tmp_path: Path) -> None:
+    """#306 review: PLAN_REVIEW stage failure must fail closed immediately instead of
+    retrying as READY.
+    """
+    now = datetime(2026, 8, 12, 22, tzinfo=UTC)
+
+    worker = PlanWritingWorker(
+        {
+            (1, "claude"): (
+                AgentResult(AgentResultKind.PASS),  # PLANNING
+                AgentResult(  # PLAN_REVIEW: execution failed
+                    AgentResultKind.FAILURE,
+                    output="claude process failed",
+                ),
+            )
+        }
+    )
+    scheduler = _scheduler(tmp_path, worker)
+    scheduler.discover((Issue(number=1, title="one"),))
+
+    scheduler.run_until_waiting((available("claude", now),), now=now)
+
+    task = scheduler.tasks[0]
+    assert task.status is TaskState.NEEDS_HUMAN
+    assert task.attempt == 0
+    assert task.needs_human_reason is not None
+    assert "plan review dispatch did not complete successfully" in task.needs_human_reason
+    assert worker.dispatches == [(1, "claude"), (1, "claude")]
