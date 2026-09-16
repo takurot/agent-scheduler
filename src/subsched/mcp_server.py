@@ -576,7 +576,10 @@ def build_server(options: ServerOptions) -> Any:
     -- so importing `subsched.mcp_server` for its pure functions (e.g. in tests) never
     requires the `mcp` package to be installed.
     """
-    from mcp.server.fastmcp import FastMCP
+    try:
+        from mcp.server.mcpserver import MCPServer as FastMCP  # mcp>=2
+    except ModuleNotFoundError:  # pragma: no cover -- mcp<2 fallback
+        from mcp.server.fastmcp import FastMCP  # type: ignore[attr-defined,no-redef]
     from pydantic import Field
 
     default_repository = str(options.default_repository)
