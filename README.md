@@ -414,6 +414,10 @@ workflow:
     max_plan_revisions: 2
 ```
 
+`subsched run` applies the loaded `workflow` settings, including stage toggles and revision
+limits. With `workflow.mode: multi-stage` and planning enabled, the first dispatch enters
+`PLANNING`; omitting `workflow` retains standard execution. MCP dispatch uses the same CLI path.
+
 `verification.commands` must contain at least one non-blank command. An empty list or blank-only
 entry is rejected instead of being treated as a successful verification run.
 
