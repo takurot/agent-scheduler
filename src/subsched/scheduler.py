@@ -1681,6 +1681,7 @@ class Scheduler:
             AgentResultKind.UNKNOWN_BILLING,
             AgentResultKind.PERMISSION_DENIED,
             AgentResultKind.TIMEOUT,
+            AgentResultKind.PROCESS_CLEANUP_FAILED,
         }
     )
 
@@ -1836,6 +1837,37 @@ class Scheduler:
                     "to_state": final.status.value,
                     "attempt": final.attempt,
                     "reason_code": result.reason_code,
+                    "result_kind": result.kind.value,
+                },
+            )
+            self._persist()
+            return
+
+        if result.kind is AgentResultKind.PROCESS_CLEANUP_FAILED:
+            reason = (
+                "agent process cleanup failed; manual intervention required to inspect "
+                "running processes before re-dispatching"
+            )
+            final = task.transition(
+                TaskState.NEEDS_HUMAN,
+                current_agent=agent,
+                now=now,
+                reason=reason,
+                reason_code="operator_decision_required",
+            )
+            self.queue = self.queue.replace(final)
+            self._log(
+                "task_transition",
+                level="ERROR",
+                issue_number=final.issue_number,
+                agent=agent,
+                task_id=final.task_id,
+                message=reason,
+                data={
+                    "from_state": task.status.value,
+                    "to_state": final.status.value,
+                    "attempt": final.attempt,
+                    "reason_code": final.needs_human_reason_code,
                     "result_kind": result.kind.value,
                 },
             )

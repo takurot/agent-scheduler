@@ -1970,6 +1970,14 @@ Agent自体の失敗（`per_agent_failures`が`max_agent_failures`に達する�
 再試行よりも回復困難な状態を招くリスクがある。「不明な場合はfail-closedにする」という
 本SPECの方針（§1）に従い、これらの失敗は都度人間の判断を挟む。
 
+## Agent process cleanup失敗のリトライ方針 (#308)
+
+Agent adapterが`PROCESS_CLEANUP_FAILED`を返した場合、前回のprocessが同一worktreeを操作し
+続けている可能性を否定できない。SchedulerはAgent failureのリトライ上限を参照せず、
+`attempt`と`per_agent_failures`を増やさずに即座に`NEEDS_HUMAN`へ遷移する。
+`needs_human_reason_code`は`operator_decision_required`とし、残存processをoperatorが
+確認するまで同一worktreeへ再dispatchしない。
+
 ## Native WorkerによるNEEDS_HUMANの明示的シグナル（#297）
 
 設計判断の承認、指示の矛盾、外部前提条件など「再試行しても解消しない人手待ち」について、Workerはgeneric `FAILURE`ではなく`NEEDS_HUMAN` outcomeをSchedulerへ直接通知できる。
