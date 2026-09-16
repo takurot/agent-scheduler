@@ -305,6 +305,16 @@ class Scheduler:
             return worker_agents[agent].models.resolve(stage)
         return None
 
+    def _resolve_effort(self, agent: str, stage: str) -> str | None:
+        """#313: resolve the effective reasoning effort for this agent and stage from config."""
+        agent_settings = self.agents.get(agent)
+        if agent_settings is not None:
+            return agent_settings.effort.resolve(stage)
+        worker_agents: Mapping[str, AgentSettings] = getattr(self.worker, "agents", {})
+        if agent in worker_agents:
+            return worker_agents[agent].effort.resolve(stage)
+        return None
+
     def _reconcile_recovery(self) -> None:
         """#164, #203: reconcile every DISPATCHED/IN_PROGRESS/VERIFYING task against its
         recorded process or checkpoint before the lease manager re-registers it.
@@ -547,13 +557,19 @@ class Scheduler:
             # here on the loop's first iteration, when current_task is still DISPATCHED.
             stage = "planning"
             model = self._resolve_model(agent, stage)
+            effort = self._resolve_effort(agent, stage)
             if current_task.status is TaskState.PLANNING:
                 planning = current_task
             else:
                 planning = current_task.transition(
                     TaskState.PLANNING, current_agent=agent, now=now
                 )
-            planning = replace(planning, dispatch_stage=stage, dispatch_model=model)
+            planning = replace(
+                planning,
+                dispatch_stage=stage,
+                dispatch_model=model,
+                dispatch_effort=effort,
+            )
             self.queue = self.queue.replace(planning)
             self._persist()
             self._log(
@@ -566,6 +582,7 @@ class Scheduler:
                     "stage": stage,
                     "agent": agent,
                     "model": model or "provider-default",
+                    "effort": effort or "provider-default",
                 },
             )
             result = self._run_stage_worker(planning, agent, lease_nonce)
@@ -601,8 +618,14 @@ class Scheduler:
 
             stage = "plan_review"
             model = self._resolve_model(agent, stage)
+            effort = self._resolve_effort(agent, stage)
             review = planning.transition(TaskState.PLAN_REVIEW, current_agent=agent, now=now)
-            review = replace(review, dispatch_stage=stage, dispatch_model=model)
+            review = replace(
+                review,
+                dispatch_stage=stage,
+                dispatch_model=model,
+                dispatch_effort=effort,
+            )
             self.queue = self.queue.replace(review)
             self._persist()
             self._log(
@@ -615,6 +638,7 @@ class Scheduler:
                     "stage": stage,
                     "agent": agent,
                     "model": model or "provider-default",
+                    "effort": effort or "provider-default",
                 },
             )
             review_result = self._run_stage_worker(review, agent, lease_nonce)
@@ -1124,7 +1148,13 @@ class Scheduler:
                     return True
                 stage = "implementation"
                 model = self._resolve_model(agent, stage)
-                running = replace(staged, dispatch_stage=stage, dispatch_model=model)
+                effort = self._resolve_effort(agent, stage)
+                running = replace(
+                    staged,
+                    dispatch_stage=stage,
+                    dispatch_model=model,
+                    dispatch_effort=effort,
+                )
                 self.queue = self.queue.replace(running)
                 self._persist()
                 self._log(
@@ -1137,6 +1167,7 @@ class Scheduler:
                         "stage": stage,
                         "agent": agent,
                         "model": model or "provider-default",
+                        "effort": effort or "provider-default",
                     },
                 )
             else:
@@ -1145,7 +1176,13 @@ class Scheduler:
                 )
                 stage = resolve_stage(running)
                 model = self._resolve_model(agent, stage)
-                running = replace(running, dispatch_stage=stage, dispatch_model=model)
+                effort = self._resolve_effort(agent, stage)
+                running = replace(
+                    running,
+                    dispatch_stage=stage,
+                    dispatch_model=model,
+                    dispatch_effort=effort,
+                )
                 self.queue = self.queue.replace(running)
                 self._persist()
                 self._log(
@@ -1158,6 +1195,7 @@ class Scheduler:
                         "stage": stage,
                         "agent": agent,
                         "model": model or "provider-default",
+                        "effort": effort or "provider-default",
                     },
                 )
 

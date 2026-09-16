@@ -4,7 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from subsched.config import AgentModelPolicy, AgentSettings, WorkflowConfig
+from subsched.config import AgentEffortPolicy, AgentModelPolicy, AgentSettings, WorkflowConfig
 from subsched.models import (
     AgentResult,
     AgentResultKind,
@@ -207,3 +207,91 @@ def test_scheduler_unconfigured_model_logs_provider_default(tmp_path: Path) -> N
     assert len(dispatches) == 1
     assert dispatches[0]["data"]["stage"] == "implementation"
     assert dispatches[0]["data"]["model"] == "provider-default"
+
+
+def test_scheduler_stage_effort_dispatch_and_logging(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 12, 22, tzinfo=UTC)
+    log_file = tmp_path / "events.jsonl"
+    logger = StructuredLogger(log_file)
+
+    effort = AgentEffortPolicy(
+        default="medium",
+        planning="high",
+        plan_review="high",
+        implementation="medium",
+    )
+    agents = {"claude": AgentSettings(enabled=True, priority=100, effort=effort)}
+
+    worker = RecordingPlanWritingWorker(
+        {
+            (1, "claude"): (
+                AgentResult(AgentResultKind.PASS),  # PLANNING
+                AgentResult(  # PLAN_REVIEW: approve
+                    AgentResultKind.PASS, output='{"verdict": "APPROVE", "summary": "ok"}'
+                ),
+                AgentResult(AgentResultKind.PASS),  # IN_PROGRESS
+            )
+        }
+    )
+    scheduler = Scheduler(
+        store=JsonStateStore(tmp_path),
+        router=Router((AgentConfig("claude", 100),)),
+        worker=worker,
+        worktree_root=tmp_path / "worktrees",
+        workflow=WorkflowConfig(mode="multi-stage"),
+        agents=agents,
+        structured_logger=logger,
+    )
+    scheduler.discover((Issue(number=1, title="one"),))
+    scheduler.run_until_waiting((available("claude", now),), now=now)
+
+    # Inspect recorded tasks received by worker
+    assert len(worker.recorded_tasks) == 3
+    assert worker.recorded_tasks[0].dispatch_stage == "planning"
+    assert worker.recorded_tasks[0].dispatch_effort == "high"
+    assert worker.recorded_tasks[1].dispatch_stage == "plan_review"
+    assert worker.recorded_tasks[1].dispatch_effort == "high"
+    assert worker.recorded_tasks[2].dispatch_stage == "implementation"
+    assert worker.recorded_tasks[2].dispatch_effort == "medium"
+
+    # Verify structured dispatch events
+    lines = log_file.read_text(encoding="utf-8").strip().splitlines()
+    events = [json.loads(line) for line in lines]
+    dispatches = [e for e in events if e["event"] == "dispatch"]
+    assert len(dispatches) == 3
+
+    assert dispatches[0]["data"]["stage"] == "planning"
+    assert dispatches[0]["data"]["effort"] == "high"
+    assert dispatches[0]["data"]["agent"] == "claude"
+
+    assert dispatches[1]["data"]["stage"] == "plan_review"
+    assert dispatches[1]["data"]["effort"] == "high"
+    assert dispatches[1]["data"]["agent"] == "claude"
+
+    assert dispatches[2]["data"]["stage"] == "implementation"
+    assert dispatches[2]["data"]["effort"] == "medium"
+    assert dispatches[2]["data"]["agent"] == "claude"
+
+
+def test_scheduler_unconfigured_effort_logs_provider_default(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 12, 22, tzinfo=UTC)
+    log_file = tmp_path / "events.jsonl"
+    logger = StructuredLogger(log_file)
+
+    worker = ScriptedWorker({(1, "claude"): (AgentResult(AgentResultKind.PASS),)})
+    scheduler = Scheduler(
+        store=JsonStateStore(tmp_path),
+        router=Router((AgentConfig("claude", 100),)),
+        worker=worker,
+        worktree_root=tmp_path / "worktrees",
+        structured_logger=logger,
+    )
+    scheduler.discover((Issue(number=1, title="one"),))
+    scheduler.run_until_waiting((available("claude", now),), now=now)
+
+    lines = log_file.read_text(encoding="utf-8").strip().splitlines()
+    events = [json.loads(line) for line in lines]
+    dispatches = [e for e in events if e["event"] == "dispatch"]
+    assert len(dispatches) == 1
+    assert dispatches[0]["data"]["stage"] == "implementation"
+    assert dispatches[0]["data"]["effort"] == "provider-default"

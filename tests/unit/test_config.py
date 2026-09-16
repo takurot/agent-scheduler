@@ -850,3 +850,96 @@ def test_parse_queue_and_verification_and_root_error_branches(tmp_path: Path) ->
         parse_natural_language_instruction("")
     with pytest.raises(ConfigError, match="instruction must not be empty"):
         parse_natural_language_instruction("   ")
+
+
+def test_parse_agents_config_effort_all_stages(tmp_path: Path) -> None:
+    content = """github:
+  repo: owner/repo
+agents:
+  claude:
+    enabled: true
+    priority: 100
+    effort:
+      default: medium
+      planning: high
+      plan_review: max
+      implementation: low
+      pr_review: xhigh
+      revision: medium
+  codex:
+    enabled: true
+    priority: 90
+    effort:
+      default: medium
+      planning: high
+"""
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(content, encoding="utf-8")
+    config = load_config(path)
+
+    claude_effort = config.agents["claude"].effort
+    assert claude_effort.default == "medium"
+    assert claude_effort.planning == "high"
+    assert claude_effort.plan_review == "max"
+    assert claude_effort.implementation == "low"
+    assert claude_effort.pr_review == "xhigh"
+    assert claude_effort.revision == "medium"
+    assert claude_effort.resolve("planning") == "high"
+    assert claude_effort.resolve("implementation") == "low"
+    assert claude_effort.has_any_effort is True
+
+    codex_effort = config.agents["codex"].effort
+    assert codex_effort.default == "medium"
+    assert codex_effort.planning == "high"
+    assert codex_effort.plan_review is None
+    assert codex_effort.resolve("plan_review") == "medium"
+    assert codex_effort.has_any_effort is True
+
+
+def test_parse_agents_config_effort_missing_defaults_to_all_none(tmp_path: Path) -> None:
+    content = "github:\n  repo: o/r\nagents:\n  claude:\n    enabled: true\n    priority: 100\n"
+    path = tmp_path / "scheduler.yaml"
+    path.write_text(content, encoding="utf-8")
+    config = load_config(path)
+    assert config.agents["claude"].effort.default is None
+    assert config.agents["claude"].effort.has_any_effort is False
+
+
+def test_parse_agents_config_effort_error_branches(tmp_path: Path) -> None:
+    def write_cfg(content: str) -> Path:
+        p = tmp_path / f"cfg_{hash(content)}.yaml"
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    with pytest.raises(ConfigError, match=r"agents\.claude\.effort must be a mapping"):
+        load_config(
+            write_cfg(
+                "github:\n  repo: o/r\nagents:\n  claude:\n    effort: not-a-map\n"
+            )
+        )
+
+    with pytest.raises(ConfigError, match=r"unknown agents\.claude\.effort keys"):
+        load_config(
+            write_cfg(
+                "github:\n  repo: o/r\nagents:\n  claude:\n    effort:\n      bogus_stage: high\n"
+            )
+        )
+
+    with pytest.raises(
+        ConfigError, match=r"agents\.claude\.effort\.default must be one of"
+    ):
+        load_config(
+            write_cfg(
+                "github:\n  repo: o/r\n"
+                "agents:\n  claude:\n    effort:\n      default: invalid_level\n"
+            )
+        )
+
+    with pytest.raises(
+        ConfigError, match=r"agents\.codex\.effort\.planning must be one of"
+    ):
+        load_config(
+            write_cfg(
+                "github:\n  repo: o/r\nagents:\n  codex:\n    effort:\n      planning: xhigh\n"
+            )
+        )

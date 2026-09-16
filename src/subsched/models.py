@@ -402,6 +402,8 @@ class Task:
     # (retry, failover, next stage) resolves a new stage/model.
     dispatch_stage: str | None = None
     dispatch_model: str | None = None
+    # #313: the reasoning effort configured for this dispatch's execution stage
+    dispatch_effort: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -415,6 +417,10 @@ class Task:
     @property
     def effective_model(self) -> str:
         return self.dispatch_model or "provider-default"
+
+    @property
+    def effective_effort(self) -> str:
+        return self.dispatch_effort or "provider-default"
 
     @classmethod
     def from_issue(cls, issue: Issue, *, worktree: str | None = None) -> Task:
@@ -492,6 +498,7 @@ class Task:
             "dispatch_status": self.dispatch_status.value if self.dispatch_status else None,
             "dispatch_stage": self.dispatch_stage,
             "dispatch_model": self.dispatch_model,
+            "dispatch_effort": self.dispatch_effort,
         }
 
     @classmethod
@@ -539,6 +546,7 @@ class Task:
                 ),
                 dispatch_stage=value.get("dispatch_stage"),
                 dispatch_model=value.get("dispatch_model"),
+                dispatch_effort=value.get("dispatch_effort"),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("invalid task state") from error

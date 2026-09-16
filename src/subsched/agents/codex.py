@@ -62,6 +62,9 @@ class CodexCliMetadata:
     # CLI fails closed at preflight instead of the flag being silently ignored or
     # rejected mid-dispatch.
     supports_model_flag: bool = False
+    # #313: whether the installed CLI advertises a `-c` or `--config` flag to pass
+    # model_reasoning_effort.
+    supports_effort_flag: bool = False
 
 
 REQUIRED_CODEX_HEADLESS_FLAGS = frozenset(
@@ -111,6 +114,10 @@ def parse_codex_cli_metadata(*, version_output: str, help_output: str) -> CodexC
         supports_ignore_user_config=True,
         approval_mode=approval_mode,
         supports_model_flag="--model" in help_output,
+        supports_effort_flag=bool(
+            re.search(r"(?:^|\s)-c\b", help_output)
+            or re.search(r"(?<!-)--config\b", help_output)
+        ),
     )
 
 
@@ -168,6 +175,8 @@ def build_codex_headless_argv(
     # entirely, which preserves the provider CLI's own default and is the only behavior
     # possible before this option existed.
     model: str | None = None,
+    # #313: the stage-resolved reasoning effort, passed via -c model_reasoning_effort="<effort>"
+    effort: str | None = None,
 ) -> tuple[str, ...]:
     """Single source of truth for the non-interactive `codex exec` argv, shared by the
     manual live probe (`build_codex_exec_argv`) and `NativeWorker`, so both always agree
@@ -179,11 +188,13 @@ def build_codex_headless_argv(
         else (CODEX_ASK_FOR_APPROVAL_FLAG, "never")
     )
     model_args = ("--model", model) if model else ()
+    effort_args = ("-c", f'model_reasoning_effort="{effort}"') if effort else ()
     return (
         executable,
         *approval_args,
         "exec",
         *model_args,
+        *effort_args,
         "--strict-config",
         "--ignore-user-config",
         "--ignore-rules",

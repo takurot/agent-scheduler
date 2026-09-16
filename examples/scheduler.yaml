@@ -33,6 +33,15 @@ agents:
     #   implementation: sonnet
     #   pr_review: opus
     #   revision: sonnet
+    # Optional (#313). Per-execution-stage reasoning effort level. Valid levels:
+    # low, medium, high, xhigh, max. Passed to Claude CLI via `--effort <level>`.
+    # effort:
+    #   default: medium
+    #   planning: high
+    #   plan_review: high
+    #   implementation: medium
+    #   pr_review: high
+    #   revision: medium
   codex:
     enabled: true
     priority: 90
@@ -45,6 +54,15 @@ agents:
     #   implementation: standard-model
     #   pr_review: advanced-model
     #   revision: standard-model
+    # Optional (#313). Per-execution-stage reasoning effort level. Valid levels:
+    # low, medium, high. Passed to Codex CLI via `-c model_reasoning_effort="<level>"`.
+    # effort:
+    #   default: low
+    #   planning: high
+    #   plan_review: high
+    #   implementation: low
+    #   pr_review: high
+    #   revision: low
 
 routing:
   strategy: capacity-aware

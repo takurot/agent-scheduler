@@ -870,6 +870,37 @@ provider（`claude`/`codex`）だけを選び、provider 決定後、dispatch �
 CLI の `--help`/`exec --help` 出力から `--model` フラグの対応を確認する。未対応の CLI は dispatch 前に
 fail closed し、別モデルや API/metered usage への自動 fallback は行わない。
 
+## 24.2 Per-Stage Reasoning Effort Policy (#313)
+
+`agents.<name>.effort` はオプション。各エージェントごとに `default` と5つの固定 execution stage
+key (`planning`, `plan_review`, `implementation`, `pr_review`, `revision`) に思考レベル（Reasoning Effort）を
+割り当てられる：
+
+```yaml
+agents:
+  claude:
+    enabled: true
+    priority: 100
+    effort:
+      default: medium
+      planning: high
+      plan_review: high
+      implementation: medium
+      pr_review: high
+      revision: medium
+```
+
+解決順は **stage 固有の effort > `default` > provider CLI 自身のデフォルト（フラグなし）** で一意。
+`effort:` を省略した既存 config は、全 stage で effort フラグを付与しない従来どおりの挙動を保つ。
+
+許可される effort レベル値はプロバイダーごとに厳密に検証される（無効な値や別プロバイダー専用の値は `ConfigError` で fail-closed）：
+- **Claude**: `low`, `medium`, `high`, `xhigh`, `max`（`--effort <level>` として argv に渡される）
+- **Codex**: `low`, `medium`, `high`（`-c model_reasoning_effort="<level>"` として argv に渡される）
+
+明示的な effort が設定された agent は、native preflight (`validate_native_preflight`) がインストール済み
+CLI の `--help`/`exec --help` 出力から `--effort`（Claude）または `-c`/`--config`（Codex）の対応を確認する。
+未対応の CLI は dispatch 前に fail closed し、暗黙の無視や fallback は行わない。
+
 ---
 
 # 25. Worker Prompt
@@ -2101,6 +2132,14 @@ agents:
       implementation: sonnet
       pr_review: opus
       revision: sonnet
+    # optional (#313); see §24.2 for effort levels and resolution order
+    effort:
+      default: medium
+      planning: high
+      plan_review: high
+      implementation: medium
+      pr_review: high
+      revision: medium
 
   codex:
     enabled: true
@@ -2112,6 +2151,13 @@ agents:
       implementation: standard-model
       pr_review: advanced-model
       revision: standard-model
+    effort:
+      default: low
+      planning: high
+      plan_review: high
+      implementation: low
+      pr_review: high
+      revision: low
 
 
 routing:

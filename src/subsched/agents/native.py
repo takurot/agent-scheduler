@@ -241,6 +241,14 @@ class NativeWorker:
             if task.dispatch_model is not None
             else (agent_settings.models.resolve(stage) if agent_settings is not None else None)
         )
+        # #313: reuse persisted dispatch_effort from task state (e.g. after restart),
+        # or resolve from agent_settings if this agent has an explicit stage or default
+        # effort configured.
+        effort = (
+            task.dispatch_effort
+            if task.dispatch_effort is not None
+            else (agent_settings.effort.resolve(stage) if agent_settings is not None else None)
+        )
         heartbeat = self._heartbeat(task, agent)
         if agent == "claude":
             claude_tools = READ_ONLY_SANDBOX_ARGS["claude"][1] if read_only else "Bash,Edit,Read"
@@ -262,6 +270,7 @@ class NativeWorker:
                     "--tools",
                     claude_tools,
                     *(("--model", model) if model else ()),
+                    *(("--effort", effort) if effort else ()),
                 ),
                 cwd=worktree_path,
                 # ClaudeAgent/CodexAgent.execute() apply COMMON_ENV_ALLOWLIST to this before
@@ -304,6 +313,7 @@ class NativeWorker:
                     output_schema=schema_path,
                     cwd=worktree_path,
                     model=model,
+                    effort=effort,
                 ),
                 cwd=worktree_path,
                 # ClaudeAgent/CodexAgent.execute() apply COMMON_ENV_ALLOWLIST to this before
