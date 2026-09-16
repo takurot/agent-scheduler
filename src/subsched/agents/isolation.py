@@ -528,8 +528,15 @@ def wrap_native_request(
     worktree_git_mount: Path | None = None,
     read_only: bool = False,
     container_name: str | None = None,
+    review_reports_dir: Path | None = None,
 ) -> ProcessExecutionRequest:
-    """Wrap a provider CLI request in the previously attested container boundary."""
+    """Wrap a provider CLI request in the previously attested container boundary.
+
+    #324: `review_reports_dir` (when given, must be exactly `<request.cwd>/.ai/reviews`
+    and already exist on the host) is bind-mounted writable at that path, overlaying the
+    otherwise readonly worktree mount, so a PR_REVIEW dispatch can still write its report
+    file without granting write access to the rest of the worktree.
+    """
     if config.backend != "container" or config.image is None or config.network is None:
         raise ValueError("native isolation container configuration is incomplete")
     if config.proxy_url is None or not runtime_executable.is_absolute():
@@ -565,6 +572,16 @@ def wrap_native_request(
         ):
             raise ValueError("native isolation worktree Git mount is invalid")
 
+    if review_reports_dir is not None:
+        expected_reviews_dir = request.cwd / ".ai" / "reviews"
+        if (
+            not review_reports_dir.is_absolute()
+            or review_reports_dir.is_symlink()
+            or not review_reports_dir.is_dir()
+            or review_reports_dir != expected_reviews_dir
+        ):
+            raise ValueError("native isolation review reports directory is invalid")
+
     uid = os.getuid()
     gid = os.getgid()
     home_variable = "CODEX_HOME" if agent == "codex" else "CLAUDE_CONFIG_DIR"
@@ -598,6 +615,14 @@ def wrap_native_request(
         _mount_value(auth, "/run/subsched-auth", readonly=True),
         "--mount",
         _mount_value(request.cwd, str(request.cwd), readonly=read_only),
+        *(
+            (
+                "--mount",
+                _mount_value(review_reports_dir, str(request.cwd / ".ai" / "reviews")),
+            )
+            if review_reports_dir is not None
+            else ()
+        ),
         "--workdir",
         str(request.cwd),
         "--env",

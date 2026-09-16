@@ -2801,7 +2801,11 @@ boundaries. A worker-created symlink must never make an unmounted host path reac
 The Scheduler seeds a private Git database from the task HEAD. After cleanup it accepts
 only a valid descendant commit, imports its objects, atomically advances the task HEAD
 from the expected base, and synchronizes the task index. Review-stage workspaces are
-mounted read-only and any review-stage commit is rejected.
+mounted read-only and any review-stage commit is rejected. PR_REVIEW is the one
+exception: since the reviewer must persist `.ai/reviews/<issue>-r<round>.md` into the
+task worktree, that single subdirectory is additionally bind-mounted writable inside the
+otherwise read-only workspace; a mechanical post-dispatch check still fails closed if any
+other path changed or a commit was made.
 
 Each invocation receives a dedicated ephemeral HOME containing only the minimum
 operator-provisioned provider subscription authentication material. Never copy host

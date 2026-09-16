@@ -320,6 +320,79 @@ def test_container_request_has_only_explicit_isolated_mounts_and_environment(
     assert wrapped.stdin_payload == b"prompt"
 
 
+def test_container_request_mounts_review_reports_dir_writable_under_readonly_worktree(
+    tmp_path: Path,
+) -> None:
+    """#324: PR_REVIEW mounts the whole worktree readonly, but the reviewer still needs
+    to write `.ai/reviews/<issue>-r<round>.md`. A separate writable bind mount for just
+    that subdirectory overlays the readonly parent mount at that path only."""
+    from subsched.agents.base import ProcessExecutionRequest
+    from subsched.agents.isolation import wrap_native_request
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    reviews_dir = worktree / ".ai" / "reviews"
+    reviews_dir.mkdir(parents=True)
+    auth = _secure_auth_dir(tmp_path / "auth")
+    original = ProcessExecutionRequest(
+        argv=("codex", "exec", "-"),
+        cwd=worktree,
+        env={"HOME": "/host/home", "PATH": "/host/bin"},
+        stdin_payload=b"prompt",
+    )
+
+    wrapped = wrap_native_request(
+        original,
+        agent="codex",
+        config=_runtime_config(auth),
+        runtime_executable=Path("/usr/bin/docker"),
+        read_only=True,
+        review_reports_dir=reviews_dir,
+    )
+
+    joined = " ".join(wrapped.argv)
+    assert f"src={worktree},dst={worktree},readonly" in joined
+    assert f"src={reviews_dir},dst={worktree / '.ai' / 'reviews'}" in joined
+    assert f"src={reviews_dir},dst={worktree / '.ai' / 'reviews'},readonly" not in joined
+
+
+@pytest.mark.parametrize(
+    "bad_reviews_dir",
+    ["outside", "wrong-subpath"],
+)
+def test_wrap_native_request_rejects_invalid_review_reports_dir(
+    tmp_path: Path, bad_reviews_dir: str
+) -> None:
+    from subsched.agents.base import ProcessExecutionRequest
+    from subsched.agents.isolation import wrap_native_request
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    auth = _secure_auth_dir(tmp_path / "auth")
+    original = ProcessExecutionRequest(
+        argv=("codex", "exec", "-"),
+        cwd=worktree,
+        env={"HOME": "/host/home", "PATH": "/host/bin"},
+        stdin_payload=b"prompt",
+    )
+    if bad_reviews_dir == "outside":
+        invalid = tmp_path / "elsewhere"
+        invalid.mkdir()
+    else:
+        invalid = worktree / "not-reviews"
+        invalid.mkdir()
+
+    with pytest.raises(ValueError, match="review"):
+        wrap_native_request(
+            original,
+            agent="codex",
+            config=_runtime_config(auth),
+            runtime_executable=Path("/usr/bin/docker"),
+            read_only=True,
+            review_reports_dir=invalid,
+        )
+
+
 def test_container_request_propagates_claude_oauth_token_when_present(
     tmp_path: Path,
 ) -> None:
@@ -698,6 +771,63 @@ def test_native_dispatch_uses_attested_container_request(
     assert observed["runtime_executable"] == Path("/usr/bin/docker")
     assert observed["git_dir"] == git_context.git_dir
     codex.execute.assert_called_once_with(observed["request"])
+
+
+def test_native_dispatch_mounts_review_reports_dir_writable_for_pr_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#324: under container isolation, PR_REVIEW must be able to write its report
+    despite the readonly worktree mount, so NativeWorker passes the `.ai/reviews`
+    directory through to wrap_native_request as a writable mount, and creates it first
+    since a bind mount source must already exist on the host."""
+    from subsched.agents.isolation import IsolationGitContext
+
+    auth = _secure_auth_dir(tmp_path / "auth")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    task = Task.from_issue(Issue(number=293, title="Isolation regression")).with_worktree(
+        str(worktree)
+    )
+    bootstrap_task_files(worktree, task)
+    task = dataclasses.replace(task, dispatch_status=TaskState.PR_REVIEW)
+    claude = MagicMock()
+    claude.execute.return_value = AgentResult(AgentResultKind.PASS)
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "subsched.agents.native.verify_native_isolation", lambda *args, **kwargs: None
+    )
+    git_context = IsolationGitContext(tmp_path / "sandbox.git", "a" * 40, tmp_path / "worktree.git")
+    monkeypatch.setattr(
+        "subsched.agents.native.prepare_isolated_git",
+        lambda *args, **kwargs: git_context,
+    )
+    monkeypatch.setattr("subsched.agents.native.import_isolated_git", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "subsched.agents.native.cleanup_native_container", lambda *args, **kwargs: None
+    )
+
+    def wrap(request: object, **kwargs: object) -> object:
+        observed.update(kwargs)
+        observed["request"] = request
+        return request
+
+    monkeypatch.setattr("subsched.agents.native.wrap_native_request", wrap)
+    worker = NativeWorker(
+        claude_agent=claude,
+        subscription_billing_verified=True,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+        isolation_config=_runtime_config(auth, agent="claude"),
+        isolation_runtime_executable=Path("/usr/bin/docker"),
+        isolation_state_root=tmp_path / "state",
+    )
+
+    result = worker.run(task, "claude")
+
+    assert result.kind is AgentResultKind.PASS
+    assert observed["read_only"] is True
+    assert observed["review_reports_dir"] == worktree / ".ai" / "reviews"
+    assert (worktree / ".ai" / "reviews").is_dir()
 
 
 @pytest.mark.parametrize(

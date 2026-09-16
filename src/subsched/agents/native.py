@@ -111,6 +111,7 @@ class NativeWorker:
         agent: str,
         read_only: bool,
         git_context: IsolationGitContext,
+        review_reports_dir: Path | None = None,
     ) -> AgentResult:
         assert self.isolation_config is not None
         assert self.isolation_runtime_executable is not None
@@ -128,6 +129,7 @@ class NativeWorker:
                 worktree_git_mount=git_context.worktree_git_mount,
                 read_only=read_only,
                 container_name=container_name,
+                review_reports_dir=review_reports_dir,
             )
         except ValueError as error:
             return AgentResult(AgentResultKind.FAILURE, output=str(error))
@@ -231,6 +233,17 @@ class NativeWorker:
                 )
             except (OSError, ValueError) as error:
                 return AgentResult(AgentResultKind.FAILURE, output=str(error))
+        # #324: PR_REVIEW mounts the whole worktree readonly under container isolation,
+        # but the reviewer still needs to write its report into .ai/reviews/. Create the
+        # directory on the host first -- the container runtime requires a bind mount
+        # source to already exist -- and mount just that subdirectory writable.
+        review_reports_dir: Path | None = None
+        if git_context is not None and task.dispatch_status is TaskState.PR_REVIEW:
+            review_reports_dir = worktree_path / ".ai" / "reviews"
+            try:
+                review_reports_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                return AgentResult(AgentResultKind.FAILURE, output=str(error))
         # #296: reuse persisted dispatch_model from task state (e.g. after restart),
         # or resolve from agent_settings if this agent has an explicit stage or default
         # model configured.
@@ -291,7 +304,11 @@ class NativeWorker:
                 return self.claude_agent.execute(req)
             assert git_context is not None
             return self._execute_isolated(
-                req, agent=agent, read_only=read_only, git_context=git_context
+                req,
+                agent=agent,
+                read_only=read_only,
+                git_context=git_context,
+                review_reports_dir=review_reports_dir,
             )
         elif agent == "codex":
             if self.codex_approval_mode is None:
@@ -348,6 +365,10 @@ class NativeWorker:
                 return self.codex_agent.execute(req)
             assert git_context is not None
             return self._execute_isolated(
-                req, agent=agent, read_only=read_only, git_context=git_context
+                req,
+                agent=agent,
+                read_only=read_only,
+                git_context=git_context,
+                review_reports_dir=review_reports_dir,
             )
         return AgentResult(AgentResultKind.FAILURE, output=f"unsupported agent: {agent}")
