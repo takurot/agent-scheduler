@@ -23,7 +23,7 @@ from subsched.agents.isolation import (
     verify_native_isolation,
     wrap_native_request,
 )
-from subsched.config import AgentSettings, NativeIsolationConfig
+from subsched.config import AgentSettings, NativeIsolationConfig, validate_base_branch
 from subsched.contract import (
     build_plan_prompt,
     build_plan_review_prompt,
@@ -76,6 +76,7 @@ class NativeWorker:
         # call site without an explicit models config resolves no model for any stage,
         # so the provider CLI's own default is used and argv is unchanged.
         agents: Mapping[str, AgentSettings] | None = None,
+        base_branch: str = "main",
     ) -> None:
         if type(subscription_billing_verified) is not bool:
             raise TypeError("subscription billing verification must be a boolean")
@@ -103,6 +104,7 @@ class NativeWorker:
         self.isolation_runtime_executable = isolation_runtime_executable
         self.isolation_state_root = isolation_state_root
         self.agents = agents or {}
+        self.base_branch = validate_base_branch(base_branch)
 
     def _execute_isolated(
         self,
@@ -212,7 +214,11 @@ class NativeWorker:
             prompt = build_plan_review_prompt(task)
             read_only = True
         elif task.dispatch_status is TaskState.PR_REVIEW:
-            prompt = build_review_prompt(task, round_number=task.review_cycles + 1)
+            prompt = build_review_prompt(
+                task,
+                round_number=task.review_cycles + 1,
+                base_branch=self.base_branch,
+            )
             read_only = True
         elif task.dispatch_status is TaskState.REVISING:
             prompt = build_revision_prompt(task, verification_commands=self.verification_commands)
@@ -229,7 +235,10 @@ class NativeWorker:
                 )
             try:
                 git_context = prepare_isolated_git(
-                    worktree_path, self.isolation_state_root, task.task_id
+                    worktree_path,
+                    self.isolation_state_root,
+                    task.task_id,
+                    base_branch=self.base_branch,
                 )
             except (OSError, ValueError) as error:
                 return AgentResult(AgentResultKind.FAILURE, output=str(error))

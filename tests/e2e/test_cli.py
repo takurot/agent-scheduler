@@ -117,7 +117,7 @@ def _no_real_merged_pr_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(
         "subsched.agents.native.prepare_isolated_git",
-        lambda worktree, state_root, task_id: IsolationGitContext(
+        lambda worktree, state_root, task_id, *, base_branch: IsolationGitContext(
             state_root / task_id / "invocation-test" / "repo.git",
             "a" * 40,
             state_root / task_id / "invocation-test" / "worktree.git",

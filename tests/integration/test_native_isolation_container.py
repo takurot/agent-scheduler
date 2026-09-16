@@ -111,6 +111,9 @@ test ! -e /var/run/docker.sock
 test -z "${GIT_DIR:-}"
 test -z "${GIT_WORK_TREE:-}"
 test "$(git rev-parse --absolute-git-dir)" = /run/subsched-git
+git rev-parse --verify origin/main >/dev/null
+git diff origin/main...HEAD >/dev/null
+git log origin/main..HEAD >/dev/null
 test -z "$(git config --get credential.helper || true)"
 curl --silent --show-error --connect-timeout 10 https://api.openai.com/v1/models >/dev/null
 if curl --noproxy '*' --silent --show-error --connect-timeout 3 \
