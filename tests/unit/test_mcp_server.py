@@ -709,16 +709,22 @@ def test_get_task_handoff_resource_reads_content(tmp_path: Path) -> None:
 
 
 def test_handoff_resource_rejects_non_integer_issue(tmp_path: Path) -> None:
+    from mcp.server.mcpserver.exceptions import UnexpectedResourceError
+
     server = build_server(ServerOptions(default_repository=tmp_path))
 
     async def _read() -> object:
         return await server.read_resource("subsched://tasks/abc/handoff")
 
-    # FastMCP's resource manager wraps the underlying `McpToolError` in a `ValueError`;
-    # the important behavior is that the raw, unhandled `int()` `ValueError` never
-    # propagates -- it's replaced by our own message before FastMCP re-wraps it.
-    with pytest.raises(ValueError, match="invalid issue number: abc"):
+    # mcp>=2's resource manager wraps any handler crash in `UnexpectedResourceError`
+    # (`ValueError` on mcp<2). The important behavior is that the raw, unhandled
+    # `int()` `ValueError` never propagates -- it is replaced by our own
+    # `McpToolError` message before the SDK re-wraps it.
+    with pytest.raises(UnexpectedResourceError) as excinfo:
         asyncio.run(_read())
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, McpToolError)
+    assert str(cause) == "invalid issue number: abc"
 
 
 def test_get_guidelines_resource_mentions_handoff_headers() -> None:
@@ -779,7 +785,7 @@ def test_build_server_tools_have_descriptions_and_documented_parameters(
 
     for tool in tools:
         assert tool.description, f"{tool.name} is missing a description"
-        properties = tool.inputSchema.get("properties", {})
+        properties = tool.input_schema.get("properties", {})
         for param_name, schema in properties.items():
             assert schema.get(
                 "description"
