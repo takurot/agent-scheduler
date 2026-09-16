@@ -14,6 +14,8 @@
 
 - 🔒 **Subscription-Only Execution**: Strictly operates within flat-rate subscription quotas (Claude Pro/Team, ChatGPT Plus/Team). Prevents accidental pay-as-you-go API key charges with fail-closed safety.
 - 🌳 **Worktree Isolation**: Creates isolated Git worktrees (`subsched/issue-<number>`) for each task to prevent workspace collision.
+- 🐳 **Container Isolation Sandbox**: Runs coding agents inside hardened Docker containers with dropped capabilities, read-only rootfs, ephemeral HOME/tmp, and an egress allowlist proxy—preventing unauthorized host access, network exfiltration, or credential leaks.
+- 🔄 **Multi-Stage Autonomous Workflow**: Supports `PLANNING` → `PLAN_REVIEW` → `IN_PROGRESS` → `VERIFYING` → `PR_REVIEW` → `REVISING` with structured JSON approval gates, differential diff inspection, and per-stage model/reasoning effort configuration.
 - ⚡ **Reactive Multi-Agent Failover**: Classifies rate-limit results returned by workers and preserves cooldown/reset state for failover. Proactive provider-capacity monitoring is not yet wired.
 - 🛡️ **Automated TDD & Quality Gates**: Enforces test-driven development, running repository verification (`ruff`, `mypy`, `pytest` with $\ge 80\%$ coverage, `pip-audit`) before pull requests.
 - 🔀 **Merge Conflict Protection**: Resolves the repository default branch, fetches its latest `origin` state, rebases onto that remote-tracking ref, and cleanly aborts on conflict before escalating to `NEEDS_HUMAN`.
@@ -58,6 +60,7 @@ gates remain authoritative.
 - **Package Manager**: `pip`, `pipx`, or [`uv`](https://docs.astral.sh/uv/)
 - **Git**: `>=2.40`
 - **GitHub CLI**: `gh` (authenticated)
+- **Container Runtime (for native execution)**: Docker Engine (Linux) or Docker Desktop (macOS) with Linux container execution support
 - **Coding agent CLI tools**: `claude` (Claude Code) and/or `codex` (OpenAI Codex). For `codex`,
   `subsched doctor` accepts either the current `codex exec --help` non-interactive approval
   contract (`--approve-for-me`, e.g. Codex CLI 0.153.4+) or the legacy one (`--ask-for-approval`);
@@ -312,6 +315,215 @@ existing recovery rules; dry-run does not mutate them.
 
 ---
 
+## Container Isolation Sandbox Architecture
+
+Unattended coding agent execution requires bypassing confirmation prompts (`bypassPermissions` for Claude Code, `--approve-for-me` for Codex), giving agent CLIs permission to run arbitrary shell commands, edit files, and inspect the filesystem. To protect the host machine, developer environment, and network from accidental destruction or malicious actions (such as prompt injections from issues or malicious dependency scripts), `subsched` enforces a **Scheduler-managed Container Isolation Boundary** (`isolation.backend: container`).
+
+Unconfigured or unverifiable isolation fails closed; `--allow-native` and `--subscription-billing-verified` cannot override a failed isolation check. See [SPEC §72.2](docs/SPEC.md#722-native-container-isolation-issue-293).
+
+```mermaid
+flowchart TD
+    subgraph Host["Host Machine"]
+        Scheduler["subsched Scheduler (Trusted)"]
+        GitRepo["Host Git Repository"]
+        HostHome["Host HOME / SSH / GitHub Auth (NEVER Mounted)"]
+        DockerEngine["Docker Engine / Desktop (Linux Containers)"]
+    end
+
+    subgraph InternalNet["Docker Internal Network (default-deny egress)"]
+        WorkerContainer["Worker Container<br/>(read-only rootfs, cap-drop ALL)"]
+        ProxyContainer["Squid Allowlist Proxy<br/>(RepoDigest pinned)"]
+    end
+
+    subgraph Internet["External Network"]
+        Providers["Subscription API Endpoints<br/>(api.anthropic.com / api.openai.com)"]
+        BlockedNet["Blocked: Direct IPs, Host LAN, Cloud Metadata APIs"]
+    end
+
+    Scheduler -->|"Orchestrates & seeds private Git"| WorkerContainer
+    WorkerContainer -->|"HTTP_PROXY / HTTPS_PROXY"| ProxyContainer
+    ProxyContainer -->|"Allowed domains only"| Providers
+    ProxyContainer -.->|"DENIED"| BlockedNet
+    Scheduler ---|"Task Worktree (RW or Read-Only)"| WorkerContainer
+    Scheduler ---|"Dedicated Auth Dir (mode 0700/0600)"| WorkerContainer
+```
+
+### Key Isolation Guarantees
+
+1. **Hardened Docker Container Boundary**:
+   - **Read-Only Root Filesystem**: Worker containers are dispatched with `--read-only` rootfs.
+   - **Dropped Capabilities**: All Linux capabilities are dropped (`--cap-drop ALL`), and privilege escalation is prohibited (`--security-opt no-new-privileges=true`).
+   - **Strict Resource Limits**: CPU (`--cpus 4`), memory (`--memory 8g`), and process limits (`--pids-limit 512`) prevent runaway processes and resource exhaustion.
+   - **Ephemeral In-Memory Storage**: `/tmp` and `/isolated-home` are mounted as in-memory `tmpfs` mounts with `nosuid,nodev`.
+   - **Deterministic Lifecycle & Cleanup**: Containers run with unguessable names (`subsched-worker-<task_id>-<token>`). On process exit, timeout, or cancellation, the Scheduler force-removes the container and mechanically verifies its absence before accepting any state.
+
+2. **Network Egress Isolation (Squid Allowlist Proxy)**:
+   - Worker containers attach exclusively to an isolated Docker internal network (`Internal: true`) that has no external gateway.
+   - The **only peer** permitted on this internal network is the operator-configured Squid proxy container.
+   - The proxy enforces an immutable, digest-pinned domain allowlist permitting only verified provider subscription endpoints (e.g., `api.anthropic.com`, `api.openai.com`). Direct IP connections, arbitrary ports, local LAN resources, cloud metadata endpoints (`169.254.169.254`), and unauthorized external domains are unconditionally blocked.
+
+3. **Filesystem & Private Git Database Isolation**:
+   - **Zero Host Leakage**: Host `HOME`, `~/.ssh`, host `gh` tokens, sibling worktrees, Docker/runtime sockets, and `.ai/scheduler.json` are never mounted.
+   - **Private Git Database**: The host `.git` directory is never exposed to the container. Instead, `subsched` creates an ephemeral Git database seeded only with the task HEAD and `refs/remotes/origin/<base_branch>`.
+   - **Atomic Commit Import**: Commits created by the agent are validated via `git fsck` and verified to be valid descendants of task HEAD before being atomically imported into the host worktree.
+   - **Read-Only Review Worktrees**: During review stages (`PLAN_REVIEW`, `PR_REVIEW`), the worktree is mounted strictly read-only. For `PR_REVIEW`, `.ai/reviews/` is provided as an overlay writable mount so the reviewer can persist review reports without mutating any project code.
+
+4. **Credential Isolation**:
+   - Provider credentials are supplied via dedicated host directories (`isolation.auth.claude`, `isolation.auth.codex`) completely separate from host configuration and worktree paths.
+   - **Strict Permission Enforcements**: Auth directories must be mode `0700` and files mode `0600` (owned by the current user). Symlinks and files exceeding size limits are rejected fail-closed.
+   - Ephemeral container injection: An unprivileged entrypoint copies credentials to `/isolated-home` and exports required tokens (`CLAUDE_CODE_OAUTH_TOKEN` or sets `CODEX_HOME`) without writing them to disk outside `tmpfs`.
+
+### Container Sandbox Setup Guide
+
+To set up native container isolation for `subsched`:
+
+#### Step 1: Create Docker Internal Network
+Create an isolated internal network with default-deny egress:
+```bash
+docker network create --internal subsched-provider-internal
+```
+
+#### Step 2: Prepare the Squid Allowlist Proxy
+Run a Squid proxy attached to both the internal network and an outbound network (e.g., standard bridge):
+```bash
+# Example: Run allowlist proxy container
+docker run -d \
+  --name subsched-provider-proxy \
+  --network subsched-provider-internal \
+  registry.example/subsched-proxy@sha256:<proxy-digest>
+
+# Connect proxy to outbound bridge for external internet access
+docker network connect bridge subsched-provider-proxy
+```
+
+#### Step 3: Prepare Dedicated Provider Authentication Directories
+Create isolated directories with restricted permissions (`0700` directory, `0600` files):
+```bash
+# For Claude Code (OAuth token or config):
+mkdir -p ~/.config/subsched-auth/claude
+chmod 700 ~/.config/subsched-auth/claude
+# Place your Claude subscription credentials (e.g., oauth-token or .claude.json):
+chmod 600 ~/.config/subsched-auth/claude/*
+
+# For OpenAI Codex (auth.json):
+mkdir -p ~/.config/subsched-auth/codex
+chmod 700 ~/.config/subsched-auth/codex
+# Place your Codex auth.json:
+chmod 600 ~/.config/subsched-auth/codex/*
+```
+
+#### Step 4: Configure `subsched.yaml`
+Add the `isolation:` section to your `subsched.yaml`:
+```yaml
+isolation:
+  backend: container
+  runtime: docker
+  image: registry.example/subsched-worker@sha256:<worker-digest>
+  network: subsched-provider-internal
+  proxy_url: http://subsched-provider-proxy:3128
+  proxy_image: registry.example/subsched-proxy@sha256:<proxy-digest>
+  auth:
+    claude: /Users/username/.config/subsched-auth/claude
+    codex: /Users/username/.config/subsched-auth/codex
+```
+
+#### Step 5: Verify Setup with `subsched doctor`
+Run diagnostic preflight to verify all container isolation boundaries:
+```bash
+subsched doctor
+```
+`subsched doctor` mechanically verifies:
+- Docker runtime availability and Linux container compatibility
+- Worker and proxy image RepoDigests against configured digests
+- Internal network configuration (`Internal: true`) and proxy container attachment
+- Absence of unauthorized containers on the internal network
+- Provider auth directory permissions (`0700`) and file modes (`0600`)
+
+---
+
+## Multi-Stage Autonomous Workflow
+
+In complex software projects, single-pass agent execution ("prompt → edit code → PR") frequently results in architectural drift, missing edge cases, or broken invariants. `subsched` provides a **Multi-Stage Autonomous Workflow** (`workflow.mode: multi-stage`) that structures development into clear, gated engineering stages:
+
+```mermaid
+stateDiagram-v2
+    [*] --> READY
+    READY --> PLANNING: Task dispatched
+    PLANNING --> PLAN_REVIEW: Plan generated (.ai/plans/<issue>.md)
+    PLAN_REVIEW --> IN_PROGRESS: Verdict: APPROVE
+    PLAN_REVIEW --> PLANNING: Verdict: REQUEST_CHANGES (revisions < max)
+    PLAN_REVIEW --> NEEDS_HUMAN: Verdict: REQUEST_CHANGES (revisions >= max)
+    IN_PROGRESS --> VERIFYING: Implementation complete
+    VERIFYING --> READY_FOR_REVIEW: All checks pass (PR review disabled)
+    VERIFYING --> PR_REVIEW: All checks pass (PR review enabled)
+    VERIFYING --> IN_PROGRESS: Gate failed (retries < max)
+    PR_REVIEW --> READY_FOR_REVIEW: Review APPROVE -> PR created
+    PR_REVIEW --> REVISING: Review REQUEST_CHANGES (cycles < max)
+    PR_REVIEW --> NEEDS_HUMAN: Review REQUEST_CHANGES (cycles >= max)
+    REVISING --> VERIFYING: Revisions complete
+    READY_FOR_REVIEW --> COMPLETE: PR merged on GitHub
+```
+
+### Execution Stages
+
+| Stage | Workspace Mode | Primary Responsibility | Success Transition | Escalation / Retry |
+|---|---|---|---|---|
+| **`PLANNING`** | Read-Write (No commits) | Inspects repository, understands issue requirements, and writes an implementation plan to `.ai/plans/<issue>.md`. | Advances to `PLAN_REVIEW`. | — |
+| **`PLAN_REVIEW`** | Read-Only Sandbox | An independent reviewer agent evaluates the implementation plan and outputs a strict JSON verdict (`APPROVE` or `REQUEST_CHANGES`). | `APPROVE` advances to `IN_PROGRESS`. | `REQUEST_CHANGES` returns to `PLANNING` (up to `max_plan_revisions`, then fails closed to `NEEDS_HUMAN`). |
+| **`IN_PROGRESS`** | Read-Write | Agent implements the planned solution following TDD (write failing tests first, then implementation). | Advances to `VERIFYING`. | Process error or timeout retries under failover rules. |
+| **`VERIFYING`** | Host Quality Gate | The Scheduler executes `verification.commands` on the host (linting, type checking, unit/integration tests, security audits). | Passes advance to `PR_REVIEW` (if enabled) or PR creation. | Test/lint failures return to `IN_PROGRESS` with error diagnostics. |
+| **`PR_REVIEW`** | Read-Only (Writable `.ai/reviews/`) | Reviewer agent inspects differential diff (`git diff origin/<base_branch>...HEAD`), runs tests, and persists report `.ai/reviews/<issue>-r<round>.md`. | `APPROVE` advances to PR creation and `READY_FOR_REVIEW`. | `REQUEST_CHANGES` advances to `REVISING` (up to `max_review_cycles`, then `NEEDS_HUMAN`). |
+| **`REVISING`** | Read-Write | Agent reads PR review findings and revises code and tests to address reviewer feedback. | Advances to `VERIFYING`. | Re-enters verification loop. |
+
+### Per-Stage Model Routing (`agents.<name>.models`)
+
+Different stages demand different model strengths. For example, architecture planning and code review benefit from deep reasoning capabilities (such as Claude Opus), while code implementation benefits from fast, responsive models (such as Claude Sonnet).
+
+Configure model routing per execution stage in `subsched.yaml`:
+```yaml
+agents:
+  claude:
+    enabled: true
+    models:
+      default: sonnet
+      planning: opus
+      plan_review: opus
+      implementation: sonnet
+      pr_review: opus
+      revision: sonnet
+  codex:
+    enabled: true
+    models:
+      default: standard-model
+      planning: advanced-model
+      plan_review: advanced-model
+      implementation: standard-model
+      pr_review: advanced-model
+      revision: standard-model
+```
+Resolution precedence: **stage-specific model > `default` > provider CLI default**.
+
+### Per-Stage Reasoning Effort (`agents.<name>.effort`)
+
+Fine-tune thinking token depth or reasoning effort per stage:
+- **Claude**: Supported levels: `low`, `medium`, `high`, `xhigh`, `max` (passed via `--effort <level>`).
+- **Codex**: Supported levels: `low`, `medium`, `high` (passed via `-c model_reasoning_effort="<level>"`).
+
+```yaml
+agents:
+  claude:
+    enabled: true
+    effort:
+      default: medium
+      planning: high
+      plan_review: high
+      implementation: medium
+      pr_review: high
+      revision: medium
+```
+
+---
+
 ## Configuration (`subsched.yaml`)
 
 You can place a `subsched.yaml` in your project root to customize repositories, concurrency, and verification commands:
@@ -378,6 +590,9 @@ execution:
   max_agent_switches: 6
   max_tasks_per_run: 50
   pause_running_policy: continue
+  # Optional: automated PR review and revision rounds before completing the task
+  pr_review_enabled: false
+  max_review_cycles: 3
 
 queue:
   priority:
@@ -398,6 +613,20 @@ verification:
     # For Node.js / TypeScript:
     # - npm test
     # - npm run lint
+
+# Required for native execution (--allow-native). Both images must be locally available
+# and pinned by RepoDigest. The proxy container is the only peer on the internal network.
+# Dedicated auth directories must be mode 0700 containing only regular files mode 0600.
+isolation:
+  backend: container
+  runtime: docker
+  image: registry.example/subsched-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  network: subsched-provider-internal
+  proxy_url: http://subsched-provider-proxy:3128
+  proxy_image: registry.example/subsched-proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  auth:
+    claude: /absolute/path/to/dedicated/claude-auth
+    codex: /absolute/path/to/dedicated/codex-auth
 
 # Optional (defaults shown below apply when `workflow:` is omitted entirely).
 # mode: multi-stage opts in to a PLANNING -> PLAN_REVIEW gate before IN_PROGRESS: a
@@ -439,6 +668,10 @@ whitespace/control characters, and not start with `-`; native preflight addition
 confirms the installed CLI advertises `--model` support for any agent with a configured
 model, and fails closed (instead of silently dropping the flag or falling back to a
 different model) if it does not.
+
+`execution.pr_review_enabled` (default: `false`) activates the automated PR review and revision loop (`PR_REVIEW` → `REVISING`). When enabled, after the `VERIFYING` quality gate passes, the Scheduler dispatches a read-only reviewer agent that inspects the diff against `origin/<base_branch>` and emits a structured JSON verdict. `execution.max_review_cycles` (default: `3`) limits how many `REQUEST_CHANGES` → `REVISING` → `VERIFYING` → `PR_REVIEW` round-trips are allowed before failing closed to `NEEDS_HUMAN`.
+
+`isolation.backend: container` enables the mechanically verified Docker container sandbox for native agent execution (see the [Container Isolation Sandbox Architecture](#container-isolation-sandbox-architecture) section above). `isolation.image` and `isolation.proxy_image` must be absolute image references pinned by digest (`@sha256:...`). `execution.concurrency` must be `1` when container isolation is active. `subsched doctor` verifies all container isolation prerequisites without reading credential values.
 
 ---
 
@@ -548,11 +781,4 @@ This is expected, fail-closed behavior, not a failure: `github.completion.close_
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md): Operator runbook for running, monitoring, and disaster recovery.
 - [`docs/WORKFLOW.md`](docs/WORKFLOW.md): Contributor and development workflow.
 
-### Native isolation configuration (issue #293)
-
-Native dispatch requires the `isolation:` section shown in
-[`examples/scheduler.yaml`](examples/scheduler.yaml). `subsched doctor` verifies the
-Linux Docker engine, both image RepoDigests, the running allowlist proxy, an otherwise
-empty internal network, and per-provider auth permissions without reading auth values.
-The initial backend intentionally requires `execution.concurrency: 1`; unknown runtimes,
-shared worker networks, missing controls, or stale containers fail closed.
+For native container isolation configuration and setup, see the [Container Isolation Sandbox Architecture](#container-isolation-sandbox-architecture) section above and the full schema in [`examples/scheduler.yaml`](examples/scheduler.yaml).
