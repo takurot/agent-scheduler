@@ -21,6 +21,7 @@ from subsched.agents.codex import (
     build_codex_exec_argv,
     build_codex_headless_argv,
     parse_codex_jsonl,
+    resolve_codex_sandbox_mode,
     run_codex_probe,
 )
 from subsched.models import AgentResultKind
@@ -1270,6 +1271,33 @@ def test_build_codex_headless_argv_adds_model_as_single_argv_element(tmp_path: P
     )
     assert "--model" in argv
     assert argv[argv.index("--model") + 1] == "advanced-model"
+
+
+@pytest.mark.parametrize(
+    ("read_only", "expected"),
+    [(False, "workspace-write"), (True, "read-only")],
+)
+def test_resolve_codex_sandbox_mode_uses_per_stage_mode_outside_containers(
+    read_only: bool, expected: str
+) -> None:
+    assert (
+        resolve_codex_sandbox_mode(read_only=read_only, container_isolated=False)
+        == expected
+    )
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_resolve_codex_sandbox_mode_always_trusts_container_isolation(
+    read_only: bool,
+) -> None:
+    """#314: bwrap (invoked by Codex's own `workspace-write`/`read-only` sandbox) cannot
+    create an unprivileged user namespace inside the outer container's `--cap-drop ALL`
+    + `no-new-privileges` boundary, so every command fails regardless of task stage --
+    container isolation must always select `danger-full-access` instead."""
+    assert (
+        resolve_codex_sandbox_mode(read_only=read_only, container_isolated=True)
+        == "danger-full-access"
+    )
 
 
 def _make_codex_event_stream(final_json_text: str) -> str:
