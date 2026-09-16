@@ -1308,6 +1308,83 @@ def test_dry_run_overrides_create_pr_true_and_skips_all_github_writes(
     assert "create_pr=True" in result.output
 
 
+@pytest.mark.parametrize(
+    ("workflow_yaml", "expected_stage"),
+    [
+        ("", TaskState.IN_PROGRESS),
+        ("workflow:\n  mode: standard\n", TaskState.IN_PROGRESS),
+        (
+            "workflow:\n  mode: multi-stage\n"
+            "  stages:\n    plan_review: false\n"
+            "  limits:\n    max_plan_revisions: 4\n",
+            TaskState.PLANNING,
+        ),
+    ],
+    ids=["omitted", "standard", "multi-stage"],
+)
+def test_run_propagates_workflow_and_dispatches_expected_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workflow_yaml: str,
+    expected_stage: TaskState,
+) -> None:
+    """Issue #305: the CLI must use the configured workflow for real dispatch."""
+    import shutil
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    from subsched.config import load_config
+    from subsched.models import AgentResult, AgentResultKind, Capacity, CapacityState
+    from subsched.scheduler import Scheduler
+
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setattr(
+        "subsched.cli.ClaudeCapacitySensor.observe",
+        lambda *a, **k: (
+            Capacity(
+                agent="claude",
+                state=CapacityState.AVAILABLE,
+                observed_at=datetime.now(UTC),
+                source="provider",
+                confidence="high",
+            ),
+        ),
+    )
+    monkeypatch.setattr("subsched.cli.CodexCapacitySensor.observe", lambda *a, **k: ())
+    _init_git_repo(tmp_path)
+    config_file = tmp_path / "subsched.yaml"
+    config_file.write_text(
+        "github:\n  repo: owner/project\n" + workflow_yaml, encoding="utf-8"
+    )
+    dispatched_stages: list[TaskState] = []
+
+    def fake_run(self: object, task: Task, agent: str) -> AgentResult:
+        dispatched_stages.append(task.status)
+        # Stop at the first dispatch without invoking a provider or pushing a branch.
+        return AgentResult(
+            AgentResultKind.NEEDS_HUMAN,
+            reason_code="operator_decision_required",
+        )
+
+    monkeypatch.setattr("subsched.cli.NativeWorker.run", fake_run)
+    with patch("subsched.cli.Scheduler", wraps=Scheduler) as scheduler_factory:
+        result = invoke(
+            tmp_path,
+            "run",
+            "--config",
+            str(config_file),
+            "--issues",
+            "1",
+            "--allow-native",
+            "--subscription-billing-verified",
+        )
+
+    assert result.exit_code == 0, result.output
+    assert dispatched_stages == [expected_stage]
+    assert scheduler_factory.call_args.kwargs["workflow"] == load_config(config_file).workflow
+    assert JsonStateStore(tmp_path).load_tasks()[0].status is TaskState.NEEDS_HUMAN
+
+
 def test_queue_priority_label_scores_changes_dispatch_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

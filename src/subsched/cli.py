@@ -501,6 +501,7 @@ def run(
             merged_pr_checker=merged_pr_checker,
             pr_review_enabled=cfg.execution.pr_review_enabled,
             max_review_cycles=cfg.execution.max_review_cycles,
+            workflow=cfg.workflow,
             agents=cfg.agents,
         )
     except (ValueError, StateCorruptionError) as error:
