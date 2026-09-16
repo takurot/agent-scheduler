@@ -416,9 +416,12 @@ not confirmed already implemented by a merged PR
 自身の`create_or_get_pull_request()`で生成した規約（PR bodyが`Implements work for #N.`で
 始まり、branchが`subsched/issue-N`）に厳密一致する場合のみ`CONFIRMED`とし、その場合は
 Issueを新規READY taskとして一切discoveryに追加しない（重複実装を防ぐ）。issue番号への
-言及はあるがこの規約に厳密一致しない場合（手動で作成したPRなど）や`gh`呼び出し自体が
+明示的な言及（`#N`または`issue N`）はあるがこの規約に厳密一致しない場合（手動で作成した
+PRなど）や`gh`呼び出し自体が
 失敗した場合は`AMBIGUOUS`としてfail closedにする：Issueはdiscoveryされるが`READY`では
 なく`NEEDS_HUMAN`から開始し、理由を`Task.needs_human_reason`に記録する。
+GitHub検索が記号を無視して返すtest件数などのbare number一致は、PR bodyに上記の明示的な
+Issue参照がなければ検索ノイズとして除外し、`AMBIGUOUS`へ昇格させない。
 
 この確認は`subsched run --allow-rediscovery`で明示的に無効化できる（既定では無効化しない
 = fail closedがdefault）。`--dry-run`でも同じ確認を行い、結果を discovery note として

@@ -425,11 +425,13 @@ def check_merged_pr_for_issue(
     "Implements work for #N." prefix (see build_pr_body) *and* whose branch matches the
     Scheduler's own naming convention (subsched/issue-N) is treated as CONFIRMED -- a
     strong, structural signal that the Scheduler itself created and merged this PR.
-    Anything weaker (a merged PR that merely mentions the issue number, multiple
+    Anything weaker (a merged PR that explicitly mentions the issue, multiple
     candidates, or a gh failure) is AMBIGUOUS and must not be silently treated as
-    confirmed-safe; callers fail closed on AMBIGUOUS by excluding the issue from READY
-    and escalating it to NEEDS_HUMAN for manual review, matching the SPEC principle that
-    the Scheduler never auto-closes or auto-completes ambiguous GitHub state.
+    confirmed-safe. GitHub search can also return bare-number matches such as test
+    counts; candidates without an explicit ``#N`` or ``issue N`` reference are ignored.
+    Callers fail closed on AMBIGUOUS by excluding the issue from READY and escalating it
+    to NEEDS_HUMAN for manual review, matching the SPEC principle that the Scheduler
+    never auto-closes or auto-completes ambiguous GitHub state.
     """
     argv = [
         "gh",
@@ -488,22 +490,42 @@ def check_merged_pr_for_issue(
 
     expected_prefix = f"Implements work for #{issue_number}."
     expected_branch = f"subsched/issue-{issue_number}"
+    issue_reference = re.compile(
+        rf"(?:#|\bissue\s+#?){issue_number}\b", re.IGNORECASE
+    )
     confirmed: list[int] = []
     numbers: list[str] = []
+    referenced_candidates = 0
+    malformed_candidate = False
     for item in data:
         if not isinstance(item, dict):
+            malformed_candidate = True
             continue
+        body_value = item.get("body")
+        if not isinstance(body_value, str):
+            malformed_candidate = True
+            continue
+        body = body_value
+        if issue_reference.search(body) is None:
+            continue
+        referenced_candidates += 1
         try:
             number = int(item["number"])
         except (KeyError, TypeError, ValueError):
             continue
         numbers.append(str(number))
         head_ref = str(item.get("headRefName", ""))
-        body = str(item.get("body", ""))
         if body.startswith(expected_prefix) and head_ref == expected_branch:
             confirmed.append(number)
 
-    if len(data) == 1 and len(confirmed) == 1:
+    if referenced_candidates == 0 and not malformed_candidate:
+        return MergedPrCheckResult(kind=MergedPrCheckKind.NONE)
+
+    if (
+        referenced_candidates == 1
+        and len(confirmed) == 1
+        and not malformed_candidate
+    ):
         return MergedPrCheckResult(kind=MergedPrCheckKind.CONFIRMED, pr_number=confirmed[0])
 
     return MergedPrCheckResult(

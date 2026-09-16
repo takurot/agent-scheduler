@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
 
-from subsched.github.pull_requests import MergedPrCheckKind, MergedPrCheckResult
+import pytest
+
+from subsched.github.pull_requests import (
+    MergedPrCheckKind,
+    MergedPrCheckResult,
+    check_merged_pr_for_issue,
+)
 from subsched.models import Issue, TaskState
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler, ScriptedWorker
@@ -17,6 +25,57 @@ def _scheduler(tmp_path: Path, merged_pr_checker) -> Scheduler:
         worktree_root=tmp_path / "worktrees",
         merged_pr_checker=merged_pr_checker,
     )
+
+
+def test_merged_pr_check_ignores_bare_issue_number_search_noise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = json.dumps(
+        [
+            {
+                "number": 110,
+                "headRefName": "issue/200-unrelated",
+                "body": "## Verification\n\n327 passed in 45.2s",
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            ["gh"], 0, stdout=payload, stderr=""
+        ),
+    )
+
+    result = check_merged_pr_for_issue("owner/repo", 327)
+
+    assert result.kind is MergedPrCheckKind.NONE
+
+
+@pytest.mark.parametrize("reference", ["#327", "issue #327", "Issue 327"])
+def test_merged_pr_check_keeps_genuine_issue_references_ambiguous(
+    monkeypatch: pytest.MonkeyPatch, reference: str
+) -> None:
+    payload = json.dumps(
+        [
+            {
+                "number": 110,
+                "headRefName": "issue/200-unrelated",
+                "body": f"This PR refers to {reference} but is not Scheduler-generated.",
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            ["gh"], 0, stdout=payload, stderr=""
+        ),
+    )
+
+    result = check_merged_pr_for_issue("owner/repo", 327)
+
+    assert result.kind is MergedPrCheckKind.AMBIGUOUS
 
 
 def test_discover_without_checker_behaves_as_before(tmp_path: Path) -> None:
