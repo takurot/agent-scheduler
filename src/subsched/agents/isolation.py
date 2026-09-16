@@ -121,9 +121,7 @@ def prepare_isolated_git(
     secure_directory(invocation_root)
     git_dir = invocation_root / "repo.git"
 
-    head = _git(
-        ["git", "-C", str(worktree), "rev-parse", "--verify", "HEAD"], run_cmd=run_cmd
-    )
+    head = _git(["git", "-C", str(worktree), "rev-parse", "--verify", "HEAD"], run_cmd=run_cmd)
     base_commit = head.stdout.strip()
     if head.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", base_commit):
         raise ValueError("native isolation could not resolve the task Git HEAD")
@@ -177,9 +175,7 @@ def prepare_isolated_git(
         raise ValueError("native isolation refuses a symlinked worktree .git entry")
     if worktree_git.is_file():
         worktree_git_mount = invocation_root / "worktree.git"
-        atomic_write_secure_bytes(
-            worktree_git_mount, b"gitdir: /run/subsched-git\n"
-        )
+        atomic_write_secure_bytes(worktree_git_mount, b"gitdir: /run/subsched-git\n")
     elif worktree_git.is_dir():
         worktree_git_mount = git_dir
     else:
@@ -223,9 +219,7 @@ def import_isolated_git(
     )
     if ancestor.returncode != 0:
         return "native isolation Git result is not descended from the task HEAD"
-    fsck = _git(
-        ["git", f"--git-dir={context.git_dir}", "fsck", "--no-dangling"], run_cmd=run_cmd
-    )
+    fsck = _git(["git", f"--git-dir={context.git_dir}", "fsck", "--no-dangling"], run_cmd=run_cmd)
     if fsck.returncode != 0:
         return "native isolation Git result failed object validation"
     host_head = _git(
@@ -334,12 +328,8 @@ def verify_native_isolation(
     )
     if failure is not None:
         return failure
-    worker_digests = (
-        worker_image.get("RepoDigests") if isinstance(worker_image, dict) else None
-    )
-    worker_config = (
-        worker_image.get("Config") if isinstance(worker_image, dict) else None
-    )
+    worker_digests = worker_image.get("RepoDigests") if isinstance(worker_image, dict) else None
+    worker_config = worker_image.get("Config") if isinstance(worker_image, dict) else None
     if (
         not isinstance(worker_digests, list)
         or any(not isinstance(value, str) for value in worker_digests)
@@ -383,13 +373,9 @@ def verify_native_isolation(
     )
     if failure is not None:
         return failure
-    proxy_digests = (
-        proxy_image.get("RepoDigests") if isinstance(proxy_image, dict) else None
-    )
+    proxy_digests = proxy_image.get("RepoDigests") if isinstance(proxy_image, dict) else None
     proxy_image_id = proxy_image.get("Id") if isinstance(proxy_image, dict) else None
-    proxy_image_config = (
-        proxy_image.get("Config") if isinstance(proxy_image, dict) else None
-    )
+    proxy_image_config = proxy_image.get("Config") if isinstance(proxy_image, dict) else None
     if (
         not isinstance(proxy_digests, list)
         or any(not isinstance(value, str) for value in proxy_digests)
@@ -408,17 +394,11 @@ def verify_native_isolation(
     proxy_config = proxy.get("Config") if isinstance(proxy, dict) else None
     host_config = proxy.get("HostConfig") if isinstance(proxy, dict) else None
     mounts = proxy.get("Mounts") if isinstance(proxy, dict) else None
-    network_settings = (
-        proxy.get("NetworkSettings") if isinstance(proxy, dict) else None
-    )
+    network_settings = proxy.get("NetworkSettings") if isinstance(proxy, dict) else None
     proxy_networks = (
-        network_settings.get("Networks")
-        if isinstance(network_settings, dict)
-        else None
+        network_settings.get("Networks") if isinstance(network_settings, dict) else None
     )
-    security_options = (
-        host_config.get("SecurityOpt") if isinstance(host_config, dict) else None
-    )
+    security_options = host_config.get("SecurityOpt") if isinstance(host_config, dict) else None
     if (
         not isinstance(proxy, dict)
         or not isinstance(proxy_state, dict)
@@ -514,9 +494,7 @@ def cleanup_native_container(
     run_cmd: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str | None:
     """Ensure the invocation container and all descendants are gone."""
-    names, failure = _listed_containers(
-        runtime_executable, container_name, env, run_cmd
-    )
+    names, failure = _listed_containers(runtime_executable, container_name, env, run_cmd)
     if failure is not None or names is None:
         return failure
     if container_name not in names:
@@ -534,9 +512,7 @@ def cleanup_native_container(
         return "native isolation container cleanup failed"
     if removed.returncode != 0:
         return "native isolation container cleanup failed"
-    remaining, failure = _listed_containers(
-        runtime_executable, container_name, env, run_cmd
-    )
+    remaining, failure = _listed_containers(runtime_executable, container_name, env, run_cmd)
     if failure is not None or remaining is None or container_name in remaining:
         return failure or "native isolation container cleanup could not be confirmed"
     return None
@@ -670,6 +646,7 @@ def wrap_native_request(
         output_limit_bytes=request.output_limit_bytes,
         heartbeat=request.heartbeat,
         heartbeat_interval_seconds=request.heartbeat_interval_seconds,
+        plan_review=request.plan_review,
     )
 
 

@@ -36,6 +36,27 @@ class PlanVerdict:
     findings: tuple[str, ...]
 
 
+PLAN_REVIEW_OUTPUT_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["verdict", "summary", "findings"],
+    "properties": {
+        "verdict": {"enum": ["APPROVE", "REQUEST_CHANGES"]},
+        "summary": {"type": "string"},
+        "findings": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+    },
+}
+
+
+def ensure_plan_review_output_schema(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(PLAN_REVIEW_OUTPUT_SCHEMA, indent=2), encoding="utf-8")
+
+
 def plan_path(issue_number: int) -> Path:
     """Return the worktree-relative path of the plan artifact for an issue."""
     if issue_number <= 0:
@@ -58,6 +79,11 @@ def parse_verdict(raw: str) -> PlanVerdict:
         raise PlanVerdictError(f"plan review verdict is not valid JSON: {error}") from error
     if not isinstance(payload, dict):
         raise PlanVerdictError("plan review verdict must be a JSON object")
+
+    allowed_keys = {"verdict", "summary", "findings"}
+    extra_keys = set(payload.keys()) - allowed_keys
+    if extra_keys:
+        raise PlanVerdictError(f"extra keys in plan review verdict: {sorted(extra_keys)}")
 
     verdict = payload.get("verdict")
     if verdict not in _VALID_VERDICTS:

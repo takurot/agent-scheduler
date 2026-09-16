@@ -522,6 +522,9 @@ IN_PROGRESS  PLANNING (plan_revisions += 1, workflow.limits.max_plan_revisions
 
 `.ai/plans/`はgit管理外（`.gitignore`）であり、PRブランチにコミットされない。
 
+PLAN_REVIEW stage では、レビュー担当エージェントは厳密な JSON verdict (`{"verdict": "APPROVE" | "REQUEST_CHANGES", "summary": "<string>", "findings": ["<string>", ...]}`) を出力する。Codex adapter には `PLAN_REVIEW_OUTPUT_SCHEMA` (`plan-review-output.schema.json`) が適用され、エージェントアダプタで構造化パースされた `AgentResult.plan_verdict` が Scheduler に渡される。verdict が不正または欠落している場合は `NEEDS_HUMAN` へフェイルクローズする。
+
+
 ---
 
 # 14. Issue Queue

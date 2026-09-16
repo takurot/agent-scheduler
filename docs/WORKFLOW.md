@@ -84,7 +84,9 @@ git switch -c issue/<ISSUE>-<short-description>
 ```
 
 1 branchには1 Issueだけを含める。Schedulerが管理するtask branch名
-`subsched/issue-N`はnative実行用の契約なので、通常の開発branchと混同しない。
+`subsched/issue-N`および専用worktreeはScheduler実行用の契約であり、Schedulerが
+自動的に準備と隔離を行うため、エージェントはbranchの切り替えやmain同期を行わず
+既存のworktree内で作業する。通常の手動開発branchと混同しない。
 `<ISSUE>`は正整数、`<short-description>`は小文字ASCII、数字、hyphenだけで構成し、
 branch名全体を短く保つ。
 

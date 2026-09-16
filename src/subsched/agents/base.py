@@ -23,6 +23,8 @@ class ProcessExecutionRequest:
     # the wait loop only wakes up every heartbeat_interval_seconds, not on a tight loop.
     heartbeat: Callable[[float], None] | None = None
     heartbeat_interval_seconds: float = 60.0
+    # #306: indicates whether this process execution is performing a PLAN_REVIEW
+    plan_review: bool = False
 
     def __post_init__(self) -> None:
         if not self.argv:
@@ -51,5 +53,4 @@ class ProcessExecutionResult:
 
 
 class AgentAdapter(Protocol):
-    def execute(self, request: ProcessExecutionRequest) -> AgentResult:
-        ...
+    def execute(self, request: ProcessExecutionRequest) -> AgentResult: ...
