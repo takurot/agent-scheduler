@@ -5,7 +5,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from subsched.plan_review import PlanVerdict
 
 
 class TaskState(StrEnum):
@@ -253,9 +256,7 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     TaskState.WAITING_DEPENDENCY: frozenset(
         {TaskState.READY, TaskState.BLOCKED, TaskState.NEEDS_HUMAN, TaskState.CANCELLED}
     ),
-    TaskState.BLOCKED: frozenset(
-        {TaskState.READY, TaskState.NEEDS_HUMAN, TaskState.CANCELLED}
-    ),
+    TaskState.BLOCKED: frozenset({TaskState.READY, TaskState.NEEDS_HUMAN, TaskState.CANCELLED}),
     TaskState.NEEDS_HUMAN: frozenset({TaskState.READY, TaskState.CANCELLED}),
     TaskState.FAILED: frozenset(),
     TaskState.CANCELLED: frozenset(),
@@ -410,9 +411,7 @@ class Task:
             self.needs_human_reason_code is not None
             and self.needs_human_reason_code not in NEEDS_HUMAN_REASON_CODES
         ):
-            raise ValueError(
-                f"invalid needs_human_reason_code: {self.needs_human_reason_code!r}"
-            )
+            raise ValueError(f"invalid needs_human_reason_code: {self.needs_human_reason_code!r}")
 
     @property
     def effective_model(self) -> str:
@@ -540,9 +539,7 @@ class Task:
                 plan_revisions=int(value.get("plan_revisions", 0)),
                 plan_approved=bool(value.get("plan_approved", False)),
                 dispatch_status=(
-                    TaskState(value["dispatch_status"])
-                    if value.get("dispatch_status")
-                    else None
+                    TaskState(value["dispatch_status"]) if value.get("dispatch_status") else None
                 ),
                 dispatch_stage=value.get("dispatch_stage"),
                 dispatch_model=value.get("dispatch_model"),
@@ -613,6 +610,8 @@ class AgentResult:
     # fixed enum member of NEEDS_HUMAN_REASON_CODES, never free text, so the durable
     # reason survives restarts without ever carrying raw provider/Issue content.
     reason_code: str | None = None
+    # #306: structured plan review verdict, populated only for PASS results during PLAN_REVIEW
+    plan_verdict: PlanVerdict | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -625,3 +624,5 @@ class AgentResult:
                 raise ValueError("NEEDS_HUMAN results require a valid reason_code")
         elif self.reason_code is not None:
             raise ValueError("reason_code is only valid for NEEDS_HUMAN results")
+        if self.plan_verdict is not None and self.kind is not AgentResultKind.PASS:
+            raise ValueError("plan_verdict is only permitted for PASS results")

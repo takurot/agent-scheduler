@@ -52,9 +52,7 @@ def test_container_isolation_config_is_typed_and_digest_pinned(tmp_path: Path) -
     assert config.isolation.image == f"registry.invalid/subsched-worker@{_DIGEST}"
     assert config.isolation.network == "subsched-provider-egress"
     assert config.isolation.proxy_url == "http://subsched-provider-proxy:3128"
-    assert config.isolation.proxy_image == (
-        f"registry.invalid/subsched-proxy@{_PROXY_DIGEST}"
-    )
+    assert config.isolation.proxy_image == (f"registry.invalid/subsched-proxy@{_PROXY_DIGEST}")
     assert dict(config.isolation.auth)["codex"] == tmp_path / "auth" / "codex"
 
 
@@ -108,8 +106,7 @@ def test_container_isolation_rejects_shared_concurrent_worker_network(
 ) -> None:
     config_path = tmp_path / "subsched.yaml"
     config_path.write_text(
-        _isolation_yaml(tmp_path / "auth")
-        + "execution:\n  concurrency: 2\n",
+        _isolation_yaml(tmp_path / "auth") + "execution:\n  concurrency: 2\n",
         encoding="utf-8",
     )
 
@@ -136,9 +133,7 @@ def _secure_auth_dir(path: Path) -> Path:
     return path
 
 
-def _successful_attestation_output(
-    argv: list[str], *, proxy_mounts: str = "[]"
-) -> str:
+def _successful_attestation_output(argv: list[str], *, proxy_mounts: str = "[]") -> str:
     if argv[1] == "info":
         return '"linux"'
     if argv[1:3] == ["image", "inspect"]:
@@ -155,10 +150,7 @@ def _successful_attestation_output(
             '"Config":{"Volumes":null}}'
         )
     if argv[1:3] == ["network", "inspect"]:
-        return (
-            '{"Internal":true,"Containers":{"id":'
-            '{"Name":"subsched-provider-proxy"}}}'
-        )
+        return '{"Internal":true,"Containers":{"id":{"Name":"subsched-provider-proxy"}}}'
     if argv[1:3] == ["container", "inspect"]:
         return (
             '{"State":{"Running":true},"Image":"sha256:proxy-id",'
@@ -403,9 +395,7 @@ def test_prepared_isolated_git_resolves_worktree_without_ambient_env_vars(
     (mount_point / "tracked.txt").write_text("after\n", encoding="utf-8")
     (mount_point / ".git").write_bytes(f"gitdir: {context.git_dir}\n".encode())
     env_without_git_vars = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in {"GIT_DIR", "GIT_WORK_TREE"}
+        key: value for key, value in os.environ.items() if key not in {"GIT_DIR", "GIT_WORK_TREE"}
     }
 
     status = run(
@@ -642,16 +632,12 @@ def test_native_dispatch_uses_attested_container_request(
     monkeypatch.setattr(
         "subsched.agents.native.verify_native_isolation", lambda *args, **kwargs: None
     )
-    git_context = IsolationGitContext(
-        tmp_path / "sandbox.git", "a" * 40, tmp_path / "worktree.git"
-    )
+    git_context = IsolationGitContext(tmp_path / "sandbox.git", "a" * 40, tmp_path / "worktree.git")
     monkeypatch.setattr(
         "subsched.agents.native.prepare_isolated_git",
         lambda *args, **kwargs: git_context,
     )
-    monkeypatch.setattr(
-        "subsched.agents.native.import_isolated_git", lambda *args, **kwargs: None
-    )
+    monkeypatch.setattr("subsched.agents.native.import_isolated_git", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "subsched.agents.native.cleanup_native_container", lambda *args, **kwargs: None
     )
@@ -708,9 +694,7 @@ def test_native_dispatch_uses_danger_full_access_sandbox_under_container_isolati
     auth = _secure_auth_dir(tmp_path / "auth")
     worktree = tmp_path / "worktree"
     worktree.mkdir()
-    task = Task.from_issue(Issue(number=314, title="bwrap regression")).with_worktree(
-        str(worktree)
-    )
+    task = Task.from_issue(Issue(number=314, title="bwrap regression")).with_worktree(str(worktree))
     bootstrap_task_files(worktree, task)
     if task_state is not None:
         task = dataclasses.replace(task, status=TaskState[task_state])
@@ -721,16 +705,12 @@ def test_native_dispatch_uses_danger_full_access_sandbox_under_container_isolati
     monkeypatch.setattr(
         "subsched.agents.native.verify_native_isolation", lambda *args, **kwargs: None
     )
-    git_context = IsolationGitContext(
-        tmp_path / "sandbox.git", "a" * 40, tmp_path / "worktree.git"
-    )
+    git_context = IsolationGitContext(tmp_path / "sandbox.git", "a" * 40, tmp_path / "worktree.git")
     monkeypatch.setattr(
         "subsched.agents.native.prepare_isolated_git",
         lambda *args, **kwargs: git_context,
     )
-    monkeypatch.setattr(
-        "subsched.agents.native.import_isolated_git", lambda *args, **kwargs: None
-    )
+    monkeypatch.setattr("subsched.agents.native.import_isolated_git", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "subsched.agents.native.cleanup_native_container", lambda *args, **kwargs: None
     )
@@ -774,9 +754,7 @@ def test_native_dispatch_cleans_up_when_adapter_raises(
     bootstrap_task_files(worktree, task)
     codex = MagicMock()
     codex.execute.side_effect = RuntimeError("synthetic secret-bearing failure")
-    context = IsolationGitContext(
-        tmp_path / "sandbox.git", "a" * 40, tmp_path / "worktree.git"
-    )
+    context = IsolationGitContext(tmp_path / "sandbox.git", "a" * 40, tmp_path / "worktree.git")
     cleanup_calls: list[str] = []
     monkeypatch.setattr(
         "subsched.agents.native.verify_native_isolation", lambda *args, **kwargs: None
@@ -840,9 +818,7 @@ def test_preflight_reports_attested_container_backend(
 ) -> None:
     auth = _secure_auth_dir(tmp_path / "auth")
     config = _runtime_config(auth)
-    monkeypatch.setattr(
-        "subsched.preflight.verify_native_isolation", lambda *args, **kwargs: None
-    )
+    monkeypatch.setattr("subsched.preflight.verify_native_isolation", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "subsched.preflight.probe_command_capabilities",
         lambda name, executable, **kwargs: PreflightCheckResult(
@@ -867,9 +843,11 @@ def test_preflight_reports_attested_container_backend(
 @pytest.mark.usefixtures("compatible_commands")
 def test_doctor_reports_unverified_isolation_and_worker_credential_tier(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     from subsched.github.issues import TokenDiagnosis
 
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "subsched.cli.diagnose_token",
         lambda: TokenDiagnosis(

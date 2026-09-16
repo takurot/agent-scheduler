@@ -86,9 +86,7 @@ def parse_codex_cli_metadata(*, version_output: str, help_output: str) -> CodexC
         raise CodexCliMetadataError("unrecognized Codex CLI version")
     missing = sorted(flag for flag in REQUIRED_CODEX_HEADLESS_FLAGS if flag not in help_output)
     if missing:
-        raise CodexCliMetadataError(
-            f"required Codex CLI flags are missing: {', '.join(missing)}"
-        )
+        raise CodexCliMetadataError(f"required Codex CLI flags are missing: {', '.join(missing)}")
     # `--approve-for-me` takes priority when both flags appear in help_output: on current
     # Codex CLI, `codex exec` rejects `--ask-for-approval` outright even though the flag
     # is still documented under the *interactive* `codex --help` (which preflight falls
@@ -115,11 +113,9 @@ def parse_codex_cli_metadata(*, version_output: str, help_output: str) -> CodexC
         approval_mode=approval_mode,
         supports_model_flag="--model" in help_output,
         supports_effort_flag=bool(
-            re.search(r"(?:^|\s)-c\b", help_output)
-            or re.search(r"(?<!-)--config\b", help_output)
+            re.search(r"(?:^|\s)-c\b", help_output) or re.search(r"(?<!-)--config\b", help_output)
         ),
     )
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,7 +246,7 @@ CODEX_OUTPUT_SCHEMA: dict[str, Any] = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
-    "required": ["result", "summary"],
+    "required": ["result", "summary", "reason_code"],
     "properties": {
         "result": {"enum": ["pass", "failure", "needs_human"]},
         "reason_code": {
@@ -287,7 +283,12 @@ def ensure_codex_output_schema(path: Path) -> Path:
     return path
 
 
-def parse_codex_jsonl(payload: str, *, returncode: int) -> AgentResult:
+def parse_codex_jsonl(
+    payload: str,
+    *,
+    returncode: int,
+    plan_review: bool = False,
+) -> AgentResult:
     """Normalize a complete Codex JSONL event stream to the shared AgentResult contract."""
     events = _load_events(payload)
     if events is None:
@@ -368,6 +369,21 @@ def parse_codex_jsonl(payload: str, *, returncode: int) -> AgentResult:
         return AgentResult(AgentResultKind.FAILURE, output="codex execution failed")
     if final_message is None:
         return _malformed_result()
+    if plan_review:
+        from subsched.plan_review import PlanVerdictError, parse_verdict
+
+        try:
+            verdict = parse_verdict(final_message)
+        except PlanVerdictError as error:
+            return AgentResult(
+                AgentResultKind.FAILURE,
+                output=f"malformed plan review verdict: {error}",
+            )
+        return AgentResult(
+            AgentResultKind.PASS,
+            output="codex completed",
+            plan_verdict=verdict,
+        )
     return _parse_final_message(final_message)
 
 
@@ -542,7 +558,9 @@ def run_codex_probe(
         process.wait(timeout=config.timeout_seconds)
     except OSError:
         if not _stop_process_group(process, config.terminate_grace_seconds):
-            return AgentResult(AgentResultKind.FAILURE, output="codex cleanup failed",
+            return AgentResult(
+                AgentResultKind.FAILURE,
+                output="codex cleanup failed",
             )
         return AgentResult(AgentResultKind.FAILURE, output="codex process unavailable")
     except subprocess.TimeoutExpired:
@@ -664,7 +682,6 @@ def _codex_environment() -> dict[str, str]:
     return {name: value for name, value in os.environ.items() if name in allowed}
 
 
-
 class CodexAgent:
     """Codex Agent adapter adhering to AgentAdapter protocol."""
 
@@ -698,9 +715,11 @@ class CodexAgent:
         if res.timed_out:
             if not res.cleanup_succeeded:
                 return AgentResult(
-                AgentResultKind.PROCESS_CLEANUP_FAILED, output="codex cleanup failed"
-            )
+                    AgentResultKind.PROCESS_CLEANUP_FAILED, output="codex cleanup failed"
+                )
             return AgentResult(AgentResultKind.TIMEOUT, output="codex execution timed out")
         if res.output_limit_exceeded:
             return AgentResult(AgentResultKind.FAILURE, output="codex output limit exceeded")
-        return parse_codex_jsonl(res.stdout, returncode=res.exit_code)
+        return parse_codex_jsonl(
+            res.stdout, returncode=res.exit_code, plan_review=request.plan_review
+        )

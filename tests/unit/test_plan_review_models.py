@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from subsched.models import Issue, Task, TaskState
 from subsched.plan_review import PlanVerdict, PlanVerdictError, parse_verdict, plan_path
 
 
 def test_plan_path_is_relative_and_stable() -> None:
+
     assert plan_path(280) == plan_path(280)
     assert str(plan_path(280)) == ".ai/plans/280.md"
 
@@ -79,3 +82,36 @@ def test_task_plan_fields_default_and_persist_when_approved() -> None:
     approved = replace(task, plan_approved=True)
     restored = Task.from_dict(approved.to_dict())
     assert restored.plan_approved is True
+
+
+def test_plan_review_output_schema_structure() -> None:
+    from subsched.plan_review import PLAN_REVIEW_OUTPUT_SCHEMA
+
+    schema = PLAN_REVIEW_OUTPUT_SCHEMA
+    assert schema["type"] == "object"
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {"verdict", "summary", "findings"}
+    assert set(schema["properties"].keys()) == {"verdict", "summary", "findings"}
+    assert schema["properties"]["verdict"]["enum"] == ["APPROVE", "REQUEST_CHANGES"]
+    assert schema["properties"]["summary"]["type"] == "string"
+    assert schema["properties"]["findings"]["type"] == "array"
+    assert schema["properties"]["findings"]["items"]["type"] == "string"
+
+
+def test_ensure_plan_review_output_schema(tmp_path: Path) -> None:
+    import json
+
+    from subsched.plan_review import ensure_plan_review_output_schema
+
+    schema_file = tmp_path / "plan_review.schema.json"
+    ensure_plan_review_output_schema(schema_file)
+    assert schema_file.is_file()
+    saved = json.loads(schema_file.read_text(encoding="utf-8"))
+    assert set(saved["required"]) == {"verdict", "summary", "findings"}
+
+
+def test_parse_verdict_rejects_extra_keys() -> None:
+    import pytest
+
+    with pytest.raises(PlanVerdictError, match="extra"):
+        parse_verdict('{"verdict": "APPROVE", "summary": "ok", "findings": [], "extra": 1}')

@@ -60,9 +60,10 @@ class PlanWritingWorker:
 
 
 def _scheduler(tmp_path: Path, worker: PlanWritingWorker, **kwargs: object) -> Scheduler:
+    router = kwargs.pop("router", Router((AgentConfig("claude", 100),)))
     return Scheduler(
         store=JsonStateStore(tmp_path),
-        router=Router((AgentConfig("claude", 100),)),
+        router=router,  # type: ignore[arg-type]
         worker=worker,
         worktree_root=tmp_path / "worktrees",
         workflow=WorkflowConfig(mode="multi-stage"),
@@ -193,3 +194,58 @@ def test_planning_stage_needs_human_stops_without_creating_plan(tmp_path: Path) 
     assert not plan_file.exists()
     assert worker.dispatches == [(1, "claude")]
 
+
+def test_plan_review_structured_verdict_approves_and_advances(tmp_path: Path) -> None:
+    """#306: Scheduler accepts AgentResult with plan_verdict populated (e.g. from Codex/Claude)."""
+    from subsched.plan_review import PlanVerdict
+
+    now = datetime(2026, 8, 12, 22, tzinfo=UTC)
+    worker = PlanWritingWorker(
+        {
+            (1, "codex"): (
+                AgentResult(AgentResultKind.PASS),  # PLANNING
+                AgentResult(  # PLAN_REVIEW
+                    AgentResultKind.PASS,
+                    output="codex completed",
+                    plan_verdict=PlanVerdict(verdict="APPROVE", summary="LGTM", findings=()),
+                ),
+                AgentResult(AgentResultKind.PASS),  # IN_PROGRESS
+            )
+        }
+    )
+    scheduler = _scheduler(tmp_path, worker, router=Router((AgentConfig("codex", 100),)))
+    scheduler.discover((Issue(number=1, title="one"),))
+
+    scheduler.run_until_waiting((available("codex", now),), now=now)
+
+    task = scheduler.tasks[0]
+    assert task.status is TaskState.COMPLETE
+    assert task.plan_approved is True
+    assert task.plan_revisions == 0
+    assert worker.dispatches == [(1, "codex"), (1, "codex"), (1, "codex")]
+
+
+def test_plan_review_missing_verdict_escalates_to_needs_human(tmp_path: Path) -> None:
+    """#306: Pass result with non-JSON output and missing plan_verdict escalates to NEEDS_HUMAN."""
+    now = datetime(2026, 8, 12, 22, tzinfo=UTC)
+    worker = PlanWritingWorker(
+        {
+            (1, "codex"): (
+                AgentResult(AgentResultKind.PASS),  # PLANNING
+                AgentResult(  # PLAN_REVIEW: non-JSON output, no plan_verdict
+                    AgentResultKind.PASS,
+                    output="codex completed",
+                ),
+            )
+        }
+    )
+    scheduler = _scheduler(tmp_path, worker, router=Router((AgentConfig("codex", 100),)))
+    scheduler.discover((Issue(number=1, title="one"),))
+
+    scheduler.run_until_waiting((available("codex", now),), now=now)
+
+    task = scheduler.tasks[0]
+    assert task.status is TaskState.NEEDS_HUMAN
+    assert task.plan_approved is False
+    assert task.needs_human_reason is not None
+    assert "malformed plan review verdict" in task.needs_human_reason
