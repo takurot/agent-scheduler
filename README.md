@@ -169,6 +169,9 @@ provider cooldown; the bounded watch then exits with state preserved.
 
 ### Monitoring & Operations
 
+`subsched status` (including `--verbose`) omits the usage percentage when the
+provider has not reported it, while preserving the capacity state and any reset time.
+
 ```bash
 # Check queue and cooldown status
 subsched status
