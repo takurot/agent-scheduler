@@ -318,6 +318,22 @@ def test_container_request_has_only_explicit_isolated_mounts_and_environment(
     assert "HOME=/isolated-home" in joined
     assert "HTTP_PROXY=http://subsched-provider-proxy:3128" in joined
     assert wrapped.stdin_payload == b"prompt"
+    # #337: tmpfs mounts must explicitly include exec so test scripts in /tmp can run
+    tmpfs_args = [
+        wrapped.argv[i + 1]
+        for i, arg in enumerate(wrapped.argv[:-1])
+        if arg == "--tmpfs"
+    ]
+    assert any(
+        arg.startswith("/tmp:") and "exec" in arg.split(":")[1].split(",")
+        for arg in tmpfs_args
+    )
+    assert any(
+        arg.startswith("/isolated-home:") and "exec" in arg.split(":")[1].split(",")
+        for arg in tmpfs_args
+    )
+
+
 
 
 def test_container_request_mounts_review_reports_dir_writable_under_readonly_worktree(

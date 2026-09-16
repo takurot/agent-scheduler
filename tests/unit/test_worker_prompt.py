@@ -131,3 +131,25 @@ def test_build_revision_prompt_contains_worktree_instructions() -> None:
         in prompt
     )
     assert "do not switch branches, do not sync main, and do not create another branch." in prompt
+
+
+def test_build_worker_prompt_scoped_verification_and_host_gate_instructions() -> None:
+    """#337: prompts must instruct workers to run scoped tests for TDD and not fail
+    closed to NEEDS_HUMAN on unrelated environment-specific full gate failures,
+    explaining that full verification is enforced by the Scheduler on the host."""
+    task = Task.from_issue(Issue(number=337, title="Worker container missing ps"))
+    cmds = ("bash scripts/quality_gate.sh",)
+    worker_prompt = build_worker_prompt(task, verification_commands=cmds)
+    revision_prompt = build_revision_prompt(task, verification_commands=cmds)
+
+    for prompt in (worker_prompt, revision_prompt):
+        assert "scoped test" in prompt.lower()
+        assert "verifying stage" in prompt.lower() or "verifying" in prompt
+        assert "external_prerequisite" in prompt
+        fallback_msg = (
+            "do not escalate to needs_human" in prompt.lower()
+            or "do not fall back to needs_human" in prompt.lower()
+        )
+        assert fallback_msg
+
+

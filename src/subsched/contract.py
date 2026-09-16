@@ -155,7 +155,10 @@ def build_worker_prompt(task: Task, verification_commands: Sequence[str] = ()) -
         "  when dispatch started.",
         "",
         "Before finishing:",
-        "run the verification commands defined for this repository:",
+        "Practice strict TDD: run scoped tests targeted at your changed modules and",
+        "features (e.g. `uv run pytest <targeted_tests>`, `uv run mypy <path>`), and ensure",
+        "they pass before committing.",
+        "Run the verification commands defined for this repository when possible:",
     ]
     if verification_commands:
         for cmd in verification_commands:
@@ -164,6 +167,14 @@ def build_worker_prompt(task: Task, verification_commands: Sequence[str] = ()) -
         lines.append("- (defined in docs/WORKFLOW.md or pyproject.toml)")
     lines.extend(
         [
+            "",
+            "If full-suite verification commands encounter unrelated test failures caused by",
+            "container execution environment limitations (such as missing ps/procps, temporary",
+            "filesystem permissions, or sandbox restrictions), do NOT escalate to needs_human",
+            "as an external_prerequisite solely for those unrelated failures. As long as all",
+            "scoped tests for your changes pass, commit your changes locally and report pass.",
+            "The Scheduler will independently enforce the full repository quality gate in its",
+            "host VERIFYING stage after dispatch completes.",
             "",
             "Commit your changes to the current branch (git add + git commit) once",
             "verification passes. This local commit is your responsibility.",
@@ -407,7 +418,10 @@ def build_revision_prompt(task: Task, verification_commands: Sequence[str] = ())
         "  when dispatch started.",
         "",
         "Before finishing:",
-        "run the verification commands defined for this repository:",
+        "Practice strict TDD: run scoped tests targeted at your changed modules and",
+        "features (e.g. `uv run pytest <targeted_tests>`, `uv run mypy <path>`), and ensure",
+        "they pass before committing.",
+        "Run the verification commands defined for this repository when possible:",
     ]
     if verification_commands:
         for cmd in verification_commands:
@@ -416,6 +430,14 @@ def build_revision_prompt(task: Task, verification_commands: Sequence[str] = ())
         lines.append("- (defined in docs/WORKFLOW.md or pyproject.toml)")
     lines.extend(
         [
+            "",
+            "If full-suite verification commands encounter unrelated test failures caused by",
+            "container execution environment limitations (such as missing ps/procps, temporary",
+            "filesystem permissions, or sandbox restrictions), do NOT escalate to needs_human",
+            "as an external_prerequisite solely for those unrelated failures. As long as all",
+            "scoped tests for your changes pass, commit your changes locally and report pass.",
+            "The Scheduler will independently enforce the full repository quality gate in its",
+            "host VERIFYING stage after dispatch completes.",
             "",
             "Commit your changes to the current branch (git add + git commit) once",
             "verification passes. This local commit is your responsibility.",

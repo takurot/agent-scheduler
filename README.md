@@ -357,7 +357,7 @@ flowchart TD
    - **Read-Only Root Filesystem**: Worker containers are dispatched with `--read-only` rootfs.
    - **Dropped Capabilities**: All Linux capabilities are dropped (`--cap-drop ALL`), and privilege escalation is prohibited (`--security-opt no-new-privileges=true`).
    - **Strict Resource Limits**: CPU (`--cpus 4`), memory (`--memory 8g`), and process limits (`--pids-limit 512`) prevent runaway processes and resource exhaustion.
-   - **Ephemeral In-Memory Storage**: `/tmp` and `/isolated-home` are mounted as in-memory `tmpfs` mounts with `nosuid,nodev`.
+   - **Ephemeral In-Memory Storage**: `/tmp` and `/isolated-home` are mounted as in-memory `tmpfs` mounts with `exec,nosuid,nodev` to allow test script and compiler execution while preventing suid escalation.
    - **Deterministic Lifecycle & Cleanup**: Containers run with unguessable names (`subsched-worker-<task_id>-<token>`). On process exit, timeout, or cancellation, the Scheduler force-removes the container and mechanically verifies its absence before accepting any state.
 
 2. **Network Egress Isolation (Squid Allowlist Proxy)**:
@@ -441,6 +441,9 @@ subsched doctor
 - Internal network configuration (`Internal: true`) and proxy container attachment
 - Absence of unauthorized containers on the internal network
 - Provider auth directory permissions (`0700`) and file modes (`0600`)
+
+> [!TIP]
+> **Worker Image Requirements**: Worker container images should install `procps` (`ps`) in addition to standard project runtimes to ensure process management and test suites execute without missing system utility errors.
 
 ---
 

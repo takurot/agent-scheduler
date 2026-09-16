@@ -2856,7 +2856,8 @@ normal completion, timeout, cancellation, and exceptional exits. Confirm termina
 unknown cleanup status is a failure. Preserve the task worktree, local commits,
 handoff, and checkpoints across termination and retry.
 
-The Docker invocation uses a read-only root, ephemeral `/tmp` and HOME, `cap-drop=ALL`,
+The Docker invocation uses a read-only root, ephemeral executable `/tmp` and HOME (mounted
+with tmpfs `rw,exec,nosuid,nodev` to allow test script and compiler execution), `cap-drop=ALL`,
 `no-new-privileges`, PID/memory/CPU limits, and no runtime socket mount. Every invocation
 has an unguessable container name. After the provider process returns or times out, the
 Scheduler lists by exact name, force-removes any survivor, and confirms absence before
@@ -2893,14 +2894,39 @@ boundary above (`--cap-drop ALL`, `--security-opt no-new-privileges=true`), the 
 refuses that namespace creation, so every Codex-issued shell command fails with
 `bwrap: No permissions to create a new namespace` regardless of task stage -- this is a
 correctness/availability defect, not a security gap. The container already enforces the
-equivalent restriction at the OS level (default-deny egress through the proxy, and a
-read-only bind mount of the worktree for review-stage dispatch), so under
-`isolation.backend: container` Codex is dispatched with `--sandbox danger-full-access`
-unconditionally (`resolve_codex_sandbox_mode()` in `agents/codex.py`), telling it to
-trust the outer sandbox instead of creating its own nested one. Outside container
-isolation this dispatch path is inadmissible (see 72.2 above), so the legacy
-per-stage `workspace-write`/`read-only` selection there is unaffected and unused in
-practice.
+boundary (read-only rootfs, dropped capabilities, default-deny network), so nested Bubblewrap
+is redundant.
+
+Under `isolation.backend: container`, the Scheduler resolves Codex's sandbox flag
+(`--sandbox`) to `danger-full-access` (or passes the equivalent config override) inside the
+outer container boundary so Bubblewrap is bypassed while outer container isolation remains
+authoritative. When container isolation is not active, standard Bubblewrap sandboxing remains
+unaltered. Outside container isolation this dispatch path is inadmissible (see 72.2 above),
+so the legacy mode remains fail-closed.
+
+### Scoped worker verification vs. Host quality gate (issue #337)
+
+The Docker worker container operates under hardened security constraints: capability drops
+(`cap-drop=ALL`), ephemeral `/tmp` mounts, and unprivileged user isolation. Furthermore, worker
+container images may lack certain host development tools (such as `procps`/`ps`) required by
+broad process supervision or cleanup tests.
+
+When workers execute full verification commands (e.g. `bash scripts/quality_gate.sh`) inside the
+container, unrelated baseline tests may fail due to container-specific environment differences.
+Under this design:
+1. **Worker Responsibility (Container)**: The worker is instructed to practice strict TDD and verify
+   changed features with scoped tests (`uv run pytest <targeted_tests>`, `uv run mypy <path>`). If
+   full verification commands encounter unrelated test failures arising from container environment
+   constraints, the worker must NOT escalate to `NEEDS_HUMAN` as an `external_prerequisite` when all
+   scoped tests pass; the worker commits its changes locally and reports `pass`.
+2. **Scheduler Responsibility (Host)**: The full repository-wide verification gate
+   (`verification.commands`) is independently and strictly executed by the Scheduler in the host
+   `VERIFYING` stage before creating the pull request.
+3. **Container Mounts**: The container's `/tmp` and `/isolated-home` tmpfs mounts are configured
+   with `rw,exec,nosuid,nodev` so that temporary test runner scripts and compiled artifacts in `/tmp`
+   can execute without `PermissionError`.
+4. **Worker Image Prerequisite**: Worker container images should install `procps` (`ps`) to avoid
+   process runner and recovery test failures.
 
 ---
 
