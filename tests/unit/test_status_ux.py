@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from subsched.cli import app
@@ -156,4 +157,45 @@ def test_status_default_output_shows_upcoming_tasks_and_capacity(tmp_path: Path)
     assert "claude (five_hour): COOLDOWN_SESSION [100.0% used]" in res.output
     assert reset.isoformat() in res.output
     assert "codex (seven_day): AVAILABLE [20.0% used]" in res.output
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+@pytest.mark.parametrize("has_reset", [False, True])
+@pytest.mark.parametrize("used_percentage", [None, 0.0, 42.25, 100.0])
+def test_status_capacity_percentage(
+    tmp_path: Path, verbose: bool, has_reset: bool, used_percentage: float | None
+) -> None:
+    from datetime import UTC, datetime
+
+    from subsched.models import Capacity, CapacityState
+
+    reset = datetime(2026, 8, 15, 14, 0, tzinfo=UTC) if has_reset else None
+    capacity = Capacity(
+        agent="claude",
+        state=CapacityState.COOLDOWN_SESSION,
+        scope="five_hour",
+        used_percentage=used_percentage,
+        reset_at=reset,
+        observed_at=datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
+        source="provider",
+        confidence="high",
+    )
+    store = JsonStateStore(tmp_path)
+    store.save_state(
+        (Task.from_issue(Issue(number=101, title="Waiting task")),), capacities=(capacity,)
+    )
+
+    args = ["--repository", str(tmp_path), "status"]
+    if verbose:
+        args.append("--verbose")
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 0, result.exception
+    expected = "  claude (five_hour): COOLDOWN_SESSION"
+    if used_percentage is not None:
+        expected += f" [{used_percentage:.1f}% used]"
+    if reset is not None:
+        expected += f" (resets at {reset.isoformat()})"
+    assert expected in result.output.splitlines()
+    assert store.load_capacities() == (capacity,)
 

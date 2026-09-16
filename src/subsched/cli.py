@@ -790,10 +790,10 @@ def status(
         typer.echo("\nCapacity & Cooldown:")
         for cap in capacities:
             reset_str = f" (resets at {cap.reset_at.isoformat()})" if cap.reset_at else ""
-            summary = (
-                f"  {cap.agent} ({cap.scope}): {cap.state.value} "
-                f"[{cap.used_percentage:.1f}% used]{reset_str}"
+            usage_str = (
+                f" [{cap.used_percentage:.1f}% used]" if cap.used_percentage is not None else ""
             )
+            summary = f"  {cap.agent} ({cap.scope}): {cap.state.value}{usage_str}{reset_str}"
             typer.echo(summary)
 
 
