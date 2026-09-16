@@ -131,13 +131,14 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
             TaskState.CANCELLED,
         }
     ),
-    # #280: PLANNING/PLAN_REVIEW mirror IN_PROGRESS's fail-closed escape hatches (RETRY,
-    # NEEDS_HUMAN, CANCELLED) for crash recovery and agent-failure handling, in addition
-    # to the plan-review-gate edges required by the workflow itself.
+    # #280, #328: PLANNING/PLAN_REVIEW mirror IN_PROGRESS's interruption and fail-closed
+    # escape hatches for capacity, crash recovery, and agent-failure handling, in
+    # addition to the plan-review-gate edges required by the workflow itself.
     TaskState.PLANNING: frozenset(
         {
             TaskState.PLAN_REVIEW,
             TaskState.RETRY,
+            TaskState.WAITING_CAPACITY,
             TaskState.NEEDS_HUMAN,
             TaskState.CANCELLED,
         }
@@ -147,6 +148,7 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
             TaskState.IN_PROGRESS,
             TaskState.PLANNING,
             TaskState.RETRY,
+            TaskState.WAITING_CAPACITY,
             TaskState.NEEDS_HUMAN,
             TaskState.CANCELLED,
         }

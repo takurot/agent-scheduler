@@ -524,6 +524,10 @@ IN_PROGRESS  PLANNING (plan_revisions += 1, workflow.limits.max_plan_revisions
 
 PLAN_REVIEW stage では、レビュー担当エージェントは厳密な JSON verdict (`{"verdict": "APPROVE" | "REQUEST_CHANGES", "summary": "<string>", "findings": ["<string>", ...]}`) を出力する。Codex adapter には `PLAN_REVIEW_OUTPUT_SCHEMA` (`plan-review-output.schema.json`) が適用され、エージェントアダプタで構造化パースされた `AgentResult.plan_verdict` が Scheduler に渡される。verdict が不正または欠落している場合は `NEEDS_HUMAN` へフェイルクローズする。
 
+`PLANNING`または`PLAN_REVIEW`中にcapacity eventが発生した場合は、通常の実装stageと同様に
+`WAITING_CAPACITY`を経由してqueue先頭の`READY`へ戻し、同じworktreeを保ったまま利用可能な
+別Agentへ再dispatchする。capacity eventはplan review failureとして`NEEDS_HUMAN`へ昇格させない。
+
 
 ---
 

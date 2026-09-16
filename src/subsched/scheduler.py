@@ -1842,17 +1842,28 @@ class Scheduler:
             self._persist()
             return
 
-        # #281, #306: a review/revision dispatch that did not come back PASS must not fall
-        # into the generic capacity/retry handling below -- that would eventually
+        # #281, #306, #328: a review/revision dispatch that did not come back PASS must
+        # not fall into the generic retry handling below -- that would eventually
         # redispatch this task as if it were READY, i.e. with the normal full-issue
         # worker prompt instead of the review/revision-specific one, silently changing
-        # what the task is doing mid-flight. Fail closed to NEEDS_HUMAN instead.
+        # what the task is doing mid-flight. Fail closed to NEEDS_HUMAN instead. Capacity
+        # outcomes from PLAN_REVIEW are the exception: they use the same safe requeue and
+        # alternate-agent failover path as PLANNING and IN_PROGRESS.
         if (
             (
                 task.status is TaskState.PLAN_REVIEW
-                or task.dispatch_status in (TaskState.PR_REVIEW, TaskState.REVISING)
+                and result.kind
+                not in {
+                    AgentResultKind.PASS,
+                    AgentResultKind.CAPACITY_SESSION,
+                    AgentResultKind.CAPACITY_WEEKLY,
+                    AgentResultKind.CAPACITY_TEMPORARY,
+                }
             )
-            and result.kind is not AgentResultKind.PASS
+            or (
+                task.dispatch_status in (TaskState.PR_REVIEW, TaskState.REVISING)
+                and result.kind is not AgentResultKind.PASS
+            )
         ):
             if task.status is TaskState.PLAN_REVIEW:
                 kind_label = "plan review"

@@ -79,6 +79,21 @@ def test_in_progress_cannot_transition_directly_to_complete() -> None:
         running.transition(TaskState.COMPLETE)
 
 
+@pytest.mark.parametrize("planning_state", (TaskState.PLANNING, TaskState.PLAN_REVIEW))
+def test_planning_states_can_wait_for_capacity(planning_state: TaskState) -> None:
+    task = Task(
+        task_id="github-1",
+        issue_number=1,
+        title="one",
+        labels=(),
+        status=planning_state,
+    )
+
+    waiting = task.transition(TaskState.WAITING_CAPACITY)
+
+    assert waiting.status is TaskState.WAITING_CAPACITY
+
+
 @pytest.mark.parametrize("from_state", list(TaskState))
 def test_all_state_transitions_match_allowed_matrix(from_state: TaskState) -> None:
     from subsched.models import ALLOWED_TRANSITIONS
