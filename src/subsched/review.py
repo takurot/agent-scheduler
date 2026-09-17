@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from dataclasses import dataclass
@@ -7,6 +8,8 @@ from enum import StrEnum
 from pathlib import Path
 
 from subsched.models import Task
+
+logger = logging.getLogger(__name__)
 
 REQUIRED_REVIEW_SECTIONS = ("## Verdict", "## Summary", "## Findings")
 
@@ -139,7 +142,16 @@ def worktree_touched_unexpected_paths(
         expected_rel = expected.relative_to(worktree_dir).as_posix()
     except ValueError:
         return True
-    prior_round_pattern = re.compile(rf"^\.ai/reviews/{re.escape(str(issue_number))}-r\d+\.md$")
+
+    # #325: In repositories without .ai/ in .gitignore, untracked Scheduler scaffold
+    # files (.ai/tasks/<issue>.md, .ai/handoffs/<issue>.md, .ai/checkpoints/<issue>.json)
+    # legitimately exist untracked. They are tolerated only with status '??'.
+    scaffold_paths = {
+        f".ai/tasks/{issue_number}.md",
+        f".ai/handoffs/{issue_number}.md",
+        f".ai/checkpoints/{issue_number}.json",
+    }
+    prior_round_pattern = re.compile(rf"^\.ai/reviews/{re.escape(str(issue_number))}-r(\d+)\.md$")
     try:
         res = subprocess.run(
             ["git", "-C", str(worktree_dir), "status", "--porcelain", "-uall"],
@@ -157,17 +169,47 @@ def worktree_touched_unexpected_paths(
     for line in res.stdout.splitlines():
         if not line.strip():
             continue
+        if len(line) < 4:
+            return True
+        status_code = line[:2]
         # `git status --porcelain` lines are "XY path" (or "XY old -> new" for renames);
         # the path always starts at column 4.
         path = line[3:].strip()
         if " -> " in path:
             path = path.split(" -> ", 1)[1]
-        if path != expected_rel and not prior_round_pattern.match(path):
+
+        # Current round review report must be newly created and untracked
+        if path == expected_rel:
+            if status_code != "??":
+                return True
+            continue
+
+        # Untracked scaffold files created by Scheduler are tolerated
+        if path in scaffold_paths:
+            if status_code != "??":
+                return True
+            continue
+
+        # #325: Past round review reports must strictly be 1 <= r < round_number and untracked (??)
+        prior_match = prior_round_pattern.match(path)
+        if prior_match:
+            prior_round = int(prior_match.group(1))
+            if 1 <= prior_round < round_number and status_code == "??":
+                continue
             return True
+
+        return True
     if pre_dispatch_head is not None:
         current_head = git_head_commit(worktree_dir, timeout_seconds)
         if current_head is None or current_head != pre_dispatch_head:
             return True
+    else:
+        logger.warning(
+            "pre_dispatch_head was not provided for issue #%d (round %d); "
+            "skipping HEAD movement check",
+            issue_number,
+            round_number,
+        )
     return False
 
 
