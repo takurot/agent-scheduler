@@ -1109,6 +1109,19 @@ class Scheduler:
             pre_dispatch_head: str | None = None
             if task.dispatch_status is TaskState.PR_REVIEW and task.worktree is not None:
                 pre_dispatch_head = git_head_commit(Path(task.worktree))
+                if pre_dispatch_head is None:
+                    logger.warning(
+                        "failed to obtain pre-dispatch HEAD commit for task #%d in %s",
+                        task.issue_number,
+                        task.worktree,
+                    )
+                    self._log(
+                        "git_head_commit_failed",
+                        level="WARNING",
+                        issue_number=task.issue_number,
+                        task_id=task.task_id,
+                        message="failed to obtain pre-dispatch HEAD commit",
+                    )
 
             actual_switches = task.actual_agent_switches
             if task.last_dispatched_agent is not None and task.last_dispatched_agent != agent:
@@ -1390,6 +1403,12 @@ class Scheduler:
         report = None
         touched_unexpected: bool | None = True
         if task.worktree is not None:
+            if pre_dispatch_head is None:
+                logger.warning(
+                    "pre_dispatch_head is None for task #%d in PR_REVIEW; "
+                    "HEAD change verification cannot be performed",
+                    task.issue_number,
+                )
             worktree_dir = Path(task.worktree)
             touched_unexpected = worktree_touched_unexpected_paths(
                 worktree_dir,
