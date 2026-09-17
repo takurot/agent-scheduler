@@ -100,7 +100,7 @@ All development in this repository must strictly adhere to [`docs/WORKFLOW.md`](
 
 ### Commits & Pull Requests (`docs/WORKFLOW.md` §9)
 - Use Conventional Commits (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `ci:`, `chore:`, `perf:`).
-- **Prohibition of Auto-Close Keywords**: Never include GitHub auto-close keywords (`Fixes #N`, `Closes #N`, `Resolves #N`, any case or inflection) in commit messages. Use `issue #N` or `Implements work for #N`.
+- **Auto-Close Keywords Permitted**: Commit messages and PR descriptions for this repository may include GitHub auto-close keywords (`Fixes #N`, `Closes #N`, `Resolves #N`) so that issues automatically close upon merge when acceptance criteria are met.
 - Execute the push safety check script in `docs/WORKFLOW.md` §9 before pushing to origin.
 - PRs must document the issue reference, changes, rationale, verified test commands, and invariant impact.
 
