@@ -192,8 +192,8 @@ native実行を開放する変更は、少なくとも次を満たす。
 - dirty worktreeを破壊せず別Agentが継続できる
 - API fallback、metered usage、merge、release、deployは無効のままにする
 
-push/PR機能はnative worker権限と分離する。PR本文は`Implements work for #N`を使い、
-`Fixes #N`や`Closes #N`でIssueを自動closeしない。
+Schedulerが対象repositoryへ行うpush/PR機能はnative worker権限と分離する。Schedulerが作成するPR本文は`Implements work for #N`を使い、
+`Fixes #N`や`Closes #N`でIssueを自動closeしない（`close_issue: true`が明示設定されている場合を除く。また本repository自身の開発コミットやPRでは自動クローズキーワードの使用を認める）。
 
 ## 6. セキュリティと復旧
 
@@ -328,6 +328,7 @@ git status --short --branch
 
 Conventional Commitのtypeは`feat`、`fix`、`refactor`、`test`、`docs`、`ci`、`chore`、
 `perf`から選ぶ。無関係なworktree変更、`.ai/` runtime state、secret、cacheを含めない。
+コミットメッセージやPR本文には、merge時に対象Issueを自動クローズするためのGitHubキーワード（`Fixes #<ISSUE>`、`Closes #<ISSUE>`、`Resolves #<ISSUE>` など）を含めてよい。
 push前にcurrent branchが意図した`issue/...`であり、main/default branchでないこと、remote、
 HEAD、upstreamをcredentialを表示しないread-only commandで確認する。`git push`はユーザー
 またはtaskから明示的に許可された場合だけ実行し、force pushは使用しない。mainへの反映は
@@ -401,9 +402,9 @@ PR本文には次を記載する。
 - 実行できなかったlive検証と理由
 - migration、rollback、NEEDS_HUMAN条件
 
-このrepository自身の開発PRは、受け入れ条件を満たしてmerge時にIssueを閉じる場合、
-`Closes #<ISSUE>`を使用できる。一方、完成したSchedulerが対象repositoryへ自動生成する
-PRでは`Implements work for #<ISSUE>`を使い、`Fixes` / `Closes`による自動closeを禁止する。
+このrepository自身の開発コミットやPRは、受け入れ条件を満たしてmerge時にIssueを閉じる場合、
+`Fixes #<ISSUE>`、`Closes #<ISSUE>`、`Resolves #<ISSUE>`などの自動クローズキーワードを使用できる。一方、完成したSchedulerが対象repositoryへ自動生成する
+PRでは`Implements work for #<ISSUE>`を使い、`Fixes` / `Closes`による自動closeを禁止する（`github.completion.close_issue: true`が明示設定されている場合を除く）。
 
 ## 10. レビューと完了条件
 
