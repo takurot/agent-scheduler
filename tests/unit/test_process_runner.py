@@ -8,6 +8,7 @@ import pytest
 
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.process import (
+    COMMON_ENV_ALLOWLIST,
     _reap_proc,
     filter_environment,
     redact_sensitive_command_audit,
@@ -49,6 +50,25 @@ def test_filter_environment_applies_allowlist() -> None:
     assert filtered == {"PATH": "/usr/bin", "HOME": "/Users/test"}
     assert "SECRET_TOKEN" not in filtered
     assert "GITHUB_TOKEN" not in filtered
+
+
+def test_common_env_allowlist_preserves_docker_client_connection_vars() -> None:
+    # #309: non-standard Docker socket setups (Colima, OrbStack, rootless, remote daemons)
+    # rely on these vars surviving filter_environment(..., allowlist=COMMON_ENV_ALLOWLIST).
+    env = {
+        "DOCKER_HOST": "unix:///run/user/1000/docker.sock",
+        "CONTAINER_HOST": "unix:///run/user/1000/podman.sock",
+        "DOCKER_TLS_VERIFY": "1",
+        "DOCKER_CERT_PATH": "/home/test/.docker/certs",
+        "SECRET_TOKEN": "super_secret_value",
+    }
+    filtered = filter_environment(env, allowlist=COMMON_ENV_ALLOWLIST)
+    assert filtered == {
+        "DOCKER_HOST": "unix:///run/user/1000/docker.sock",
+        "CONTAINER_HOST": "unix:///run/user/1000/podman.sock",
+        "DOCKER_TLS_VERIFY": "1",
+        "DOCKER_CERT_PATH": "/home/test/.docker/certs",
+    }
 
 
 def test_redact_sensitive_command_audit() -> None:

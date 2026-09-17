@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from subsched.agents.base import ProcessExecutionRequest
+from subsched.agents.process import COMMON_ENV_ALLOWLIST, filter_environment
 from subsched.config import NativeIsolationConfig, validate_base_branch
 from subsched.gitenv import git_safe_env
 from subsched.storage import atomic_write_secure_bytes, secure_directory
@@ -73,7 +74,7 @@ def _json_output(
             text=True,
             check=False,
             timeout=15,
-            env={},
+            env=filter_environment(dict(os.environ), allowlist=COMMON_ENV_ALLOWLIST),
         )
     except (OSError, subprocess.SubprocessError):
         return None, "native isolation runtime inspection failed"

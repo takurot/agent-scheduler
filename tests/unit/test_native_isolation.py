@@ -195,6 +195,39 @@ def test_container_attestation_requires_linux_digest_and_internal_network(
     ]
 
 
+def test_container_attestation_propagates_docker_host_to_inspection_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #309: docker info/inspect preflight calls must see DOCKER_HOST/CONTAINER_HOST so
+    # non-standard sockets (Colima, OrbStack, rootless, remote daemons) can be attested.
+    from subsched.agents.isolation import verify_native_isolation
+
+    monkeypatch.setenv("DOCKER_HOST", "unix:///run/user/1000/docker.sock")
+    monkeypatch.setenv("CONTAINER_HOST", "unix:///run/user/1000/podman.sock")
+    monkeypatch.setenv("SECRET_TOKEN", "super_secret_value")
+
+    auth = _secure_auth_dir(tmp_path / "auth")
+    envs: list[dict[str, str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> CompletedProcess[str]:
+        envs.append(dict(kwargs["env"]))  # type: ignore[arg-type]
+        return CompletedProcess(argv, 0, _successful_attestation_output(argv), "")
+
+    result = verify_native_isolation(
+        _runtime_config(auth),
+        enabled_agents=("codex",),
+        resolver=lambda _: Path("/usr/bin/docker"),
+        run_cmd=run,
+    )
+
+    assert result is None
+    assert envs
+    for env in envs:
+        assert env.get("DOCKER_HOST") == "unix:///run/user/1000/docker.sock"
+        assert env.get("CONTAINER_HOST") == "unix:///run/user/1000/podman.sock"
+        assert "SECRET_TOKEN" not in env
+
+
 def test_container_attestation_rejects_proxy_runtime_mount_override(
     tmp_path: Path,
 ) -> None:

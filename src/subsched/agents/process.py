@@ -26,6 +26,10 @@ COMMON_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "VIRTUAL_ENV",
         "CODEX_HOME",
         "CLAUDE_CONFIG_DIR",
+        "DOCKER_HOST",
+        "CONTAINER_HOST",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
     }
 )
 
