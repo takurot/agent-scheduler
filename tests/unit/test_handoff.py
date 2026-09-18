@@ -165,6 +165,110 @@ def test_readback_handoff_rejects_stale_timestamp(tmp_path: Path) -> None:
     assert "did not advance" in result.reason
 
 
+def test_readback_handoff_repairs_stale_timestamp_when_content_changed(tmp_path: Path) -> None:
+    """#365: when handoff content changed, readback_handoff should auto-repair the
+    timestamp and return ok=True."""
+    from subsched.handoff import compute_substantive_handoff_hash
+
+    task = Task.from_issue(Issue(number=103, title="Support timeout"))
+    dispatched_at = datetime(2026, 1, 1, tzinfo=UTC)
+    bootstrap_task_files(tmp_path, task, now=dispatched_at)
+    handoff_path = tmp_path / ".ai" / "handoffs" / "103.md"
+    pre_dispatch_hash = compute_substantive_handoff_hash(handoff_path.read_text(encoding="utf-8"))
+
+    # Agent updates content (e.g. ## Completed has new text) but leaves timestamp stale
+    _write_handoff(
+        tmp_path,
+        103,
+        title="Support timeout",
+        timestamp=dispatched_at.isoformat(),
+    )
+
+    now = dispatched_at + timedelta(minutes=5)
+    result = readback_handoff(
+        tmp_path,
+        task,
+        dispatched_at=dispatched_at,
+        pre_dispatch_handoff_hash=pre_dispatch_hash,
+        now=now,
+    )
+    assert result.ok is True
+    assert result.repaired is True
+
+    # Check that the file on disk was updated with the new timestamp
+    repaired_parsed = parse_semantic_handoff(handoff_path.read_text(encoding="utf-8"))
+    assert repaired_parsed is not None
+    assert repaired_parsed.timestamp == now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_readback_handoff_repairs_stale_timestamp_when_commit_progress_made(
+    tmp_path: Path,
+) -> None:
+    """#365: when git commits advanced past pre_dispatch_head, readback_handoff should
+    auto-repair the timestamp and return ok=True even if handoff was untouched."""
+    from subsched.handoff import compute_substantive_handoff_hash
+
+    task = Task.from_issue(Issue(number=103, title="Support timeout"))
+    dispatched_at = datetime(2026, 1, 1, tzinfo=UTC)
+    bootstrap_task_files(tmp_path, task, now=dispatched_at)
+    handoff_path = tmp_path / ".ai" / "handoffs" / "103.md"
+    pre_dispatch_hash = compute_substantive_handoff_hash(handoff_path.read_text(encoding="utf-8"))
+
+    now = dispatched_at + timedelta(minutes=5)
+    result = readback_handoff(
+        tmp_path,
+        task,
+        dispatched_at=dispatched_at,
+        pre_dispatch_handoff_hash=pre_dispatch_hash,
+        pre_dispatch_head="head-before",
+        current_head="head-after",
+        now=now,
+    )
+    assert result.ok is True
+    assert result.repaired is True
+
+    repaired_parsed = parse_semantic_handoff(handoff_path.read_text(encoding="utf-8"))
+    assert repaired_parsed is not None
+    assert repaired_parsed.timestamp == now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_readback_handoff_repairs_malformed_timestamp_when_content_changed(
+    tmp_path: Path,
+) -> None:
+    """#365: when handoff content changed but timestamp string is malformed / non-ISO,
+    readback_handoff should auto-repair it to a valid ISO 8601 string."""
+    from subsched.handoff import compute_substantive_handoff_hash
+
+    task = Task.from_issue(Issue(number=103, title="Support timeout"))
+    dispatched_at = datetime(2026, 1, 1, tzinfo=UTC)
+    bootstrap_task_files(tmp_path, task, now=dispatched_at)
+    handoff_path = tmp_path / ".ai" / "handoffs" / "103.md"
+    pre_dispatch_hash = compute_substantive_handoff_hash(handoff_path.read_text(encoding="utf-8"))
+
+    # Agent wrote natural language or malformed timestamp
+    _write_handoff(
+        tmp_path,
+        103,
+        title="Support timeout",
+        timestamp="2026-01-01 12:00:00 (approx)",
+    )
+
+    now = dispatched_at + timedelta(minutes=5)
+    result = readback_handoff(
+        tmp_path,
+        task,
+        dispatched_at=dispatched_at,
+        pre_dispatch_handoff_hash=pre_dispatch_hash,
+        now=now,
+    )
+    assert result.ok is True
+    assert result.repaired is True
+
+    repaired_parsed = parse_semantic_handoff(handoff_path.read_text(encoding="utf-8"))
+    assert repaired_parsed is not None
+    assert repaired_parsed.timestamp == now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def test_readback_handoff_rejects_issue_identity_mismatch(tmp_path: Path) -> None:
     task = Task.from_issue(Issue(number=103, title="Support timeout"))
     dispatched_at = datetime(2026, 1, 1, tzinfo=UTC)
