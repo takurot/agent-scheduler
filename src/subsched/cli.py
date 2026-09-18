@@ -356,6 +356,7 @@ def run(
             write_policy_requires_auth=effective_push,
             isolation_config=cfg.isolation,
             agents=cfg.agents,
+            verification_commands=cfg.verification.commands,
         )
         if not report.passed:
             missing_names = [c.name for c in report.checks if not c.found]
@@ -1015,10 +1016,12 @@ def doctor(
         enabled_agents=enabled_agents,
         write_policy_requires_auth=False,
         isolation_config=cfg.isolation,
+        agents=cfg.agents,
+        verification_commands=cfg.verification.commands,
     )
     for check in report.checks:
         typer.echo(f"{check.name:<8} {'FOUND' if check.found else 'MISSING'}")
-        if check.found and not check.compatible and check.error:
+        if not check.compatible and check.error:
             typer.echo(f"  compatibility error: {check.error}")
 
     gh_check = report.get("gh")

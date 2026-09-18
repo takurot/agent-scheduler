@@ -1,0 +1,47 @@
+# Reference Dockerfile for a Python-enabled worker container image (#364).
+# Provides essential build tools, Node.js runtime for agent CLIs,
+# Python 3, uv, and test/lint tools.
+#
+# Build and pin:
+#   docker build -t subsched-worker-python:latest -f examples/docker/Dockerfile.worker-python .
+#   docker inspect subsched-worker-python:latest --format '{{index .RepoDigests 0}}'
+
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/root/.local/bin:/home/worker/.local/bin:${PATH}"
+
+# Install base dependencies and process utilities (procps is required per #337)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    procps \
+    build-essential \
+    python3 \
+    python3-pip \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js (LTS) for agent CLIs
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code and OpenAI Codex CLI tools globally
+RUN npm install -g @anthropic-ai/claude-code @openai/codex \
+    && npm cache clean --force
+
+# Install uv package manager
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && cp /root/.local/bin/uv /usr/local/bin/uv \
+    && cp /root/.local/bin/uvx /usr/local/bin/uvx
+
+# Create default non-root worker user (UID 1000)
+RUN useradd -m -u 1000 -s /bin/bash worker
+
+WORKDIR /workspace
+USER worker
+
+# Verification sanity check during build
+RUN python3 --version && uv --version && node --version

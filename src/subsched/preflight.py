@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -13,13 +14,30 @@ from subsched.agents.codex import (
     CodexCliMetadataError,
     parse_codex_cli_metadata,
 )
-from subsched.agents.isolation import native_isolation_failure, verify_native_isolation
+from subsched.agents.isolation import (
+    native_isolation_failure,
+    probe_container_toolchain,
+    verify_native_isolation,
+)
 from subsched.assumptions import REDACTED, SECRET_PATTERN
 from subsched.config import AgentSettings, NativeIsolationConfig
 from subsched.github.issues import diagnose_token
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
 ExecutableResolver = Callable[[str], Path | None]
+
+
+def extract_command_binary(command_str: str) -> str | None:
+    """Extract primary executable name from a shell command string (#364)."""
+    try:
+        parts = shlex.split(command_str.strip())
+    except ValueError:
+        return None
+    for part in parts:
+        if "=" in part and not part.startswith((".", "/")):
+            continue
+        return part
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +227,9 @@ def validate_native_preflight(
     # name. Only consulted for agents that have an explicit stage/default model
     # configured; unset (None, the default) preserves pre-#296 behavior exactly.
     agents: Mapping[str, AgentSettings] | None = None,
+    # #364: verification commands from verification.commands to probe against
+    # the container image when container isolation is enabled.
+    verification_commands: Sequence[str] = (),
 ) -> PreflightReport:
     """Validate installed CLI capabilities before task discovery and dispatch.
 
@@ -308,6 +329,61 @@ def validate_native_preflight(
                 ),
             )
         )
+
+    # #364: when container isolation is active and verified, check that the container
+    # image contains all executables required by verification.commands (e.g. cargo, pytest).
+    if (
+        isolation_config is not None
+        and isolation_failure is None
+        and isolation_config.backend == "container"
+        and isolation_config.image is not None
+        and verification_commands
+    ):
+        isolation_runtime = resolver(isolation_config.runtime) or Path(isolation_config.runtime)
+        binaries_to_check: list[str] = []
+        for cmd in verification_commands:
+            binary = extract_command_binary(cmd)
+            if binary and not binary.startswith((".", "/")) and binary not in binaries_to_check:
+                binaries_to_check.append(binary)
+
+        missing_toolchains: list[str] = []
+        for binary in binaries_to_check:
+            if not probe_container_toolchain(
+                isolation_runtime,
+                isolation_config.image,
+                binary,
+                run_cmd=runner,
+            ):
+                missing_toolchains.append(binary)
+
+        if missing_toolchains:
+            toolchain_error = (
+                f"verification command toolchain(s) missing in container image "
+                f"'{isolation_config.image}': {', '.join(missing_toolchains)}. "
+                f"Pre-bake required toolchains (e.g. via examples/docker/Dockerfile.worker-rust) "
+                f"into the worker container image."
+            )
+            checks.append(
+                PreflightCheckResult(
+                    name="isolation-toolchain",
+                    found=False,
+                    compatible=False,
+                    error=toolchain_error,
+                )
+            )
+            failures.append(toolchain_error)
+        else:
+            checks.append(
+                PreflightCheckResult(
+                    name="isolation-toolchain",
+                    found=True,
+                    compatible=True,
+                    details=(
+                        f"all verification toolchains available in worker container "
+                        f"({', '.join(binaries_to_check)})"
+                    ),
+                )
+            )
 
     # Validate GitHub token when write policy requires authentication
     if write_policy_requires_auth:

@@ -78,3 +78,22 @@ def test_bootstrap_script_emits_isolation_yaml_block() -> None:
 def test_readme_documents_bootstrap_script() -> None:
     readme = _README.read_text(encoding="utf-8")
     assert "bootstrap-isolation.sh" in readme
+
+
+def test_bootstrap_script_supports_language_option() -> None:
+    """#364: bootstrap-isolation.sh supports --language to guide toolchain pre-baking."""
+    script = _script_text()
+    assert "--language" in script
+    assert "rust" in script.lower()
+
+
+def test_reference_worker_dockerfiles_exist() -> None:
+    """#364: reference Dockerfiles exist with essential toolchains and procps."""
+    docker_dir = _REPO_ROOT / "examples" / "docker"
+    rust_dockerfile = docker_dir / "Dockerfile.worker-rust"
+    assert rust_dockerfile.is_file(), "examples/docker/Dockerfile.worker-rust must exist"
+    rust_content = rust_dockerfile.read_text(encoding="utf-8")
+    assert "cargo" in rust_content
+    assert "rustfmt" in rust_content
+    assert "procps" in rust_content
+
