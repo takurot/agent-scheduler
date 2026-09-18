@@ -380,6 +380,27 @@ flowchart TD
 
 To set up native container isolation for `subsched`:
 
+> [!TIP]
+> **Automated setup**: [`scripts/bootstrap-isolation.sh`](scripts/bootstrap-isolation.sh) automates
+> Steps 1–3 below for a given repository. It derives a network name, proxy container name, and
+> dedicated auth directory paths from a `owner/repo` slug, refuses to run if a same-named Docker
+> network or container already exists (fail-closed; it never deletes or overwrites existing
+> resources), and prints a ready-to-paste `isolation:` block for Step 4.
+> ```bash
+> # Preview the derived resource names/paths without creating anything:
+> scripts/bootstrap-isolation.sh owner/project --check
+>
+> # Create the network, proxy container, and auth directories, and print the isolation: block:
+> scripts/bootstrap-isolation.sh owner/project \
+>   --proxy-image registry.example/subsched-proxy@sha256:<proxy-digest> \
+>   --worker-image registry.example/subsched-worker@sha256:<worker-digest>
+> ```
+> Run this once per repository that needs its own isolated network/proxy (for example, to avoid the
+> "the network must contain exactly the configured proxy container" preflight check colliding across
+> repositories that would otherwise share the same `isolation.network`/`isolation.proxy_url`). Then
+> place your provider credentials into the printed auth directories (mode `0600` files) and continue
+> from Step 5 below.
+
 #### Step 1: Create Docker Internal Network
 Create an isolated internal network with default-deny egress:
 ```bash
