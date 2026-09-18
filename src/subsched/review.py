@@ -143,13 +143,15 @@ def worktree_touched_unexpected_paths(
     except ValueError:
         return True
 
-    # #325: In repositories without .ai/ in .gitignore, untracked Scheduler scaffold
-    # files (.ai/tasks/<issue>.md, .ai/handoffs/<issue>.md, .ai/checkpoints/<issue>.json)
+    # In repositories without .ai/ in .gitignore, Scheduler-generated files
     # legitimately exist untracked. They are tolerated only with status '??'.
     scaffold_paths = {
+        ".ai/codex-output.schema.json",
+        ".ai/plan-review-output.schema.json",
         f".ai/tasks/{issue_number}.md",
         f".ai/handoffs/{issue_number}.md",
         f".ai/checkpoints/{issue_number}.json",
+        f".ai/plans/{issue_number}.md",
     }
     prior_round_pattern = re.compile(rf"^\.ai/reviews/{re.escape(str(issue_number))}-r(\d+)\.md$")
     try:
