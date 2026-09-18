@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -312,6 +313,38 @@ def import_isolated_git(
         )
         return "native isolation task branch changed while importing the commit"
     return None
+
+
+def probe_container_toolchain(
+    runtime: str | Path,
+    image: str,
+    binary: str,
+    *,
+    run_cmd: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    timeout: float = 15.0,
+) -> bool:
+    """Probe whether `binary` exists in the container image's PATH (#364)."""
+    try:
+        result = run_cmd(
+            [
+                str(runtime),
+                "run",
+                "--rm",
+                "--entrypoint",
+                "sh",
+                image,
+                "-c",
+                f"command -v {shlex.quote(binary)}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            env=filter_environment(dict(os.environ), allowlist=COMMON_ENV_ALLOWLIST),
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def verify_native_isolation(

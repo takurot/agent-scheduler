@@ -25,6 +25,8 @@ Options:
   --worker-image <ref>      RepoDigest-pinned worker image to embed in the
                              printed isolation: block (informational only;
                              this script never launches worker containers).
+  --language <lang>         Target project language (rust, python, node, etc.)
+                             to display toolchain pre-baking recipes and guidance.
   --network-name <name>     Override the derived Docker internal network name.
   --proxy-name <name>       Override the derived proxy container name.
   --auth-base <dir>         Override the derived base directory for dedicated
@@ -40,6 +42,7 @@ EOF
 repo_slug=""
 proxy_image=""
 worker_image=""
+language=""
 network_name=""
 proxy_name=""
 auth_base=""
@@ -57,6 +60,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --worker-image)
       worker_image="${2:-}"
+      shift 2
+      ;;
+    --language)
+      language="${2:-}"
       shift 2
       ;;
     --network-name)
@@ -212,3 +219,40 @@ isolation:
 Place your Claude/Codex subscription credentials into the auth directories above
 (mode 0600 files) before running 'subsched doctor'.
 EOF
+
+if [ -n "$language" ]; then
+  case "$(printf '%s' "$language" | tr '[:upper:]' '[:lower:]')" in
+    rust)
+      cat <<'EOFRUST'
+
+=== Toolchain Guidance for Rust (#364) ===
+Worker containers execute in a read-only, isolated network environment.
+Pre-bake the Rust toolchain (cargo, rustc, rustfmt, clippy) into your worker image
+using the reference Dockerfile: examples/docker/Dockerfile.worker-rust
+
+Build and pin your worker image:
+  docker build -t <worker-image>:latest -f examples/docker/Dockerfile.worker-rust .
+  docker inspect <worker-image>:latest --format '{{index .RepoDigests 0}}'
+EOFRUST
+      ;;
+    python)
+      cat <<'EOFPY'
+
+=== Toolchain Guidance for Python (#364) ===
+Worker containers execute in a read-only, isolated network environment.
+Pre-bake Python tools (uv, pytest, ruff) into your worker image
+using the reference Dockerfile: examples/docker/Dockerfile.worker-python
+EOFPY
+      ;;
+    *)
+      cat <<EOFLANG
+
+=== Toolchain Guidance for $language (#364) ===
+Worker containers execute in a read-only, isolated network environment.
+Ensure all compilers, test runners, and linters for $language are pre-baked
+into your worker image (see examples/docker/README.md).
+EOFLANG
+      ;;
+  esac
+fi
+

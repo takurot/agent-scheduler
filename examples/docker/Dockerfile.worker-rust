@@ -1,0 +1,48 @@
+# Reference Dockerfile for a Rust-enabled worker container image (#364).
+# Provides essential build tools, Node.js runtime for agent CLIs,
+# and the complete Rust toolchain (cargo, rustc, rustfmt, clippy).
+#
+# Build and pin:
+#   docker build -t subsched-worker-rust:latest -f examples/docker/Dockerfile.worker-rust .
+#   docker inspect subsched-worker-rust:latest --format '{{index .RepoDigests 0}}'
+
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+# Install base dependencies and process utilities (procps is required per #337)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    procps \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js (LTS) for agent CLIs
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code and OpenAI Codex CLI tools globally
+RUN npm install -g @anthropic-ai/claude-code @openai/codex \
+    && npm cache clean --force
+
+# Install Rust stable toolchain with rustfmt and clippy
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+    -y --default-toolchain stable --profile default --component rustfmt,clippy \
+    && chmod -R a+rwX /usr/local/cargo /usr/local/rustup
+
+# Create default non-root worker user (UID 1000)
+RUN useradd -m -u 1000 -s /bin/bash worker
+
+WORKDIR /workspace
+USER worker
+
+# Verification sanity check during build
+RUN cargo --version && rustc --version && rustfmt --version && node --version

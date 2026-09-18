@@ -684,3 +684,130 @@ def test_run_passes_configured_agent_models_to_preflight(
     assert "agents" in captured
     assert captured["agents"] is not None
     assert captured["agents"]["claude"].models.default == "sonnet"
+
+
+def test_extract_command_binary() -> None:
+    from subsched.preflight import extract_command_binary
+
+    assert extract_command_binary("cargo test") == "cargo"
+    assert extract_command_binary("cargo fmt --check") == "cargo"
+    assert extract_command_binary("pytest -v") == "pytest"
+    assert extract_command_binary("uv run pytest") == "uv"
+    assert extract_command_binary("RUST_BACKTRACE=1 cargo test") == "cargo"
+    assert extract_command_binary("./scripts/quality_gate.sh") == "./scripts/quality_gate.sh"
+    assert extract_command_binary("") is None
+
+
+def test_probe_container_toolchain_success() -> None:
+    from subsched.agents.isolation import probe_container_toolchain
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert "command -v cargo" in argv[-1]
+        return subprocess.CompletedProcess(argv, 0, "/root/.cargo/bin/cargo\n", "")
+
+    assert (
+        probe_container_toolchain("docker", "my-image@sha256:abc", "cargo", run_cmd=fake_run)
+        is True
+    )
+
+
+def test_probe_container_toolchain_missing() -> None:
+    from subsched.agents.isolation import probe_container_toolchain
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    assert (
+        probe_container_toolchain("docker", "my-image@sha256:abc", "cargo", run_cmd=fake_run)
+        is False
+    )
+
+
+def test_validate_native_preflight_fails_when_isolation_toolchain_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from subsched.config import NativeIsolationConfig
+
+    config = NativeIsolationConfig(
+        backend="container",
+        runtime="/usr/bin/docker",
+        image="ghcr.io/example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        network="subsched-internal",
+        proxy_url="http://subsched-proxy:3128",
+        proxy_image="ghcr.io/example/proxy@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        auth={},
+    )
+    monkeypatch.setattr("subsched.preflight.verify_native_isolation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "subsched.preflight.probe_command_capabilities",
+        lambda name, executable, **kwargs: PreflightCheckResult(
+            name=name, found=True, executable_path=executable, compatible=True
+        ),
+    )
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "command -v cargo" in argv[-1]:
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    report = validate_native_preflight(
+        enabled_agents=(),
+        isolation_config=config,
+        executable_resolver=lambda name: Path(f"/usr/bin/{name}"),
+        run_cmd=fake_run,
+        verification_commands=("cargo fmt --check", "cargo test"),
+    )
+
+    assert report.passed is False
+    check = report.get("isolation-toolchain")
+    assert check is not None
+    assert check.found is False
+    assert check.compatible is False
+    assert "cargo" in (check.error or "")
+    assert "Pre-bake" in (check.error or "")
+
+
+def test_validate_native_preflight_passes_when_isolation_toolchain_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from subsched.config import NativeIsolationConfig
+
+    config = NativeIsolationConfig(
+        backend="container",
+        runtime="/usr/bin/docker",
+        image="ghcr.io/example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        network="subsched-internal",
+        proxy_url="http://subsched-proxy:3128",
+        proxy_image="ghcr.io/example/proxy@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        auth={},
+    )
+    monkeypatch.setattr("subsched.preflight.verify_native_isolation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "subsched.preflight.probe_command_capabilities",
+        lambda name, executable, **kwargs: PreflightCheckResult(
+            name=name, found=True, executable_path=executable, compatible=True
+        ),
+    )
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "command -v cargo" in argv[-1]:
+            return subprocess.CompletedProcess(argv, 0, "/usr/bin/cargo\n", "")
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    report = validate_native_preflight(
+        enabled_agents=(),
+        isolation_config=config,
+        executable_resolver=lambda name: Path(f"/usr/bin/{name}"),
+        run_cmd=fake_run,
+        verification_commands=("cargo fmt --check", "cargo test"),
+    )
+
+    assert report.passed is True
+    check = report.get("isolation-toolchain")
+    assert check is not None
+    assert check.found is True
+    assert check.compatible is True
+    assert "cargo" in check.details
+
+
+

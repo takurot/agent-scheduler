@@ -462,9 +462,10 @@ subsched doctor
 - Internal network configuration (`Internal: true`) and proxy container attachment
 - Absence of unauthorized containers on the internal network
 - Provider auth directory permissions (`0700`) and file modes (`0600`)
+- Verification toolchain availability (#364): confirms all executables in `verification.commands` (e.g. `cargo`, `pytest`, `npm`) exist in the worker container image
 
 > [!TIP]
-> **Worker Image Requirements**: Worker container images should install `procps` (`ps`) in addition to standard project runtimes to ensure process management and test suites execute without missing system utility errors.
+> **Worker Image Requirements & Pre-baking Toolchains**: Because worker containers execute with a read-only rootfs and internal network without general internet access, all compilers, linters, test runners, and `procps` (`ps`, per #337) must be pre-baked into the worker container image (#364). See [`examples/docker/`](examples/docker/) for reference Dockerfiles (`Dockerfile.worker-rust`, `Dockerfile.worker-python`) and build instructions.
 
 ---
 

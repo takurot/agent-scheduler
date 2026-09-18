@@ -1214,3 +1214,61 @@ def test_doctor_reports_unverified_isolation_and_worker_credential_tier(
     assert "isolation" in result.output.casefold()
     assert "worker credential tier" in result.output.casefold()
     assert "unverified" in result.output.casefold()
+
+
+def test_doctor_reports_missing_isolation_verification_toolchains(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#364: doctor reports failure when verification commands rely on toolchains
+    missing from the container isolation image."""
+    from subsched.github.issues import TokenDiagnosis
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "subsched.cli.diagnose_token",
+        lambda: TokenDiagnosis(
+            authenticated=False, scopes=(), can_discover=False, can_write=False, broad_scopes=()
+        ),
+    )
+    auth_dir = _secure_auth_dir(tmp_path / "auth")
+    monkeypatch.setattr("subsched.preflight.verify_native_isolation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "subsched.preflight.probe_command_capabilities",
+        lambda name, executable, **kwargs: PreflightCheckResult(
+            name=name, found=True, executable_path=executable, compatible=True
+        ),
+    )
+    monkeypatch.setattr(
+        "subsched.preflight.probe_container_toolchain",
+        lambda runtime, image, binary, **kwargs: False,
+    )
+
+    config_file = tmp_path / "subsched.yaml"
+    config_file.write_text(
+        "github:\n"
+        "  repo: owner/repo\n"
+        "isolation:\n"
+        "  backend: container\n"
+        "  runtime: docker\n"
+        "  image: "
+        "ghcr.io/example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111\n"
+        "  network: subsched-internal\n"
+        "  proxy_url: http://subsched-proxy:3128\n"
+        "  proxy_image: "
+        "ghcr.io/example/proxy@sha256:2222222222222222222222222222222222222222222222222222222222222222\n"
+        f"  auth:\n"
+        f"    claude: {auth_dir}\n"
+        "verification:\n"
+        "  commands:\n"
+        "    - cargo fmt --check\n"
+        "    - cargo test\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app, ["doctor", "--config", str(config_file)])
+    assert result.exit_code == 1
+    assert "isolation-toolchain" in result.output
+    assert "cargo" in result.output
+    assert "Pre-bake" in result.output
+
