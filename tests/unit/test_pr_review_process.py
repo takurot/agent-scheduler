@@ -4,7 +4,21 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from subsched.models import Task, TaskState
+import pytest
+
+from subsched.github import conflict as conflict_mod
+from subsched.github import pull_requests as pr_mod
+from subsched.github import push as push_mod
+from subsched.github.review import PostCommentResult, PostCommentResultKind
+from subsched.models import (
+    AgentResult,
+    AgentResultKind,
+    Capacity,
+    CapacityState,
+    Issue,
+    Task,
+    TaskState,
+)
 from subsched.review import git_head_commit, review_report_path
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler, ScriptedWorker
@@ -36,6 +50,96 @@ def _scheduler(tmp_path: Path) -> Scheduler:
         worker=ScriptedWorker({}),
         worktree_root=tmp_path / "worktrees",
     )
+
+
+def test_pr_review_enabled_lifecycle_reaches_ready_for_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = datetime(2026, 8, 12, 22, tzinfo=UTC)
+    worktree = tmp_path / "worktrees" / "issue-1"
+    worktree.mkdir(parents=True)
+    _init_repo(worktree)
+
+    class ReportingWorker:
+        def __init__(self) -> None:
+            self.dispatch_statuses: list[TaskState | None] = []
+
+        def run(self, task: Task, agent: str) -> AgentResult:
+            self.dispatch_statuses.append(task.dispatch_status)
+            if task.dispatch_status is TaskState.PR_REVIEW:
+                _write_report(worktree, task.issue_number, 1, "APPROVE")
+            return AgentResult(AgentResultKind.PASS)
+
+    worker = ReportingWorker()
+    monkeypatch.setattr(
+        conflict_mod,
+        "rebase_onto_base",
+        lambda worktree_dir, base_branch="main", **kwargs: conflict_mod.RebaseResult(
+            status=conflict_mod.RebaseStatus.SUCCESS
+        ),
+    )
+    monkeypatch.setattr(
+        pr_mod, "find_close_keyword_commits", lambda worktree_dir, base, **kwargs: ()
+    )
+    monkeypatch.setattr(
+        push_mod,
+        "push_task_branch",
+        lambda worktree_dir, branch_name, **kwargs: push_mod.PushResult(
+            kind=push_mod.PushResultKind.SUCCESS,
+            output="",
+            branch=branch_name,
+        ),
+    )
+    monkeypatch.setattr(
+        pr_mod,
+        "create_or_get_pull_request",
+        lambda task, branch_name, **kwargs: pr_mod.PullRequestResult(
+            kind=pr_mod.PullRequestResultKind.SUCCESS,
+            info=pr_mod.PullRequestInfo(
+                number=42,
+                url="https://example.invalid/pull/42",
+                title="review",
+                body="body",
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "subsched.github.review.post_pr_comment",
+        lambda *args, **kwargs: PostCommentResult(PostCommentResultKind.SUCCESS),
+    )
+    scheduler = Scheduler(
+        store=JsonStateStore(tmp_path / "state.json"),
+        router=Router((AgentConfig("claude", 100),)),
+        worker=worker,
+        worktree_root=tmp_path / "worktrees",
+        push_enabled=True,
+        repo="owner/repo",
+        base_branch="main",
+        pr_review_enabled=True,
+    )
+    scheduler.discover((Issue(number=1, title="test"),))
+    task = scheduler.tasks[0].with_worktree(str(worktree))
+    scheduler.queue = scheduler.queue.replace(task)
+    capacity = Capacity(
+        agent="claude",
+        state=CapacityState.AVAILABLE,
+        observed_at=now,
+        source="provider",
+        confidence="high",
+    )
+
+    assert scheduler.tick((capacity,), now=now) is True
+    after_implementation = scheduler.queue.get(1)
+    assert after_implementation is not None
+    assert after_implementation.status is TaskState.PR_REVIEW
+    assert after_implementation.pr == 42
+
+    assert scheduler.tick((capacity,), now=now) is True
+    final = scheduler.queue.get(1)
+    assert final is not None
+    assert final.status is TaskState.READY_FOR_REVIEW
+    assert final.review_cycles == 1
+    assert worker.dispatch_statuses == [TaskState.READY, TaskState.PR_REVIEW]
 
 
 def test_process_pr_review_approve_updates_review_cycles(tmp_path: Path) -> None:
