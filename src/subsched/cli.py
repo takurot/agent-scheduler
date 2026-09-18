@@ -827,7 +827,8 @@ def reconcile(
             "--prune-worktrees",
             help=(
                 "Delete the worktree of any task that reconciles to COMPLETE, but only "
-                "when `git status --porcelain` reports no changes at all. Off by default."
+                "when git reports no tracked changes or untracked files outside the "
+                "Scheduler-owned .ai/ directory. Off by default."
             ),
         ),
     ] = False,

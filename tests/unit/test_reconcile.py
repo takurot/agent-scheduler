@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -310,6 +311,129 @@ def test_prune_worktree_if_clean_skips_dirty_worktree(
 
     assert result.kind is WorktreePruneKind.SKIPPED
     assert "uncommitted or untracked" in result.reason
+
+
+def test_prune_worktree_if_clean_skips_tracked_change_under_ai(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    worktree_root.mkdir()
+    worktree_path = worktree_root / "issue-1"
+    worktree_path.mkdir()
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=" M .ai/tasks/1.md\0", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = prune_worktree_if_clean(tmp_path, worktree_root, 1, worktree_path)
+
+    assert result.kind is WorktreePruneKind.SKIPPED
+
+
+def test_prune_worktree_if_clean_skips_untracked_file_outside_ai(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree_root = tmp_path / "worktrees"
+    worktree_root.mkdir()
+    worktree_path = worktree_root / "issue-1"
+    worktree_path.mkdir()
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, stdout="?? notes.txt\0", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = prune_worktree_if_clean(tmp_path, worktree_root, 1, worktree_path)
+
+    assert result.kind is WorktreePruneKind.SKIPPED
+
+
+def test_prune_worktree_if_clean_removes_worktree_with_only_untracked_ai_files(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    worktree_root = repo_root / ".ai" / "worktrees"
+    worktree_path = worktree_root / "issue-1"
+    repo_root.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo_root)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_root), "config", "user.name", "Test"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_root), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    (repo_root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_root), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_root), "commit", "--quiet", "-m", "initial"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_root), "worktree", "add", "--quiet", str(worktree_path)],
+        check=True,
+    )
+    task_path = worktree_path / ".ai" / "tasks" / "1.md"
+    task_path.parent.mkdir(parents=True)
+    task_path.write_text("scheduler state\n", encoding="utf-8")
+
+    result = prune_worktree_if_clean(repo_root, worktree_root, 1, worktree_path)
+
+    assert result.kind is WorktreePruneKind.PRUNED
+    assert not worktree_path.exists()
+
+
+def test_prune_worktree_if_clean_refuses_when_file_modified_before_removal(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    worktree_root = repo_root / ".ai" / "worktrees"
+    worktree_path = worktree_root / "issue-1"
+    repo_root.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repo_root)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_root), "config", "user.name", "Test"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_root), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    tracked = repo_root / "tracked.txt"
+    tracked.write_text("tracked\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_root), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_root), "commit", "--quiet", "-m", "initial"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_root), "worktree", "add", "--quiet", str(worktree_path)],
+        check=True,
+    )
+    task_path = worktree_path / ".ai" / "tasks" / "1.md"
+    task_path.parent.mkdir(parents=True)
+    task_path.write_text("scheduler state\n", encoding="utf-8")
+
+    original_run = subprocess.run
+
+    def modify_on_status(*args: Any, **kwargs: Any) -> Any:
+        res = original_run(*args, **kwargs)
+        cmd = args[0] if args else kwargs.get("args", [])
+        if len(cmd) >= 4 and cmd[1:4] == ["-C", str(worktree_path), "status"]:
+            # External process modifies tracked file right after status inspection passes
+            (worktree_path / "tracked.txt").write_text(
+                "concurrent edit\n", encoding="utf-8"
+            )
+        return res
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(subprocess, "run", modify_on_status)
+        result = prune_worktree_if_clean(repo_root, worktree_root, 1, worktree_path)
+
+    assert result.kind is WorktreePruneKind.FAILED
+    assert "git worktree remove failed" in result.reason
+    assert worktree_path.exists()
+    assert (
+        worktree_path / "tracked.txt"
+    ).read_text(encoding="utf-8") == "concurrent edit\n"
 
 
 def test_prune_worktree_if_clean_removes_clean_worktree(
