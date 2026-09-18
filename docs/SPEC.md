@@ -1467,6 +1467,10 @@ Bernsteinを採用できる場合、このverification gateを既存機能へ委
   実行エラー・認証失敗・不正な出力の場合はscheduler状態を一切変更せずnon-zeroで
   終了する（fail-closed）。dispatch loopや`discover()`からは暗黙に呼ばれず、必ず
   operatorまたはMCPクライアントが明示的に起動する。
+  CLIで`--prune-worktrees`を明示した場合のみ、merge済みtaskのworktreeを削除する。削除前に
+  `git status --porcelain -uall`を検査し、tracked changeまたはScheduler所有の`.ai/`配下以外の
+  untracked fileがあれば削除を拒否する。`.ai/`配下のuntracked runtime stateだけは安全な
+  pruneを妨げない。
 - `execution.ci_monitoring: true`: 各tickで`READY_FOR_REVIEW`かつ`pr`を持つTaskの
   CI状態を`gh pr checks`経由で確認する。
   - CI `PASS` → `COMPLETE`へ昇格する。

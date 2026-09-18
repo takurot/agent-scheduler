@@ -273,8 +273,8 @@ def prune_worktree_if_clean(
     - `worktree_path` resolves inside `worktree_root` (never escapes repo boundaries),
       is not a symlink, and matches the Scheduler's own naming convention for this
       issue number.
-    - `git status --porcelain` for the worktree reports no changes at all (staged,
-      unstaged, *or* untracked).
+    - `git status --porcelain -uall` for the worktree reports no staged or unstaged
+      changes and no untracked files outside the Scheduler-owned `.ai/` directory.
 
     Uses `git worktree remove` (never `rm -rf`), so git's own worktree registry stays
     consistent; a worktree git itself refuses to remove is reported as FAILED.
@@ -304,7 +304,7 @@ def prune_worktree_if_clean(
 
     try:
         status = subprocess.run(
-            ["git", "-C", str(resolved_path), "status", "--porcelain"],
+            ["git", "-C", str(resolved_path), "status", "--porcelain=v1", "-z", "-uall"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -323,18 +323,40 @@ def prune_worktree_if_clean(
             kind=WorktreePruneKind.FAILED,
             reason=_redact(f"git status failed: {status.stderr.strip()}"),
         )
-    if status.stdout.strip():
-        return WorktreePruneResult(
-            kind=WorktreePruneKind.SKIPPED,
-            reason=(
-                f"worktree {worktree_path} has uncommitted or untracked changes; "
-                "refusing to prune"
-            ),
-        )
+    for entry in status.stdout.split("\0"):
+        if not entry:
+            continue
+        if len(entry) < 4 or entry[2] != " ":
+            unsafe_change = True
+        else:
+            status_code = entry[:2]
+            path_parts = entry[3:].split("/")
+            unsafe_change = (
+                status_code != "??"
+                or len(path_parts) < 2
+                or path_parts[0] != ".ai"
+                or any(part in {"", ".", ".."} for part in path_parts)
+            )
+        if unsafe_change:
+            return WorktreePruneResult(
+                kind=WorktreePruneKind.SKIPPED,
+                reason=(
+                    f"worktree {worktree_path} has uncommitted or untracked changes; "
+                    "refusing to prune"
+                ),
+            )
 
     try:
         removal = subprocess.run(
-            ["git", "-C", str(repo_root), "worktree", "remove", str(resolved_path)],
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "worktree",
+                "remove",
+                "--force",
+                str(resolved_path),
+            ],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
