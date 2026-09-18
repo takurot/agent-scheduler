@@ -81,6 +81,8 @@ per isolated git worktree. Standard workflow for an assistant driving subsched o
    individual task progress (handoffs, recent commits).
 5. subsched_resolve_needs_human -- after diagnosing and fixing the root cause in a
    NEEDS_HUMAN task's worktree, reset it back to READY.
+6. subsched_reset_task -- restore a deliberately CANCELLED task to READY while preserving
+   its worktree and handoff.
 
 Safety invariants: native worker execution and billing confirmation default to False and must
 be opted into explicitly (fail closed); subsched_cancel_task always preserves the task's
@@ -435,6 +437,34 @@ def cancel_task(issue_number: int, repository_path: str | None = None) -> dict[s
     }
 
 
+def reset_task(issue_number: int, repository_path: str | None = None) -> dict[str, Any]:
+    """Restore one CANCELLED task to READY while preserving its worktree and handoff."""
+    store = _store_for(repository_path)
+    try:
+        with store.lock():
+            tasks = store.load_tasks()
+            matches = [task for task in tasks if task.issue_number == issue_number]
+            if not matches:
+                raise McpToolError(f"issue #{issue_number} is not in scheduler state")
+            task = matches[0]
+            if task.status is not TaskState.CANCELLED:
+                raise McpToolError(
+                    f"issue #{issue_number} is not CANCELLED (status: {task.status.value})"
+                )
+            replacement = task.transition(TaskState.READY)
+            updated = tuple(
+                replacement if item.issue_number == issue_number else item for item in tasks
+            )
+            store.save_tasks(updated, paused=store.is_paused())
+    except (SchedulerLockError, StateCorruptionError, ValueError) as error:
+        raise McpToolError(f"task reset failed: {error}") from error
+    return {
+        "issue_number": issue_number,
+        "status": TaskState.READY.value,
+        "worktree_preserved": True,
+    }
+
+
 def control(
     action: Literal["pause", "resume"], repository_path: str | None = None
 ) -> dict[str, Any]:
@@ -755,6 +785,19 @@ def build_server(options: ServerOptions) -> Any:
         repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
     ) -> dict[str, Any]:
         return cancel_task(issue_number, _default(repository_path))
+
+    @server.tool(
+        name="subsched_reset_task",
+        description=(
+            "Restore one CANCELLED task to READY while preserving its worktree and handoff. "
+            "Rejects tasks in every other state."
+        ),
+    )
+    def _reset_task(
+        issue_number: int = Field(description="GitHub issue number of the cancelled task."),
+        repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
+    ) -> dict[str, Any]:
+        return reset_task(issue_number, _default(repository_path))
 
     @server.tool(
         name="subsched_control",

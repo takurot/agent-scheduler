@@ -505,6 +505,11 @@ CANCELLED
 COMPLETE
 ```
 
+`CANCELLED`は通常のdiscoveryではterminalな履歴として保持する。ただしoperatorが明示的に
+`subsched uncancel <issue>`、`subsched_reset_task`、または数値を指定した
+`subsched run --issues <issue>[,...]`を実行した場合に限り、worktreeとhandoffを保持したまま
+`READY`へ戻せる。`all-open`やlabelによる暗黙のdiscoveryはキャンセルを取り消さない。
+
 `workflow.mode: multi-stage`（デフォルトは`standard`、既存の単一パス実行）を opt-in した場合、
 `DISPATCHED`から`IN_PROGRESS`へ進む前に計画レビューゲートを通る：
 
@@ -2331,6 +2336,17 @@ Issue #103だけ停止。
 
 worktreeは削除せず保持する。
 
+キャンセルを取り消す場合：
+
+```bash
+subsched uncancel 103
+```
+
+`CANCELLED`から`READY`へのみ遷移し、worktreeとhandoffは保持する。対象が`CANCELLED`以外なら
+fail-closedで拒否する。また、明示的な数値指定の`subsched run --issues 103`は、GitHub上で
+openかつeligibleな既存`CANCELLED` taskを同様に`READY`へ戻す。`--issues all-open`やlabel選択は
+暗黙に復帰させない。
+
 ---
 
 # 58. Bernstein Compatibility Spike
@@ -3195,7 +3211,7 @@ CLIとの並行実行時にも競合やデータ破損を完全に防止する�
 ## 5. ツール記述とサーバーインストラクション (#270)
 
 `FastMCP("subsched", instructions=SERVER_INSTRUCTIONS)` により、`init_repo` → `queue_issues` →
-`trigger_dispatch` → `get_status`/`inspect_task` → `resolve_needs_human` という標準的な
+`trigger_dispatch` → `get_status`/`inspect_task` → `resolve_needs_human` / `reset_task` という標準的な
 オーケストレーションワークフローをサーバーレベルの `instructions` として提供する。
 また、各 `@server.tool()` は空文字列ではなく意味のある `description` を明示し、各パラメータも
 `pydantic.Field(description=...)` により期待される形式（例: `issues="123,124"` や
@@ -3206,7 +3222,7 @@ CLIとの並行実行時にも競合やデータ破損を完全に防止する�
 
 ## 6. 公開仕様
 
-### Tools (10個)
+### Tools (11個)
 1. `subsched_get_status`: キュー状態内訳、タスク一覧、プロバイダークールダウン状態の取得。
 2. `subsched_inspect_task`: 指定Issueの詳細情報、パース済みセマンティックハンドオフ、直近コミットの取得。
 3. `subsched_queue_issues`: GitHubからのIssue自動検出およびキュー登録（`dry_run` 対応）。
@@ -3214,9 +3230,10 @@ CLIとの並行実行時にも競合やデータ破損を完全に防止する�
 5. `subsched_init_repo`: リポジトリのスタック検出および `subsched.yaml` / `AGENTS.md` / `CLAUDE.md` のスキャフォールド。
 6. `subsched_resolve_needs_human`: `NEEDS_HUMAN` 状態のタスクを `READY` に遷移。
 7. `subsched_cancel_task`: ワークツリーおよびハンドオフファイルを温存したままタスクを `CANCELLED` に遷移。
-8. `subsched_control`: スケジューラーの新規ディスパッチの一時停止 (`pause`) / 再開 (`resume`)。
-9. `subsched_get_metrics`: 生産性、信頼性、キャパシティ指標の集計取得。
-10. `subsched_reconcile`（#277）: `READY_FOR_REVIEW` タスクを実際のPR状態と突き合わせ、mergeされたPRを`COMPLETE`へ、mergeされずcloseされたPRを`NEEDS_HUMAN`へ遷移させる（`dry_run` 対応、`gh`エラー時はfail-closed）。ワークツリーのpruneはCLI (`subsched reconcile --prune-worktrees`) 専用で、このツールからは行わない。
+8. `subsched_reset_task`: `CANCELLED` taskだけをworktreeとhandoffを温存したまま`READY`へ復帰。
+9. `subsched_control`: スケジューラーの新規ディスパッチの一時停止 (`pause`) / 再開 (`resume`)。
+10. `subsched_get_metrics`: 生産性、信頼性、キャパシティ指標の集計取得。
+11. `subsched_reconcile`（#277）: `READY_FOR_REVIEW` タスクを実際のPR状態と突き合わせ、mergeされたPRを`COMPLETE`へ、mergeされずcloseされたPRを`NEEDS_HUMAN`へ遷移させる（`dry_run` 対応、`gh`エラー時はfail-closed）。ワークツリーのpruneはCLI (`subsched reconcile --prune-worktrees`) 専用で、このツールからは行わない。
 
 ### Resources (4個)
 1. `subsched://queue`: タスク一覧および一時停止状態のリアルタイムJSONスナップショット。

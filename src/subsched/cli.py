@@ -44,7 +44,12 @@ from subsched.models import Capacity, TaskState
 from subsched.preflight import validate_native_preflight
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler
-from subsched.selection import ResolvedIntent, discover_selected_issues, resolve_intent
+from subsched.selection import (
+    ResolvedIntent,
+    discover_selected_issues,
+    parse_issue_numbers,
+    resolve_intent,
+)
 from subsched.storage import (
     JsonStateStore,
     SchedulerLockError,
@@ -516,10 +521,16 @@ def run(
         and getattr(cfg.github, "include_labels", ()) == ()
     )
     try:
+        reactivate_cancelled = (
+            frozenset(parse_issue_numbers(issues))
+            if issues is not None and issues != "all-open"
+            else frozenset()
+        )
         scheduler.discover(
             discovered,
             exclude_labels=exclude_labels,
             snapshot_complete=is_complete_snapshot,
+            reactivate_cancelled=reactivate_cancelled,
         )
     except ValueError as error:
         typer.echo(f"Task limit exceeded ({cfg.execution.max_tasks_per_run})", err=True)
@@ -531,6 +542,8 @@ def run(
     additions_count = len(scheduler.tasks) - before_count
     mode_suffix = " (dry-run)" if dry_run else ""
     typer.echo(f"{additions_count} issue(s) discovered and persisted{mode_suffix}")
+    if scheduler.reactivated_cancelled:
+        typer.echo(f"{len(scheduler.reactivated_cancelled)} cancelled issue(s) restored to READY")
     for note_issue, note_message in scheduler.discovery_notes:
         typer.echo(f"  #{note_issue}: {note_message}")
 
@@ -944,6 +957,35 @@ def cancel(ctx: typer.Context, issue: Annotated[int, typer.Argument(min=1)]) -> 
         typer.echo(f"State error: {error}", err=True)
         raise typer.Exit(1) from error
     typer.echo(f"Issue #{issue} cancelled; worktree was preserved")
+
+
+@app.command()
+def uncancel(ctx: typer.Context, issue: Annotated[int, typer.Argument(min=1)]) -> None:
+    """Restore one cancelled task to READY while preserving its files and handoff."""
+    context: Context = ctx.obj
+    try:
+        with context.store.lock():
+            tasks = context.store.load_tasks()
+            matches = tuple(task for task in tasks if task.issue_number == issue)
+            if not matches:
+                typer.echo(f"Issue #{issue} is not in scheduler state", err=True)
+                raise typer.Exit(1)
+            task = matches[0]
+            if task.status is not TaskState.CANCELLED:
+                typer.echo(
+                    f"Issue #{issue} is not cancelled (status: {task.status.value})",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            replacement = task.transition(TaskState.READY)
+            updated = tuple(
+                replacement if item.issue_number == issue else item for item in tasks
+            )
+            context.store.save_tasks(updated, paused=context.store.is_paused())
+    except (SchedulerLockError, StateCorruptionError) as error:
+        typer.echo(f"State error: {error}", err=True)
+        raise typer.Exit(1) from error
+    typer.echo(f"Issue #{issue} restored to READY; worktree was preserved")
 
 
 @app.command()

@@ -261,7 +261,7 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     TaskState.BLOCKED: frozenset({TaskState.READY, TaskState.NEEDS_HUMAN, TaskState.CANCELLED}),
     TaskState.NEEDS_HUMAN: frozenset({TaskState.READY, TaskState.CANCELLED}),
     TaskState.FAILED: frozenset(),
-    TaskState.CANCELLED: frozenset(),
+    TaskState.CANCELLED: frozenset({TaskState.READY}),
     TaskState.COMPLETE: frozenset(),
 }
 

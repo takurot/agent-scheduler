@@ -292,7 +292,7 @@ You can connect `subsched` to your preferred AI coding assistant using either `u
 > If `agent-scheduler[mcp]` is installed in your active environment or via `pipx` / `uv tool install`, you can replace `"command": "uvx", "args": ["--from", "agent-scheduler[mcp]", "subsched", "mcp"]` with `"command": "subsched", "args": ["mcp"]`. To target a specific repository path when running outside its root, pass `"--repository", "/path/to/repo"` before `"mcp"` in the argument list.
 
 #### Exposed Tools, Resources, and Prompts
-- **Tools**: `subsched_get_status`, `subsched_inspect_task`, `subsched_queue_issues`, `subsched_trigger_dispatch` (non-blocking background dispatch), `subsched_init_repo`, `subsched_resolve_needs_human`, `subsched_cancel_task`, `subsched_control`, `subsched_get_metrics`. All tools accept an optional `repository_path`.
+- **Tools**: `subsched_get_status`, `subsched_inspect_task`, `subsched_queue_issues`, `subsched_trigger_dispatch` (non-blocking background dispatch), `subsched_init_repo`, `subsched_resolve_needs_human`, `subsched_cancel_task`, `subsched_reset_task`, `subsched_control`, `subsched_get_metrics`, `subsched_reconcile`. All tools accept an optional `repository_path`.
 
 `subsched_queue_issues` requires a valid, regular repository-root `subsched.yaml`.
 Selection precedence is explicit `issues` > explicit `label` > configured
@@ -736,6 +736,7 @@ See this repository's own [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) 
 | `subsched pause` | Pause task execution cleanly after current step |
 | `subsched resume` | Resume scheduler execution from paused state |
 | `subsched cancel <id>` | Cancel a task and preserve its worktree files |
+| `subsched uncancel <id>` | Restore a `CANCELLED` task to `READY` and preserve its worktree files |
 | `subsched mcp` | Run subsched as an MCP server over stdio (`agent-scheduler[mcp]`) |
 
 ---
@@ -762,7 +763,7 @@ Work is never lost or discarded:
 
 ### 4. Can an external orchestrator (such as Gemini, an LLM controller, or a CI script) assign and monitor tasks?
 Yes. `subsched` is built with a deterministic CLI and durable JSON state, making it ideal to be driven by higher-level orchestrators (such as Gemini, autonomous supervisor agents, or CI pipelines):
-- **Command & Control**: Orchestrators can drive `subsched` via standard commands: `subsched run --issues <id>` to queue or run specific issues, `subsched pause` / `subsched resume` to control execution flow, and `subsched cancel <id>` to abort specific tasks safely.
+- **Command & Control**: Orchestrators can drive `subsched` via standard commands: `subsched run --issues <id>` to queue or run specific issues (and explicitly restore a matching `CANCELLED` task), `subsched pause` / `subsched resume` to control execution flow, `subsched cancel <id>` to abort specific tasks safely, and `subsched uncancel <id>` to return one cancelled task to `READY`.
 - **State & Health Inspection**: The scheduler's state is stored durably in `.ai/scheduler.json`. Orchestrators can query queue status with `subsched status --verbose` or export machine-readable metrics via `subsched metrics --json`.
 - **Fail-Closed Escalation for Supervisory AI**: If an unrecoverable event occurs (such as Git rebase merge conflicts, ambiguous existing PR matches, unexpected agent termination, or an explicit `NEEDS_HUMAN` signal from a native worker requesting design approval or operator decision), `subsched` transitions the task to `NEEDS_HUMAN` and records the exact validated reason code in `needs_human_reason`. An external AI orchestrator can inspect this field, triage the root cause, and either remediate the issue programmatically or notify a human operator.
 
