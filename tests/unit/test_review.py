@@ -117,11 +117,58 @@ def test_modified_scaffold_files_are_flagged(tmp_path: Path) -> None:
     assert worktree_touched_unexpected_paths(tmp_path, issue_number=1, round_number=1) is True
 
 
-def test_scaffold_files_for_other_issues_are_flagged(tmp_path: Path) -> None:
-    # Scaffold file for issue 2 should be flagged when running review for issue 1
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        ".ai/codex-output.schema.json",
+        ".ai/plan-review-output.schema.json",
+        ".ai/plans/1.md",
+    ),
+)
+def test_untracked_generated_agent_files_are_not_flagged(
+    tmp_path: Path, relative_path: str
+) -> None:
     _init_repo(tmp_path)
-    (tmp_path / ".ai" / "tasks").mkdir(parents=True, exist_ok=True)
-    (tmp_path / ".ai" / "tasks" / "2.md").write_text("# Task 2\n", encoding="utf-8")
+    generated_file = tmp_path / relative_path
+    generated_file.parent.mkdir(parents=True, exist_ok=True)
+    generated_file.write_text("generated\n", encoding="utf-8")
+    _write_report(tmp_path, issue_number=1, round_number=1)
+
+    assert worktree_touched_unexpected_paths(tmp_path, issue_number=1, round_number=1) is False
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        ".ai/codex-output.schema.json",
+        ".ai/plan-review-output.schema.json",
+        ".ai/plans/1.md",
+    ),
+)
+def test_modified_generated_agent_files_are_flagged(
+    tmp_path: Path, relative_path: str
+) -> None:
+    _init_repo(tmp_path)
+    generated_file = tmp_path / relative_path
+    generated_file.parent.mkdir(parents=True, exist_ok=True)
+    generated_file.write_text("generated\n", encoding="utf-8")
+    subprocess.run(["git", "add", relative_path], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "commit generated file"], cwd=tmp_path, check=True)
+
+    _write_report(tmp_path, issue_number=1, round_number=1)
+    generated_file.write_text("modified\n", encoding="utf-8")
+
+    assert worktree_touched_unexpected_paths(tmp_path, issue_number=1, round_number=1) is True
+
+
+@pytest.mark.parametrize("relative_path", (".ai/tasks/2.md", ".ai/plans/2.md"))
+def test_generated_files_for_other_issues_are_flagged(
+    tmp_path: Path, relative_path: str
+) -> None:
+    _init_repo(tmp_path)
+    generated_file = tmp_path / relative_path
+    generated_file.parent.mkdir(parents=True, exist_ok=True)
+    generated_file.write_text("generated\n", encoding="utf-8")
     _write_report(tmp_path, issue_number=1, round_number=1)
 
     assert worktree_touched_unexpected_paths(tmp_path, issue_number=1, round_number=1) is True
