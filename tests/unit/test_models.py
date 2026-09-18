@@ -79,6 +79,22 @@ def test_in_progress_cannot_transition_directly_to_complete() -> None:
         running.transition(TaskState.COMPLETE)
 
 
+def test_cancelled_task_can_transition_back_to_ready() -> None:
+    cancelled = Task(
+        task_id="github-1",
+        issue_number=1,
+        title="one",
+        labels=(),
+        status=TaskState.CANCELLED,
+        worktree="/tmp/preserved-worktree",
+    )
+
+    restored = cancelled.transition(TaskState.READY)
+
+    assert restored.status is TaskState.READY
+    assert restored.worktree == cancelled.worktree
+
+
 @pytest.mark.parametrize("planning_state", (TaskState.PLANNING, TaskState.PLAN_REVIEW))
 def test_planning_states_can_wait_for_capacity(planning_state: TaskState) -> None:
     task = Task(

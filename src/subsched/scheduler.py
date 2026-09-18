@@ -207,6 +207,7 @@ class Scheduler:
         self.ci_checker = ci_checker
         self.merged_pr_checker = merged_pr_checker
         self.discovery_notes: tuple[tuple[int, str], ...] = ()
+        self.reactivated_cancelled: tuple[int, ...] = ()
         self.verification_commands = verification_commands
         if verification_timeout_seconds <= 0:
             raise ValueError("verification_timeout_seconds must be positive")
@@ -691,6 +692,7 @@ class Scheduler:
         *,
         exclude_labels: frozenset[str] = frozenset(),
         snapshot_complete: bool = False,
+        reactivate_cancelled: frozenset[int] = frozenset(),
     ) -> None:
         issues_list = list(issues)
         issues_by_number = {issue.number: issue for issue in issues_list}
@@ -698,8 +700,22 @@ class Scheduler:
 
         # #185: Reconcile persisted non-terminal tasks against current GitHub issue state
         reconciled_tasks: list[Task] = []
+        reactivated: list[int] = []
         for task in self.tasks:
-            # Terminal states (COMPLETE, FAILED, CANCELLED) are immutable historical records
+            if task.status is TaskState.CANCELLED and task.issue_number in reactivate_cancelled:
+                issue = issues_by_number.get(task.issue_number)
+                if issue is not None and not excluded_issue_labels(issue, exclude_labels):
+                    task = replace(
+                        task,
+                        title=issue.title,
+                        description=issue.body,
+                        labels=issue.labels,
+                        dependencies=parse_dependencies(issue.body),
+                    ).transition(TaskState.READY)
+                    reactivated.append(task.issue_number)
+
+            # Terminal states remain immutable unless an explicit numeric selection above
+            # requested CANCELLED recovery.
             if task.status in (TaskState.COMPLETE, TaskState.FAILED, TaskState.CANCELLED):
                 reconciled_tasks.append(task)
                 continue
@@ -800,6 +816,7 @@ class Scheduler:
             additions.append(Task.from_issue(issue))
 
         self.discovery_notes = tuple(notes)
+        self.reactivated_cancelled = tuple(reactivated)
         if len(new_queue.tasks) + len(additions) > self.max_tasks:
             raise ValueError(f"task limit exceeded ({self.max_tasks})")
         new_queue = new_queue.append(additions)

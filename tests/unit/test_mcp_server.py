@@ -30,6 +30,7 @@ from subsched.mcp_server import (
     inspect_task,
     queue_issues,
     reconcile_tasks,
+    reset_task,
     resolve_needs_human,
     resolve_repository,
     trigger_dispatch,
@@ -514,6 +515,36 @@ def test_cancel_task_rejects_invalid_transition(tmp_path: Path) -> None:
         cancel_task(1, repository_path=str(tmp_path))
 
 
+# --- reset_task ------------------------------------------------------------------
+
+
+def test_reset_task_restores_cancelled_task_and_preserves_worktree(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    worktree = str(tmp_path / ".ai" / "worktrees" / "issue-1")
+    store.save_tasks((_task(1, TaskState.CANCELLED, worktree=worktree),))
+
+    result = reset_task(1, repository_path=str(tmp_path))
+
+    assert result == {
+        "issue_number": 1,
+        "status": "READY",
+        "worktree_preserved": True,
+    }
+    restored = store.load_tasks()[0]
+    assert restored.status is TaskState.READY
+    assert restored.worktree == worktree
+
+
+def test_reset_task_rejects_non_cancelled_task(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    store.save_tasks((_task(1, TaskState.READY),))
+
+    with pytest.raises(McpToolError, match="not CANCELLED"):
+        reset_task(1, repository_path=str(tmp_path))
+
+
 # --- control -----------------------------------------------------------------
 
 
@@ -755,6 +786,7 @@ def test_build_server_registers_all_tools_resources_and_prompts(tmp_path: Path) 
         "subsched_init_repo",
         "subsched_resolve_needs_human",
         "subsched_cancel_task",
+        "subsched_reset_task",
         "subsched_control",
         "subsched_get_metrics",
         "subsched_reconcile",

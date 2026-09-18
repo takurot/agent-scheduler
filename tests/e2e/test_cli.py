@@ -592,6 +592,103 @@ def test_pause_resume_and_cancel_preserve_worktree_state(tmp_path: Path) -> None
     assert "CANCELLED" in invoke(tmp_path, "status").output
 
 
+def test_uncancel_restores_cancelled_task_and_preserves_worktree(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    store.save_tasks(
+        (
+            Task(
+                task_id="github-7",
+                issue_number=7,
+                title="Issue 7",
+                labels=(),
+                status=TaskState.CANCELLED,
+                worktree=str(tmp_path / ".ai" / "worktrees" / "issue-7"),
+            ),
+        )
+    )
+
+    result = invoke(tmp_path, "uncancel", "7")
+
+    assert result.exit_code == 0, result.output
+    restored = store.load_tasks()[0]
+    assert restored.status is TaskState.READY
+    assert restored.worktree == str(tmp_path / ".ai" / "worktrees" / "issue-7")
+
+
+def test_uncancel_rejects_non_cancelled_task(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    store.save_tasks(
+        (
+            Task(
+                task_id="github-7",
+                issue_number=7,
+                title="Issue 7",
+                labels=(),
+                status=TaskState.READY,
+            ),
+        )
+    )
+
+    result = invoke(tmp_path, "uncancel", "7")
+
+    assert result.exit_code != 0
+    assert "not cancelled" in result.output.lower()
+
+
+def test_explicit_issue_run_restores_cancelled_task(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    store.save_tasks(
+        (
+            Task(
+                task_id="github-7",
+                issue_number=7,
+                title="Issue 7",
+                labels=(),
+                status=TaskState.CANCELLED,
+            ),
+        )
+    )
+
+    result = invoke(tmp_path, "run", "--repo", "owner/project", "--issues", "7", "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert store.load_tasks()[0].status is TaskState.READY
+    assert "1 cancelled issue(s) restored" in result.output
+
+
+def test_all_open_run_does_not_restore_cancelled_task(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    store.save_tasks(
+        (
+            Task(
+                task_id="github-7",
+                issue_number=7,
+                title="Issue 7",
+                labels=(),
+                status=TaskState.CANCELLED,
+            ),
+        )
+    )
+
+    result = invoke(
+        tmp_path,
+        "run",
+        "--repo",
+        "owner/project",
+        "--issues",
+        "all-open",
+        "--dry-run",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert store.load_tasks()[0].status is TaskState.CANCELLED
+    assert "cancelled issue(s) restored" not in result.output
+
+
 def test_cancel_non_existent_issue(tmp_path: Path) -> None:
     store = JsonStateStore(tmp_path)
     store.init_directories()
