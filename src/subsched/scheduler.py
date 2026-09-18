@@ -1213,6 +1213,21 @@ class Scheduler:
                 )
 
             dispatch_started = time.monotonic()
+            pre_dispatch_handoff_hash: str | None = None
+            if running.worktree is not None:
+                handoff_path = (
+                    Path(running.worktree) / ".ai" / "handoffs" / f"{running.issue_number}.md"
+                )
+                if handoff_path.is_file() and not handoff_path.is_symlink():
+                    with suppress(Exception):
+                        from subsched.handoff import compute_substantive_handoff_hash
+
+                        pre_dispatch_handoff_hash = compute_substantive_handoff_hash(
+                            handoff_path.read_text(encoding="utf-8")
+                        )
+                if pre_dispatch_head is None:
+                    pre_dispatch_head = git_head_commit(Path(running.worktree))
+
             # #164: record which process is executing this dispatch *before* calling
             # the (synchronous, blocking) worker, so that if this Scheduler process
             # itself dies mid-dispatch, a future restart can tell the task was really
@@ -1276,7 +1291,13 @@ class Scheduler:
                 and running.dispatch_status is not TaskState.PR_REVIEW
             ):
                 escalated = self._enforce_handoff_freshness(
-                    running, agent, current, result.kind, reason_code=result.reason_code
+                    running,
+                    agent,
+                    current,
+                    result.kind,
+                    reason_code=result.reason_code,
+                    pre_dispatch_handoff_hash=pre_dispatch_handoff_hash,
+                    pre_dispatch_head=pre_dispatch_head,
                 )
                 if escalated is not None:
                     self.queue = self.queue.replace(escalated)
@@ -1729,26 +1750,49 @@ class Scheduler:
         result_kind: AgentResultKind,
         *,
         reason_code: str | None = None,
+        pre_dispatch_handoff_hash: str | None = None,
+        pre_dispatch_head: str | None = None,
     ) -> Task | None:
         """#145: readback-validate the handoff at every worker-end boundary (normal,
         capacity, timeout, failure -- called unconditionally right after worker.run()
         returns, before any outcome-specific handling) so `handoff.continuous` has an
         actual runtime-observable meaning instead of being a best-effort natural-language
         instruction the Agent may or may not follow. A stale/invalid handoff is still
-        allowed to continue if a mechanical checkpoint (captured by the Scheduler itself,
-        not self-reported by the Agent) proves the same or newer progress happened;
-        otherwise the task is escalated directly to NEEDS_HUMAN -- except for capacity/
-        timeout outcomes (see _HANDOFF_NON_ESCALATING_KINDS), which are logged but never
-        forced to escalate, since those are externally-imposed interruptions rather than
-        Agent non-compliance. Returns the escalated Task, or None if the caller should
-        proceed with its normal result handling.
+        allowed to continue if substantive progress was made (#365) or if a mechanical
+        checkpoint proves the same or newer progress happened; otherwise the task is
+        escalated directly to NEEDS_HUMAN -- except for capacity/timeout outcomes
+        (see _HANDOFF_NON_ESCALATING_KINDS), which are logged but never forced to escalate,
+        since those are externally-imposed interruptions rather than Agent non-compliance.
+        Returns the escalated Task, or None if the caller should proceed with its normal
+        result handling.
         """
         assert task.worktree is not None
         from subsched.handoff import can_recover_from_checkpoint, readback_handoff
 
         worktree_dir = Path(task.worktree)
-        readback = readback_handoff(worktree_dir, task, dispatched_at=dispatched_at)
+        current_now = self.clock.now() if hasattr(self, "clock") else None
+        readback = readback_handoff(
+            worktree_dir,
+            task,
+            dispatched_at=dispatched_at,
+            pre_dispatch_handoff_hash=pre_dispatch_handoff_hash,
+            pre_dispatch_head=pre_dispatch_head,
+            now=current_now,
+        )
         if readback.ok:
+            if readback.repaired and self.structured_logger is not None:
+                self.structured_logger.log(
+                    "handoff_readback",
+                    level="INFO",
+                    issue_number=task.issue_number,
+                    agent=agent,
+                    task_id=task.task_id,
+                    message="handoff timestamp auto-repaired due to verified progress",
+                    data={
+                        "repaired": True,
+                        "result_kind": result_kind.value,
+                    },
+                )
             return None
         if can_recover_from_checkpoint(worktree_dir, task, dispatched_at=dispatched_at):
             if self.structured_logger is not None:

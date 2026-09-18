@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from subsched.models import Issue, Task
-from subsched.storage import secure_directory
+from subsched.storage import atomic_write_secure_bytes, secure_directory
 
 REQUIRED_HANDOFF_SECTIONS = (
     "## Goal",
@@ -90,6 +91,7 @@ class HandoffReadbackResult:
 
     ok: bool
     reason: str = ""
+    repaired: bool = False
 
 
 def _parse_handoff_timestamp(raw_timestamp: str) -> datetime | None:
@@ -100,18 +102,54 @@ def _parse_handoff_timestamp(raw_timestamp: str) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
+def strip_handoff_timestamp(content: str) -> str:
+    """Return handoff content with the ## Timestamp section removed,
+    for comparing substantive content changes."""
+    pattern = re.compile(r"(##\s+Timestamp\s*\n+)(.*?)(?=(\n## |\Z))", re.DOTALL)
+    return pattern.sub("", content).strip()
+
+
+def compute_substantive_handoff_hash(content: str) -> str:
+    """Compute sha256 hash of handoff content excluding the ## Timestamp section."""
+    substantive = strip_handoff_timestamp(content)
+    return hashlib.sha256(substantive.encode("utf-8")).hexdigest()
+
+
+def replace_handoff_timestamp(content: str, new_timestamp: str) -> str:
+    """Replace the ## Timestamp section content with new_timestamp."""
+    pattern = re.compile(r"(##\s+Timestamp\s*\n+)(.*?)(?=(\n## |\Z))", re.DOTALL)
+    if pattern.search(content):
+        return pattern.sub(lambda m: f"{m.group(1)}{new_timestamp}\n", content)
+    return f"{content.rstrip()}\n\n## Timestamp\n\n{new_timestamp}\n"
+
+
 def readback_handoff(
-    worktree_dir: Path, task: Task, *, dispatched_at: datetime
+    worktree_dir: Path,
+    task: Task,
+    *,
+    dispatched_at: datetime,
+    pre_dispatch_handoff_hash: str | None = None,
+    pre_dispatch_head: str | None = None,
+    current_head: str | None = None,
+    auto_repair: bool = True,
+    now: datetime | None = None,
 ) -> HandoffReadbackResult:
     """Validate the handoff file after a worker invocation ends (#145): schema, Issue
     identity, and timestamp advancement since dispatch. Meant to be called at every
     worker-end boundary (normal completion, capacity event, timeout, failure) so
     `handoff.continuous` has an actual runtime-observable meaning instead of being a
     best-effort natural-language instruction the Agent may or may not follow.
+
+    If the agent omitted advancing ## Timestamp or wrote a malformed timestamp, but
+    demonstrated substantive progress (#365) via content changes or new git commits,
+    the timestamp is auto-repaired to `now` and accepted instead of escalating to
+    NEEDS_HUMAN.
     """
     handoff_file = worktree_dir / ".ai" / "handoffs" / f"{task.issue_number}.md"
-    if not handoff_file.is_file():
-        return HandoffReadbackResult(False, "handoff file missing after worker invocation")
+    if not handoff_file.is_file() or handoff_file.is_symlink():
+        return HandoffReadbackResult(
+            False, "handoff file missing or symlink after worker invocation"
+        )
     try:
         content = handoff_file.read_text(encoding="utf-8")
     except OSError as error:
@@ -130,17 +168,50 @@ def readback_handoff(
         )
 
     parsed_ts = _parse_handoff_timestamp(parsed.timestamp)
+    if parsed_ts is not None and parsed_ts > dispatched_at:
+        return HandoffReadbackResult(True)
+
+    # #365: Check for substantive progress (content hash change or new git commit)
+    has_content_progress = False
+    if pre_dispatch_handoff_hash is not None:
+        current_hash = compute_substantive_handoff_hash(content)
+        if current_hash != pre_dispatch_handoff_hash:
+            has_content_progress = True
+
+    has_commit_progress = False
+    if pre_dispatch_head is not None:
+        if current_head is None:
+            from subsched.review import git_head_commit
+
+            current_head = git_head_commit(worktree_dir)
+        if current_head is not None and current_head != pre_dispatch_head:
+            has_commit_progress = True
+
+    if (has_content_progress or has_commit_progress) and auto_repair:
+        effective_now = now or datetime.now(UTC)
+        if effective_now <= dispatched_at:
+            effective_now = dispatched_at + timedelta(seconds=1)
+        repair_ts_str = effective_now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        repaired_content = replace_handoff_timestamp(content, repair_ts_str)
+        try:
+            atomic_write_secure_bytes(handoff_file, repaired_content.encode("utf-8"))
+        except OSError as error:
+            return HandoffReadbackResult(
+                False, f"failed to auto-repair handoff timestamp: {error}"
+            )
+        return HandoffReadbackResult(True, repaired=True)
+
+    # Fail closed on true stale handoff (#145)
     if parsed_ts is None:
         return HandoffReadbackResult(
             False, f"handoff timestamp is not a valid ISO 8601 value: {parsed.timestamp!r}"
         )
-    if parsed_ts <= dispatched_at:
-        return HandoffReadbackResult(
-            False,
-            f"handoff timestamp ({parsed_ts.isoformat()}) did not advance past dispatch "
-            f"time ({dispatched_at.isoformat()})",
-        )
-    return HandoffReadbackResult(True)
+    return HandoffReadbackResult(
+        False,
+        f"handoff timestamp ({parsed_ts.isoformat()}) did not advance past dispatch "
+        f"time ({dispatched_at.isoformat()})",
+    )
+
 
 
 def can_recover_from_checkpoint(

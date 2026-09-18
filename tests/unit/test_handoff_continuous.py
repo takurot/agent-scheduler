@@ -189,6 +189,27 @@ def test_handoff_continuous_proceeds_normally_with_freshly_updated_handoff(
     assert task.status is TaskState.COMPLETE
 
 
+def test_handoff_continuous_does_not_escalate_when_agent_updated_content_but_forgot_timestamp(
+    tmp_path: Path,
+) -> None:
+    """#365: when an agent updates handoff content (e.g. ## Completed) but forgets to
+    advance ## Timestamp past dispatch time, scheduler should recognize substantive
+    progress, auto-repair the timestamp, and proceed without escalating to NEEDS_HUMAN."""
+    far_future = datetime(2030, 1, 1, tzinfo=UTC)
+    worker = _ScriptedHandoffWorker(
+        {(101, "claude"): (AgentResult(AgentResultKind.PASS),)},
+        update_handoff_at=far_future,
+    )
+    scheduler = _scheduler(tmp_path, worker, handoff_continuous=True)
+    scheduler.discover([Issue(number=101, title="Task 101")])
+
+    scheduler.tick([_available("claude", observed_at=far_future)], now=far_future)
+
+    task = scheduler.tasks[0]
+    assert task.status is not TaskState.NEEDS_HUMAN
+    assert task.status is TaskState.COMPLETE
+
+
 def test_handoff_continuous_does_not_escalate_capacity_session_on_stale_handoff(
     tmp_path: Path,
 ) -> None:
