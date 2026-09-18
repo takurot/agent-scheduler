@@ -553,3 +553,33 @@ def test_parse_claude_result_plan_review_malformed_verdict() -> None:
     assert res.kind is AgentResultKind.NEEDS_HUMAN
     assert res.reason_code == "instruction_conflict"
     assert "malformed plan review verdict" in res.output
+
+
+def test_parse_claude_result_plan_review_markdown_code_fence() -> None:
+    from subsched.plan_review import PlanVerdict
+
+    verdict_text = (
+        "```json\n"
+        "{\n"
+        '  "verdict": "APPROVE",\n'
+        '  "summary": "Implementation plan looks solid",\n'
+        '  "findings": []\n'
+        "}\n"
+        "```"
+    )
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 1,
+            "result": verdict_text,
+        }
+    )
+    outcome = ClaudeProcessOutcome(exit_code=0, stdout=payload)
+    res = parse_claude_result(outcome, plan_review=True)
+    assert res.kind is AgentResultKind.PASS
+    assert res.output == "claude completed"
+    assert res.plan_verdict == PlanVerdict(
+        verdict="APPROVE", summary="Implementation plan looks solid", findings=()
+    )

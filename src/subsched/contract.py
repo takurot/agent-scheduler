@@ -275,7 +275,7 @@ def build_plan_review_prompt(task: Task) -> str:
         "plan for style, formatting, or speculative improvements it doesn't need.",
         "",
         "Respond with ONLY the following JSON object as your final output, and nothing",
-        "else -- no prose before or after it:",
+        "else -- no prose before or after it, and do not wrap it in markdown code fences (```):",
         '{"verdict": "APPROVE" | "REQUEST_CHANGES", "summary": "<one paragraph>",',
         ' "findings": ["<finding 1>", "..."]}',
         "Use REQUEST_CHANGES only when a genuine correctness, test-coverage, or",

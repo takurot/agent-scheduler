@@ -1481,3 +1481,24 @@ def test_parse_codex_jsonl_plan_review_rejects_malformed_verdict() -> None:
     assert res.kind is AgentResultKind.NEEDS_HUMAN
     assert res.reason_code == "instruction_conflict"
     assert "malformed plan review verdict" in res.output
+
+
+def test_parse_codex_jsonl_plan_review_markdown_code_fence() -> None:
+    from subsched.plan_review import PlanVerdict
+
+    verdict_text = (
+        "```json\n"
+        "{\n"
+        '  "verdict": "APPROVE",\n'
+        '  "summary": "Implementation plan looks solid",\n'
+        '  "findings": []\n'
+        "}\n"
+        "```"
+    )
+    payload = _make_codex_event_stream(verdict_text)
+    res = parse_codex_jsonl(payload, returncode=0, plan_review=True)
+    assert res.kind is AgentResultKind.PASS
+    assert res.output == "codex completed"
+    assert res.plan_verdict == PlanVerdict(
+        verdict="APPROVE", summary="Implementation plan looks solid", findings=()
+    )
