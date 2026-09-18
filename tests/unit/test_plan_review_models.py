@@ -115,3 +115,67 @@ def test_parse_verdict_rejects_extra_keys() -> None:
 
     with pytest.raises(PlanVerdictError, match="extra"):
         parse_verdict('{"verdict": "APPROVE", "summary": "ok", "findings": [], "extra": 1}')
+
+
+def test_parse_verdict_markdown_code_fence_json() -> None:
+    raw = (
+        "```json\n"
+        '{\n  "verdict": "APPROVE",\n  "summary": "looks good",\n  "findings": []\n}\n'
+        "```"
+    )
+    verdict = parse_verdict(raw)
+    assert verdict == PlanVerdict(verdict="APPROVE", summary="looks good", findings=())
+
+
+def test_parse_verdict_markdown_code_fence_without_language() -> None:
+    raw = (
+        "```\n"
+        "{\n"
+        '  "verdict": "REQUEST_CHANGES",\n'
+        '  "summary": "needs tests",\n'
+        '  "findings": ["add test"]\n'
+        "}\n"
+        "```"
+    )
+    verdict = parse_verdict(raw)
+    assert verdict == PlanVerdict(
+        verdict="REQUEST_CHANGES", summary="needs tests", findings=("add test",)
+    )
+
+
+def test_parse_verdict_markdown_code_fence_with_whitespace_and_surrounding_prose() -> None:
+    raw = (
+        "Here is my plan review verdict:\n\n"
+        "```json  \n"
+        '{"verdict": "APPROVE", "summary": "approved after review", "findings": []}\n'
+        "```\n\n"
+        "End of review."
+    )
+    verdict = parse_verdict(raw)
+    assert verdict == PlanVerdict(
+        verdict="APPROVE", summary="approved after review", findings=()
+    )
+
+
+def test_parse_verdict_rejects_multiple_code_blocks() -> None:
+    import pytest
+
+    raw = (
+        "```json\n"
+        '{"verdict": "APPROVE", "summary": "ok", "findings": []}\n'
+        "```\n"
+        "and another block:\n"
+        "```json\n"
+        '{"verdict": "REQUEST_CHANGES", "summary": "not ok", "findings": ["fix"]}\n'
+        "```"
+    )
+    with pytest.raises(PlanVerdictError, match="multiple code blocks"):
+        parse_verdict(raw)
+
+
+def test_parse_verdict_rejects_malformed_json_inside_code_fence() -> None:
+    import pytest
+
+    raw = "```json\nnot valid json\n```"
+    with pytest.raises(PlanVerdictError, match="not valid JSON"):
+        parse_verdict(raw)

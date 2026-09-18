@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,48 @@ def plan_path(issue_number: int) -> Path:
     return PLANS_DIR / f"{issue_number}.md"
 
 
+_CODE_BLOCK_PATTERN = re.compile(r"(`{3,})(?i:json)?[\t ]*\r?\n?([\s\S]*?)\r?\n?\1")
+
+
+def _extract_json_payload(raw: str) -> Any:
+    text = raw.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    fence_matches = _CODE_BLOCK_PATTERN.findall(text)
+    if len(fence_matches) == 1:
+        content = fence_matches[0][1].strip()
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as err:
+            raise PlanVerdictError(f"plan review verdict is not valid JSON: {err}") from err
+    elif len(fence_matches) > 1:
+        candidates: list[dict[str, Any]] = []
+        for _, content in fence_matches:
+            try:
+                parsed = json.loads(content.strip())
+                if isinstance(parsed, dict) and "verdict" in parsed:
+                    candidates.append(parsed)
+            except json.JSONDecodeError:
+                pass
+        if len(candidates) == 1:
+            return candidates[0]
+        raise PlanVerdictError("multiple code blocks found in plan review verdict output")
+
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        candidate = text[first_brace : last_brace + 1].strip()
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    return json.loads(text)
+
+
 def parse_verdict(raw: str) -> PlanVerdict:
     """Parse a Plan Reviewer's structured JSON verdict.
 
@@ -74,7 +117,7 @@ def parse_verdict(raw: str) -> PlanVerdict:
     if not isinstance(raw, str) or not raw.strip():
         raise PlanVerdictError("plan review verdict output is empty")
     try:
-        payload: Any = json.loads(raw)
+        payload: Any = _extract_json_payload(raw)
     except json.JSONDecodeError as error:
         raise PlanVerdictError(f"plan review verdict is not valid JSON: {error}") from error
     if not isinstance(payload, dict):
