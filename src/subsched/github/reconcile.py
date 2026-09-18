@@ -13,6 +13,7 @@ never invoked implicitly by `discover()` or the dispatch loop.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -346,6 +347,21 @@ def prune_worktree_if_clean(
                 ),
             )
 
+    ai_dir = resolved_path / ".ai"
+    if ai_dir.exists():
+        if ai_dir.is_symlink():
+            return WorktreePruneResult(
+                kind=WorktreePruneKind.FAILED,
+                reason=f"refusing to prune worktree with symlinked .ai directory: {ai_dir}",
+            )
+        try:
+            shutil.rmtree(ai_dir)
+        except OSError as error:
+            return WorktreePruneResult(
+                kind=WorktreePruneKind.FAILED,
+                reason=_redact(f"could not clean scheduler state before prune: {error}"),
+            )
+
     try:
         removal = subprocess.run(
             [
@@ -354,7 +370,6 @@ def prune_worktree_if_clean(
                 str(repo_root),
                 "worktree",
                 "remove",
-                "--force",
                 str(resolved_path),
             ],
             stdin=subprocess.DEVNULL,
