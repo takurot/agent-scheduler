@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.process import COMMON_ENV_ALLOWLIST, filter_environment
 from subsched.config import NativeIsolationConfig, validate_base_branch
-from subsched.gitenv import git_safe_env
+from subsched.gitenv import ensure_git_exclude, git_safe_env
 from subsched.storage import atomic_write_secure_bytes, secure_directory
 
 _MAX_AUTH_BYTES = 1_048_576
@@ -212,6 +212,7 @@ def prepare_isolated_git(
     for command in commands:
         if _git(command, run_cmd=run_cmd).returncode != 0:
             raise ValueError("native isolation could not prepare task-specific Git metadata")
+    ensure_git_exclude(git_dir, run_cmd=run_cmd)
     worktree_git = worktree / ".git"
     if worktree_git.is_symlink():
         raise ValueError("native isolation refuses a symlinked worktree .git entry")

@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from pathlib import Path
+
 import pytest
 
 from subsched.gitenv import GIT_LOCATION_OVERRIDE_VARS, git_safe_env
@@ -45,3 +49,28 @@ def test_git_safe_env_defaults_to_current_process_environment(
 
     assert "GIT_DIR" not in result
     assert result.get("SUBSCHED_TEST_MARKER") == "1"
+
+
+def test_ensure_git_exclude_creates_and_populates_exclude_file(tmp_path: Path) -> None:
+    from subsched.gitenv import ensure_git_exclude
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    exclude_path = ensure_git_exclude(repo_dir, ".ai/")
+
+    assert exclude_path.exists()
+    assert ".ai/" in exclude_path.read_text(encoding="utf-8")
+
+
+def test_ensure_git_exclude_is_idempotent(tmp_path: Path) -> None:
+    from subsched.gitenv import ensure_git_exclude
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    ensure_git_exclude(repo_dir, ".ai/")
+    content_first = (repo_dir / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    ensure_git_exclude(repo_dir, ".ai/")
+    content_second = (repo_dir / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+
+    assert content_first == content_second
+    assert content_second.count(".ai/") == 1

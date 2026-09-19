@@ -1272,3 +1272,52 @@ def test_doctor_reports_missing_isolation_verification_toolchains(
     assert "cargo" in result.output
     assert "Pre-bake" in result.output
 
+
+def test_prepare_isolated_git_excludes_ai_directory(tmp_path: Path) -> None:
+    from subsched.agents.isolation import prepare_isolated_git
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    run(["git", "init", "--quiet", "-b", "main", str(worktree)], check=True)
+    run(["git", "-C", str(worktree), "config", "user.name", "Test"], check=True)
+    run(
+        ["git", "-C", str(worktree), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    run(
+        ["git", "-C", str(worktree), "commit", "--allow-empty", "--quiet", "-m", "initial"],
+        check=True,
+    )
+    context = prepare_isolated_git(worktree, tmp_path / "state", "github-293")
+
+    exclude_file = context.git_dir / "info" / "exclude"
+    assert exclude_file.exists()
+    assert ".ai/" in exclude_file.read_text(encoding="utf-8")
+
+    # Simulate container worktree pointing to context.git_dir
+    simulated_wt = tmp_path / "simulated_wt"
+    simulated_wt.mkdir()
+    (simulated_wt / ".git").write_text(f"gitdir: {context.git_dir}\n")
+    (simulated_wt / ".ai").mkdir()
+    (simulated_wt / ".ai" / "test.json").write_text("{}")
+    (simulated_wt / "code.py").write_text("print(1)\n")
+
+    status = run(
+        ["git", "-C", str(simulated_wt), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert ".ai" not in status.stdout
+    assert "code.py" in status.stdout
+
+    # Verify git add . does not stage .ai/
+    run(["git", "-C", str(simulated_wt), "add", "."], check=True, capture_output=True)
+    staged = run(
+        ["git", "-C", str(simulated_wt), "diff", "--cached", "--name-only"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert ".ai" not in staged.stdout
+    assert "code.py" in staged.stdout

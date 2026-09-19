@@ -724,7 +724,12 @@ def init(
     if dry_run:
         typer.echo(f"Detected stack: {plan.stack.name}")
         for file in plan.files:
-            action = "overwrite" if file.exists else "create"
+            if file.is_update:
+                action = "update"
+            elif file.exists:
+                action = "overwrite"
+            else:
+                action = "create"
             typer.echo(f"Would {action} {file.path}")
         if plan.repo is None:
             typer.echo("Warning: could not auto-detect the GitHub repository")

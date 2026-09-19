@@ -83,6 +83,7 @@ def test_init_dry_run_previews_without_writing(tmp_path: Path) -> None:
     assert not (tmp_path / "subsched.yaml").exists()
     assert not (tmp_path / "AGENTS.md").exists()
     assert not (tmp_path / "CLAUDE.md").exists()
+    assert not (tmp_path / ".gitignore").exists()
 
 
 def test_init_refuses_overwrite_without_force(tmp_path: Path) -> None:
@@ -125,3 +126,36 @@ def test_init_warns_when_repo_cannot_be_detected(tmp_path: Path) -> None:
     assert "could not auto-detect" in result.output.lower()
     cfg = load_config(tmp_path / "subsched.yaml")
     assert cfg.github.repo is None
+
+
+def test_init_scaffolds_gitignore_when_missing(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["init", str(tmp_path), "--repo", "owner/name"])
+
+    assert result.exit_code == 0, result.output
+    gitignore = tmp_path / ".gitignore"
+    assert gitignore.exists()
+    assert ".ai/" in gitignore.read_text(encoding="utf-8")
+
+
+def test_init_updates_existing_gitignore_preserving_content(tmp_path: Path) -> None:
+    gitignore = tmp_path / ".gitignore"
+    gitignore.write_text("node_modules/\n*.log\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", str(tmp_path), "--repo", "owner/name"])
+
+    assert result.exit_code == 0, result.output
+    content = gitignore.read_text(encoding="utf-8")
+    assert "node_modules/" in content
+    assert "*.log" in content
+    assert ".ai/" in content
+
+
+def test_init_does_not_duplicate_existing_ai_in_gitignore(tmp_path: Path) -> None:
+    gitignore = tmp_path / ".gitignore"
+    gitignore.write_text("target/\n.ai/\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", str(tmp_path), "--repo", "owner/name"])
+
+    assert result.exit_code == 0, result.output
+    content = gitignore.read_text(encoding="utf-8")
+    assert content.count(".ai/") == 1

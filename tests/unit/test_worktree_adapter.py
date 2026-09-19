@@ -152,3 +152,48 @@ def test_rejects_symlinked_worktree_root(tmp_path: Path) -> None:
 
     with pytest.raises(WorktreeSecurityError, match=r"worktree root.*symlink"):
         GitWorktreeAdapter(tmp_path, symlink_root, run=fake_run)
+
+
+def test_prepare_worktree_excludes_ai_directory(tmp_path: Path) -> None:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "commit", "--allow-empty", "-m", "init"],
+        check=True,
+        capture_output=True,
+    )
+
+    worktree_root = tmp_path / "worktrees"
+    adapter = GitWorktreeAdapter(repo_dir, worktree_root)
+    ctx = adapter.prepare_worktree(101)
+
+    ai_dir = ctx.path / ".ai"
+    ai_dir.mkdir()
+    (ai_dir / "handoff.md").write_text("content", encoding="utf-8")
+    (ctx.path / "code.py").write_text("print(1)\n", encoding="utf-8")
+
+    status = subprocess.run(
+        ["git", "-C", str(ctx.path), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert ".ai" not in status.stdout
+    assert "code.py" in status.stdout
+
+    # Test git add . does not stage .ai/
+    subprocess.run(["git", "-C", str(ctx.path), "add", "."], check=True, capture_output=True)
+    staged = subprocess.run(
+        ["git", "-C", str(ctx.path), "diff", "--cached", "--name-only"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert ".ai" not in staged.stdout
+    assert "code.py" in staged.stdout

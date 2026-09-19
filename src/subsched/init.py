@@ -257,6 +257,7 @@ class ScaffoldFile:
     path: Path
     content: str
     exists: bool
+    is_update: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +298,40 @@ def build_scaffold_plan(
             ScaffoldFile(path=claude_path, content=instructions, exists=claude_path.exists())
         )
 
+    gitignore_path = path / ".gitignore"
+    if gitignore_path.exists():
+        try:
+            current_gitignore = gitignore_path.read_text(encoding="utf-8")
+        except OSError:
+            current_gitignore = ""
+        lines = [line.strip() for line in current_gitignore.splitlines()]
+        if not any(line in {".ai", ".ai/", "/.ai", "/.ai/"} for line in lines):
+            prefix = current_gitignore
+            if prefix and not prefix.endswith("\n"):
+                prefix += "\n"
+            new_content = prefix + (
+                "\n# subsched internal state\n.ai/\n"
+                if prefix
+                else "# subsched internal state\n.ai/\n"
+            )
+            files.append(
+                ScaffoldFile(
+                    path=gitignore_path,
+                    content=new_content,
+                    exists=True,
+                    is_update=True,
+                )
+            )
+    else:
+        files.append(
+            ScaffoldFile(
+                path=gitignore_path,
+                content="# subsched internal state\n.ai/\n",
+                exists=False,
+                is_update=False,
+            )
+        )
+
     return ScaffoldPlan(repo=repo, stack=stack, files=tuple(files))
 
 
@@ -304,7 +339,7 @@ def write_scaffold_plan(plan: ScaffoldPlan, *, force: bool) -> tuple[Path, ...]:
     """Write every file in `plan` to disk, failing closed before writing anything if any
     target already exists and `force` was not given."""
     if not force:
-        conflicts = [f.path for f in plan.files if f.exists]
+        conflicts = [f.path for f in plan.files if f.exists and not f.is_update]
         if conflicts:
             names = ", ".join(str(p) for p in conflicts)
             raise InitError(f"refusing to overwrite existing file(s) without --force: {names}")
