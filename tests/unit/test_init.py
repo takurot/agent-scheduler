@@ -292,7 +292,7 @@ def test_build_scaffold_plan_includes_all_files_by_default(tmp_path: Path) -> No
     )
 
     names = {f.path.name for f in plan.files}
-    assert names == {"subsched.yaml", "AGENTS.md", "CLAUDE.md"}
+    assert names == {"subsched.yaml", "AGENTS.md", "CLAUDE.md", ".gitignore"}
     assert plan.repo == "owner/name"
 
 
@@ -306,7 +306,7 @@ def test_build_scaffold_plan_respects_agents_and_claude_md_toggles(tmp_path: Pat
     )
 
     names = {f.path.name for f in plan.files}
-    assert names == {"subsched.yaml"}
+    assert names == {"subsched.yaml", ".gitignore"}
 
 
 def test_build_scaffold_plan_propagates_close_issue(tmp_path: Path) -> None:
@@ -337,6 +337,7 @@ def test_build_scaffold_plan_marks_existing_files(tmp_path: Path) -> None:
     by_name = {f.path.name: f for f in plan.files}
     assert by_name["subsched.yaml"].exists is True
     assert by_name["AGENTS.md"].exists is False
+    assert by_name[".gitignore"].exists is False
 
 
 def test_write_scaffold_plan_writes_all_files(tmp_path: Path) -> None:
@@ -354,9 +355,43 @@ def test_write_scaffold_plan_writes_all_files(tmp_path: Path) -> None:
         tmp_path / "subsched.yaml",
         tmp_path / "AGENTS.md",
         tmp_path / "CLAUDE.md",
+        tmp_path / ".gitignore",
     }
     assert (tmp_path / "subsched.yaml").exists()
+    assert (tmp_path / ".gitignore").exists()
+    assert ".ai/" in (tmp_path / ".gitignore").read_text()
     assert (tmp_path / "AGENTS.md").read_text() == (tmp_path / "CLAUDE.md").read_text()
+
+
+def test_build_scaffold_plan_updates_existing_gitignore_without_ai(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("node_modules/\n")
+    plan = build_scaffold_plan(
+        tmp_path,
+        repo_override="owner/name",
+        include_agents_md=False,
+        include_claude_md=False,
+        run=_fake_run(1),
+    )
+
+    gi_file = next(f for f in plan.files if f.path.name == ".gitignore")
+    assert gi_file.exists is True
+    assert gi_file.is_update is True
+    assert "node_modules/" in gi_file.content
+    assert ".ai/" in gi_file.content
+
+
+def test_build_scaffold_plan_skips_gitignore_if_already_contains_ai(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("target/\n.ai/\n")
+    plan = build_scaffold_plan(
+        tmp_path,
+        repo_override="owner/name",
+        include_agents_md=False,
+        include_claude_md=False,
+        run=_fake_run(1),
+    )
+
+    names = {f.path.name for f in plan.files}
+    assert ".gitignore" not in names
 
 
 def test_write_scaffold_plan_refuses_overwrite_without_force(tmp_path: Path) -> None:

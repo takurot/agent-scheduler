@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from subsched.gitenv import git_safe_env
+from subsched.gitenv import ensure_git_exclude, git_safe_env
 from subsched.storage import secure_directory
 
 
@@ -181,6 +181,8 @@ class GitWorktreeAdapter:
                         f"registered worktree {target_path} is on {registered_branch}; "
                         f"expected branch {target_branch}"
                     )
+                if target_path.exists():
+                    ensure_git_exclude(target_path, run_cmd=self.run)
                 return WorktreeContext(
                     path=target_path.resolve(),
                     branch=target_branch,
@@ -218,6 +220,9 @@ class GitWorktreeAdapter:
             raise WorktreeConflictError(
                 f"failed to create git worktree at {target_path}: {result.stderr.strip()}"
             )
+
+        if target_path.exists():
+            ensure_git_exclude(target_path, run_cmd=self.run)
 
         return WorktreeContext(
             path=target_path.resolve(),
