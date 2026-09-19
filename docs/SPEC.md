@@ -1690,6 +1690,19 @@ PIDだけで判断せず、起動時刻も照合してPID reuseを防ぐ。
 └── runs/
 ```
 
+`scheduler.json`は単調増加する`revision`を持つ。Schedulerはtask、capacity、pause、revisionを
+同一payloadから一度に読み込み、そのsnapshotを生成したrevisionを次回保存時のCAS期待値として
+使用する。CLI、MCP、または別Schedulerが先に保存してrevisionが変化していた場合、古いSchedulerは
+最新revisionを無条件に採用して古い`self.tasks`を保存してはならない。taskまたはcapacityが変化した
+競合保存はstateを変更せずfail closedに停止し、次のScheduler起動が最新snapshotを再読み込みして
+queueとoperator操作を再評価する。taskとcapacityが読み込み時から一致し、pauseだけが変化した場合は、
+最新のpause値を保持してそのrevisionに対するCASを再試行できる。worker dispatchの直前にはこのCAS
+保存が成功していなければならないため、cancel、queue追加、`NEEDS_HUMAN`解決との競合後に古いtaskを
+再dispatchしない。lockは保存処理だけを保護し、
+長時間のworker実行中にoperator操作を塞がない。pause変更をScheduler自身がeventとして保存した
+場合も同じ期待revisionを使い、成功後のrevisionを以後のCASへ引き継ぐ。capacityとpauseは競合時に
+古いsnapshotで上書きされない。
+
 ---
 
 # 45. Waiting for Capacity
