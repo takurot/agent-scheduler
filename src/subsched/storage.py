@@ -113,6 +113,14 @@ class SchedulerLockError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class SchedulerStateSnapshot:
+    tasks: tuple[Task, ...]
+    capacities: tuple[Capacity, ...]
+    paused: bool
+    revision: int
+
+
+@dataclass(frozen=True, slots=True)
 class LockRecord:
     pid: int
     process_start_time: str
@@ -329,9 +337,9 @@ class JsonStateStore:
         *,
         paused: bool = False,
         expected_revision: int | None = None,
-    ) -> None:
+    ) -> int:
         capacities = self.load_capacities() if self.path.exists() else ()
-        self.save_state(
+        return self.save_state(
             tasks,
             paused=paused,
             capacities=capacities,
@@ -345,7 +353,7 @@ class JsonStateStore:
         paused: bool = False,
         capacities: Iterable[Capacity] = (),
         expected_revision: int | None = None,
-    ) -> None:
+    ) -> int:
         current_revision = self.get_revision()
         if expected_revision is not None and current_revision != expected_revision:
             raise StateCorruptionError(
@@ -388,11 +396,15 @@ class JsonStateStore:
         except BaseException:
             Path(temporary_name).unlink(missing_ok=True)
             raise
+        return new_revision
 
     def load_tasks(self) -> tuple[Task, ...]:
         if not self.path.exists():
             return ()
         payload = self._load_payload()
+        return self._tasks_from_payload(payload)
+
+    def _tasks_from_payload(self, payload: Mapping[str, Any]) -> tuple[Task, ...]:
         try:
             tasks = tuple(Task.from_dict(item) for item in payload["tasks"])
         except (AttributeError, KeyError, TypeError, ValueError) as error:
@@ -407,6 +419,9 @@ class JsonStateStore:
         if not self.path.exists():
             return ()
         payload = self._load_payload()
+        return self._capacities_from_payload(payload)
+
+    def _capacities_from_payload(self, payload: Mapping[str, Any]) -> tuple[Capacity, ...]:
         try:
             raw = payload.get("capacities", [])
             if not isinstance(raw, list):
@@ -416,12 +431,27 @@ class JsonStateStore:
             self._quarantine_corrupt_file("invalid capacity data")
             raise StateCorruptionError("invalid capacity data in scheduler state") from error
 
+    def load_snapshot(self) -> SchedulerStateSnapshot:
+        if not self.path.exists():
+            return SchedulerStateSnapshot(tasks=(), capacities=(), paused=False, revision=0)
+        payload = self._load_payload()
+        return SchedulerStateSnapshot(
+            tasks=self._tasks_from_payload(payload),
+            capacities=self._capacities_from_payload(payload),
+            paused=bool(payload.get("paused", False)),
+            revision=int(payload.get("revision", 1)),
+        )
+
     def is_paused(self) -> bool:
         return bool(self._load_payload().get("paused", False)) if self.path.exists() else False
 
-    def set_paused(self, paused: bool) -> None:
+    def set_paused(self, paused: bool, *, expected_revision: int | None = None) -> int:
         with self.lock():
-            self.save_tasks(self.load_tasks(), paused=paused)
+            return self.save_tasks(
+                self.load_tasks(),
+                paused=paused,
+                expected_revision=expected_revision,
+            )
 
     def _quarantine_corrupt_file(self, reason: str) -> Path | None:
         if not self.path.exists():

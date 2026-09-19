@@ -47,7 +47,7 @@ from subsched.review import (
 )
 from subsched.router import FRESHNESS, Router
 from subsched.selection import excluded_issue_labels
-from subsched.storage import JsonStateStore, get_process_start_time
+from subsched.storage import JsonStateStore, StateCorruptionError, get_process_start_time
 from subsched.structured_logger import StructuredLogger, sanitize_agent_summary
 from subsched.tasks.worktree import WorktreeAdapter, WorktreeError
 
@@ -241,8 +241,12 @@ class Scheduler:
         from subsched.lease import LeaseManager
 
         self.lease_manager = LeaseManager(max_concurrency=concurrency)
-        self.queue = TaskQueue(store.load_tasks(), label_scores=label_scores)
-        persisted_capacities = store.load_capacities()
+        snapshot = store.load_snapshot()
+        self._state_revision = snapshot.revision
+        self._persisted_tasks = snapshot.tasks
+        self._persisted_capacities = snapshot.capacities
+        self.queue = TaskQueue(snapshot.tasks, label_scores=label_scores)
+        persisted_capacities = snapshot.capacities
         if any(capacity.state not in _ALLOWED_COOLDOWNS for capacity in persisted_capacities):
             raise ValueError("persisted capacity must be a scheduler cooldown blocker")
         self._cooldowns = {capacity.agent: capacity for capacity in persisted_capacities}
@@ -847,10 +851,14 @@ class Scheduler:
         event_capacities: dict[str, Capacity],
     ) -> None:
         if event.event_type == EventType.PAUSE:
-            self.store.set_paused(True)
+            self._state_revision = self.store.set_paused(
+                True, expected_revision=self._state_revision
+            )
             self._log("event_received", data={"event_type": event.event_type.value})
         elif event.event_type == EventType.RESUME:
-            self.store.set_paused(False)
+            self._state_revision = self.store.set_paused(
+                False, expected_revision=self._state_revision
+            )
             self._log("event_received", data={"event_type": event.event_type.value})
         elif event.event_type == EventType.CAPACITY_PROBE:
             extracted = _extract_capacities_from_payload(event.payload)
@@ -2447,15 +2455,37 @@ class Scheduler:
 
     def _persist(self) -> None:
         # Serialize with CLI writers (pause/resume/cancel/run) via the same process-level
-        # lock they use, so a concurrent command cannot interleave with a tick's write and
-        # silently lose either side's update. expected_revision is re-read inside the lock
-        # (so it always matches at write time under correct lock usage) and is kept as a
-        # defense-in-depth CAS check in case that invariant is ever violated.
+        # lock they use, and compare against the revision of the snapshot this Scheduler
+        # loaded. Re-reading the revision here would authorize stale self.tasks and lose an
+        # operator update made while a worker was running. A conflict fails closed before
+        # any subsequent worker dispatch; the next Scheduler run reloads and re-evaluates
+        # the operator's state.
         with self.store.lock():
-            expected_revision = self.store.get_revision()
-            self.store.save_state(
-                self.tasks,
-                paused=self.store.is_paused(),
-                capacities=self._cooldowns.values(),
-                expected_revision=expected_revision,
-            )
+            capacities = tuple(self._cooldowns.values())
+            paused = self.store.is_paused()
+            try:
+                self._state_revision = self.store.save_state(
+                    self.tasks,
+                    paused=paused,
+                    capacities=capacities,
+                    expected_revision=self._state_revision,
+                )
+            except StateCorruptionError:
+                latest = self.store.load_snapshot()
+                if (
+                    latest.tasks != self._persisted_tasks
+                    or latest.capacities != self._persisted_capacities
+                ):
+                    raise
+                # A pause-only (or semantic no-op) writer does not conflict with task or
+                # capacity progress. Preserve its pause value and retry against its exact
+                # revision; task/capacity changes above still fail closed.
+                paused = latest.paused
+                self._state_revision = self.store.save_state(
+                    self.tasks,
+                    paused=paused,
+                    capacities=capacities,
+                    expected_revision=latest.revision,
+                )
+            self._persisted_tasks = self.tasks
+            self._persisted_capacities = capacities
