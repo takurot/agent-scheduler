@@ -1487,8 +1487,12 @@ Bernsteinを採用できる場合、このverification gateを既存機能へ委
 「全要素が必須キー（非空の`name`）を持つdictであること」「`bucket`と`state`が
 両方存在する場合は同じ分類を指すこと」を検証し、不正要素・必須値欠落・
 state/bucket矛盾が1つでもあれば全体を`UNKNOWN`にする（要素の間引き・黙殺はしない）。
-要素から導いた全体状態が終了コードの意味と矛盾する場合（例: 終了コード1なのに
-全要素PASS）も`UNKNOWN`とする。`PASS`への確定は「終了コード0・全要素PASS・
+`bucket`が`skipping`（`state`が`SKIPPED`/`NEUTRAL`）のcheckは`PASS`相当として扱い、
+skipされたcheckを含むだけのPRが`UNKNOWN`のまま停滞しないようにする。
+payloadが失敗（`FAIL`）を示す要素を1つでも含む場合は、終了コードや不正な別要素と
+矛盾していても全体を`FAIL`とする（キャンセルされたCIをhuman escalationへ届けるため。
+`FAIL`が誤って`PASS`になることはない）。それ以外の、要素から導いた全体状態と終了コードの
+意味との矛盾（例: 終了コード1なのに全要素PASS）は`UNKNOWN`とする。`PASS`への確定は「終了コード0・全要素PASS・
 矛盾なし」が全て成立した場合のみであり、空配列は`PASS`にならない。
 
 いずれの場合も、Issueの自動close・自動mergeは行わない（既存契約を維持）。

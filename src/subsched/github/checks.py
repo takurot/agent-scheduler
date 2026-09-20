@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+
+from subsched.agents.process import redact_sensitive_command_audit
 
 
 class CICheckState(StrEnum):
@@ -41,7 +44,7 @@ _GH_EXIT_NO_CHECKS = 7
 
 
 def _classify_bucket(bucket: str) -> CICheckState | None:
-    if bucket == "pass":
+    if bucket in {"pass", "skipping"}:
         return CICheckState.PASS
     if bucket in {"fail", "cancel"}:
         return CICheckState.FAIL
@@ -51,7 +54,7 @@ def _classify_bucket(bucket: str) -> CICheckState | None:
 
 
 def _classify_state(state_raw: str) -> CICheckState | None:
-    if state_raw in {"success", "pass"}:
+    if state_raw in {"success", "pass", "skipped", "neutral"}:
         return CICheckState.PASS
     if state_raw in {"failure", "fail", "error", "timed_out", "cancelled"}:
         return CICheckState.FAIL
@@ -87,6 +90,59 @@ def _classify_element(item: object) -> CICheckResult | None:
     else:
         st = CICheckState.UNKNOWN
     return CICheckResult(name=name_raw, state=st, description=desc, link=link)
+
+
+def _derive_overall(checks: Sequence[CICheckResult], malformed: int) -> CICheckState:
+    """Overall state implied by the payload alone. A proven failure always wins, even
+    next to malformed elements; otherwise malformed/empty payloads can never be PASS."""
+    states = {check.state for check in checks}
+    if CICheckState.FAIL in states:
+        return CICheckState.FAIL
+    if not checks or malformed:
+        return CICheckState.UNKNOWN
+    if CICheckState.PENDING in states:
+        return CICheckState.PENDING
+    if CICheckState.UNKNOWN in states:
+        return CICheckState.UNKNOWN
+    return CICheckState.PASS
+
+
+def _assess_payload(
+    pr_number: int, returncode: int, data: Sequence[object], stderr: str
+) -> PRChecksStatus:
+    """Validate exit code and payload as a pair and produce the final status."""
+    checks: list[CICheckResult] = []
+    malformed = 0
+    for item in data:
+        check = _classify_element(item)
+        if check is None:
+            malformed += 1
+        else:
+            checks.append(check)
+
+    derived = _derive_overall(checks, malformed)
+    expected = _GH_EXIT_OVERALL[returncode]
+    detail = _redact(stderr.strip())
+    overall = derived
+    if derived is not expected:
+        # #376: a proven failure in the payload escalates whatever the exit code says
+        # (FAIL can never be a false PASS, and a cancelled run must reach a human).
+        # Any other disagreement (e.g. exit 1 but every element claims PASS) is
+        # contradictory and cannot confirm anything.
+        if derived is not CICheckState.FAIL:
+            overall = CICheckState.UNKNOWN
+        detail = (
+            f"gh exit code {returncode} implies {expected.value}, "
+            f"payload implies {derived.value}"
+            + (f"; {malformed} malformed element(s)" if malformed else "")
+        )
+    return PRChecksStatus(
+        pr_number=pr_number, overall_state=overall, checks=tuple(checks), detail=detail
+    )
+
+
+def _redact(text: str) -> str:
+    return "\n".join(redact_sensitive_command_audit(tuple(text.splitlines())))
 
 
 def fetch_pr_checks(
@@ -133,7 +189,9 @@ def fetch_pr_checks(
                 pr_number=pr_number,
                 overall_state=CICheckState.UNKNOWN,
                 checks=(),
-                detail=res.stderr.strip() if res.stderr else "invalid JSON response from gh",
+                detail=_redact(res.stderr.strip())
+                if res.stderr
+                else "invalid JSON response from gh",
             )
 
         if res.returncode not in _GH_EXIT_OVERALL and res.returncode != _GH_EXIT_NO_CHECKS:
@@ -141,7 +199,7 @@ def fetch_pr_checks(
                 pr_number=pr_number,
                 overall_state=CICheckState.UNKNOWN,
                 checks=(),
-                detail=f"unexpected gh exit code {res.returncode}: {res.stderr.strip()}",
+                detail=_redact(f"unexpected gh exit code {res.returncode}: {res.stderr.strip()}"),
             )
         if res.returncode == _GH_EXIT_NO_CHECKS:
             return PRChecksStatus(
@@ -151,60 +209,7 @@ def fetch_pr_checks(
                 detail="gh reported no checks for this pull request",
             )
 
-        checks: list[CICheckResult] = []
-        has_fail = False
-        has_pending = False
-        has_unknown = False
-        malformed = 0
-
-        for item in data:
-            check = _classify_element(item)
-            if check is None:
-                malformed += 1
-                has_unknown = True
-                continue
-            if check.state is CICheckState.FAIL:
-                has_fail = True
-            elif check.state is CICheckState.PENDING:
-                has_pending = True
-            elif check.state is CICheckState.UNKNOWN:
-                has_unknown = True
-            checks.append(check)
-
-        if not checks or malformed:
-            derived = CICheckState.UNKNOWN
-        elif has_fail:
-            derived = CICheckState.FAIL
-        elif has_pending:
-            derived = CICheckState.PENDING
-        elif has_unknown:
-            derived = CICheckState.UNKNOWN
-        else:
-            derived = CICheckState.PASS
-
-        expected = _GH_EXIT_OVERALL[res.returncode]
-        if derived is not expected:
-            # #376: the payload disagrees with the exit code (e.g. gh exited 1 but
-            # every element claims PASS). The response is contradictory and cannot
-            # confirm anything.
-            detail = (
-                f"gh exit code {res.returncode} implies {expected.value}, "
-                f"payload implies {derived.value}"
-                + (f"; {malformed} malformed element(s)" if malformed else "")
-            )
-            return PRChecksStatus(
-                pr_number=pr_number,
-                overall_state=CICheckState.UNKNOWN,
-                checks=tuple(checks),
-                detail=detail,
-            )
-
-        return PRChecksStatus(
-            pr_number=pr_number,
-            overall_state=derived,
-            checks=tuple(checks),
-            detail=res.stderr.strip(),
-        )
+        return _assess_payload(pr_number, res.returncode, data, res.stderr)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return PRChecksStatus(
             pr_number=pr_number,
