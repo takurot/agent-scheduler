@@ -19,6 +19,9 @@ class ProductivityMetrics:
     prs_created: int
     autonomous_completion_rate: float | None
     issues_ready_for_review: int = 0
+    # #378: how many of `issues_attempted` were inferred from legacy state that lacks
+    # `run_started_at`, as opposed to confirmed by a recorded first dispatch.
+    issues_attempted_inferred: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -48,14 +51,58 @@ class SchedulerMetrics:
         }
 
 
+# #378: states reachable only after a Task has been dispatched at least once. Used solely
+# to infer an attempt for legacy state that predates `run_started_at` (#137).
+_POST_DISPATCH_STATES = frozenset(
+    {
+        TaskState.DISPATCHED,
+        TaskState.PLANNING,
+        TaskState.PLAN_REVIEW,
+        TaskState.IN_PROGRESS,
+        TaskState.VERIFYING,
+        TaskState.PR_READY,
+        TaskState.PR_REVIEW,
+        TaskState.REVISING,
+        TaskState.READY_FOR_REVIEW,
+        TaskState.NEEDS_REBASE,
+    }
+)
+
+
+def _was_dispatched(task: Task) -> bool:
+    """A Task is "attempted" once it has been dispatched -- not merely because its
+    current status is past DISCOVERED (Task.from_issue() creates READY /
+    WAITING_DEPENDENCY / BLOCKED tasks that never ran)."""
+    return task.run_started_at is not None or _inferred_dispatch(task)
+
+
+def _inferred_dispatch(task: Task) -> bool:
+    if task.run_started_at is not None:
+        return False
+    return (
+        task.attempt > 0
+        or task.last_dispatched_agent is not None
+        or task.capacity_events > 0
+        or task.verification_failures > 0
+        or bool(task.per_agent_failures)
+        or task.pr is not None
+        or task.status in _POST_DISPATCH_STATES
+    )
+
+
+def _failure_driven_switches(task: Task) -> int:
+    """Switches attributable to Agent failures. No per-cause counter is persisted, so
+    this is derived: every actual switch minus the capacity-driven ones
+    (`agent_switches`), clamped to [0, total failures] for this Task."""
+    failures = sum(cnt for _, cnt in task.per_agent_failures)
+    return min(max(task.actual_agent_switches - task.agent_switches, 0), failures)
+
+
 def calculate_metrics(tasks: Iterable[Task]) -> SchedulerMetrics:
     task_list = tuple(tasks)
-    attempted = [
-        t
-        for t in task_list
-        if t.status not in {TaskState.DISCOVERED, TaskState.ELIGIBILITY_CHECK}
-    ]
+    attempted = [t for t in task_list if _was_dispatched(t)]
     num_attempted = len(attempted)
+    num_inferred = sum(1 for t in attempted if _inferred_dispatch(t))
 
     implemented = [
         t
@@ -83,7 +130,7 @@ def calculate_metrics(tasks: Iterable[Task]) -> SchedulerMetrics:
     total_failures = sum(
         sum(cnt for _, cnt in t.per_agent_failures) for t in task_list
     )
-    total_switches = sum(t.actual_agent_switches for t in task_list)
+    total_switches = sum(_failure_driven_switches(t) for t in task_list)
     switch_rate = (
         round(total_switches / total_failures, 4) if total_failures > 0 else None
     )
@@ -94,6 +141,7 @@ def calculate_metrics(tasks: Iterable[Task]) -> SchedulerMetrics:
         prs_created=num_prs,
         autonomous_completion_rate=auto_rate,
         issues_ready_for_review=num_ready_for_review,
+        issues_attempted_inferred=num_inferred,
     )
 
     reliability = ReliabilityMetrics(
@@ -111,6 +159,12 @@ def calculate_metrics(tasks: Iterable[Task]) -> SchedulerMetrics:
     )
 
 
+def _inferred_note(prod: ProductivityMetrics) -> str:
+    if prod.issues_attempted_inferred == 0:
+        return ""
+    return f" ({prod.issues_attempted_inferred} inferred from legacy state)"
+
+
 def format_run_report(metrics: SchedulerMetrics) -> str:
     prod = metrics.productivity
     rel = metrics.reliability
@@ -121,7 +175,7 @@ def format_run_report(metrics: SchedulerMetrics) -> str:
         "========================================",
         "",
         "--- Productivity Metrics ---",
-        f"Issues Attempted: {prod.issues_attempted}",
+        f"Issues Attempted: {prod.issues_attempted}{_inferred_note(prod)}",
         f"Issues Implemented: {prod.issues_implemented}",
         f"Issues Ready For Review: {prod.issues_ready_for_review}",
         f"PRs Created: {prod.prs_created}",
@@ -172,7 +226,7 @@ def format_run_report_markdown(metrics: SchedulerMetrics) -> str:
         "",
         "| Metric | Value |",
         "| --- | --- |",
-        f"| Issues Attempted | {prod.issues_attempted} |",
+        f"| Issues Attempted | {prod.issues_attempted}{_inferred_note(prod)} |",
         f"| Issues Implemented | {prod.issues_implemented} |",
         f"| Issues Ready For Review | {prod.issues_ready_for_review} |",
         f"| PRs Created | {prod.prs_created} |",
