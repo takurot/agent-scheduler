@@ -491,7 +491,7 @@ def run(
             max_agent_failures=cfg.execution.max_agent_failures,
             max_verification_failures=cfg.execution.max_verification_failures,
             max_agent_switches=cfg.execution.max_agent_switches,
-            max_tasks=cfg.execution.max_tasks_per_run,
+            max_tasks_per_run=cfg.execution.max_tasks_per_run,
             push_enabled=not dry_run,
             create_pr_enabled=cfg.github.completion.create_pr,
             close_issue_enabled=cfg.github.completion.close_issue,
@@ -533,9 +533,6 @@ def run(
             snapshot_complete=is_complete_snapshot,
             reactivate_cancelled=reactivate_cancelled,
         )
-    except ValueError as error:
-        typer.echo(f"Task limit exceeded ({cfg.execution.max_tasks_per_run})", err=True)
-        raise typer.Exit(2) from error
     except (SchedulerLockError, StateCorruptionError) as error:
         typer.echo(f"State error: {error}", err=True)
         raise typer.Exit(1) from error

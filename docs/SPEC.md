@@ -589,6 +589,21 @@ while scheduler.running:
     sleep_until_next_event()
 ```
 
+## Run単位のdispatch予算 (`execution.max_tasks_per_run`) (#375)
+
+`max_tasks_per_run`は永続queueの全履歴件数の上限ではなく、1回のrun（Scheduler
+instance）で新規に着手する**distinct issue数**の予算である。
+
+- 予算の消費は「そのrunで初めてdispatchしたissue」1件につき1枠。同一issueの再試行、
+  verification再試行、PR review / revision roundは追加の枠を消費しない。
+- 予算を使い切ったrunは新規issueをdispatchしない。ただし既に着手したissueの
+  retry/reviewはrun内で継続できる。着手できなかったタスクは`READY`のまま
+  （`WAITING_CAPACITY`へは移さない。容量ではなく予算が blockerであるため）。
+- 永続化された完了履歴・NEEDS_HUMAN履歴は予算の計算に含まれない。discoveryは
+  履歴件数によってブロックされず、履歴削除による回避は行わない。
+- 再起動・新しいCLI実行・MCP実行はそれぞれ新しいrunであり、予算はリセットされる
+  （runごとに上限が守られるため、再起動を繰り返しても1 runあたりの上限を超えない）。
+
 ---
 
 # 16. Issue Priority

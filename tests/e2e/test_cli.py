@@ -812,18 +812,25 @@ def test_doctor_reports_unauthenticated_gh(
     assert "not authenticated" in result.output
 
 
-def test_cli_enforces_task_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_discovery_not_blocked_by_history_or_issue_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#375: max_tasks_per_run is a per-run dispatch budget over distinct issues, not
+    a cap on the persisted queue. Discovering more open issues than the budget (or
+    running with a long completion history) must never fail discovery."""
+    numbers = list(range(1, 52))  # 51 issues: one more than the default budget of 50
+
     def list_open(
         self: GitHubIssueSource, repo: str, *, label: str | None = None
     ) -> tuple[Issue, ...]:
-        return tuple(Issue(number=number, title=str(number)) for number in range(1, 52))
+        return tuple(Issue(number=number, title=str(number)) for number in numbers)
 
     monkeypatch.setattr(GitHubIssueSource, "list_open", list_open)
 
     result = invoke(tmp_path, "run", "--repo", "owner/project", "--issues", "all-open", "--dry-run")
 
-    assert result.exit_code != 0
-    assert "Task limit exceeded (50)" in result.output
+    assert result.exit_code == 0, result.output
+    assert "51 issue(s) discovered and persisted (dry-run)" in result.output
 
 
 def test_cli_runs_with_natural_language_query(tmp_path: Path) -> None:
