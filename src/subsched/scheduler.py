@@ -1634,6 +1634,21 @@ class Scheduler:
         )
         save_checkpoint(worktree_dir, cp)
 
+        if not post_rebase_report.cleanup_confirmed:
+            # #373: an unconfirmed cleanup after the post-rebase verification gate is a
+            # terminal safety condition -- fail closed before push/PR, without consuming
+            # the verification failure budget.
+            return verifying.transition(
+                TaskState.NEEDS_HUMAN,
+                current_agent=agent,
+                now=now,
+                reason=(
+                    "post-rebase verification process cleanup unconfirmed; manual "
+                    "intervention required to inspect running processes"
+                ),
+                reason_code="operator_decision_required",
+            )
+
         if not post_rebase_report.passed:
             new_verification_failures = verifying.verification_failures + 1
             retry = verifying.transition(
@@ -2084,6 +2099,38 @@ class Scheduler:
                     task_id=task.task_id,
                     data={"attempt": task.attempt},
                 )
+                if not v_report.cleanup_confirmed:
+                    # #373: an unconfirmed verification-process cleanup is a terminal
+                    # safety condition -- escalate straight to NEEDS_HUMAN without
+                    # consuming the verification failure budget or re-dispatching.
+                    reason = (
+                        "verification process cleanup unconfirmed; manual intervention "
+                        "required to inspect running processes"
+                    )
+                    final = verifying.transition(
+                        TaskState.NEEDS_HUMAN,
+                        current_agent=agent,
+                        now=now,
+                        reason=reason,
+                        reason_code="operator_decision_required",
+                    )
+                    self.queue = self.queue.replace(final)
+                    self._log(
+                        "task_transition",
+                        level="ERROR",
+                        issue_number=final.issue_number,
+                        agent=agent,
+                        task_id=final.task_id,
+                        message=reason,
+                        data={
+                            "from_state": verifying.status.value,
+                            "to_state": final.status.value,
+                            "attempt": final.attempt,
+                            "reason_code": final.needs_human_reason_code,
+                        },
+                    )
+                    self._persist()
+                    return
 
             if verification_ok:
                 final_task = self._finalize_verified_task(

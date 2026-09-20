@@ -1142,6 +1142,103 @@ def test_native_dispatch_cleans_up_when_adapter_raises(
     import_call.assert_called_once()
 
 
+def test_container_cleanup_failure_returns_terminal_cleanup_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#373: a failed container cleanup after a successful agent run must surface as
+    PROCESS_CLEANUP_FAILED (immediate NEEDS_HUMAN, no retry/agent-switch budget), not
+    a generic FAILURE."""
+    from subsched.agents.isolation import IsolationGitContext
+
+    auth = _secure_auth_dir(tmp_path / "auth")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    task = Task.from_issue(Issue(number=373, title="Cleanup safety")).with_worktree(
+        str(worktree)
+    )
+    bootstrap_task_files(worktree, task)
+    codex = MagicMock()
+    codex.execute.return_value = AgentResult(AgentResultKind.PASS)
+    context = IsolationGitContext(tmp_path / "sandbox.git", "a" * 40, tmp_path / "worktree.git")
+    monkeypatch.setattr(
+        "subsched.agents.native.verify_native_isolation", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "subsched.agents.native.prepare_isolated_git", lambda *args, **kwargs: context
+    )
+    monkeypatch.setattr(
+        "subsched.agents.native.wrap_native_request", lambda request, **kwargs: request
+    )
+    monkeypatch.setattr(
+        "subsched.agents.native.cleanup_native_container",
+        lambda runtime, name, **kwargs: "container cleanup failed: synthetic failure",
+    )
+    import_call = MagicMock()
+    import_call.return_value = None
+    monkeypatch.setattr("subsched.agents.native.import_isolated_git", import_call)
+    worker = NativeWorker(
+        codex_agent=codex,
+        subscription_billing_verified=True,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+        isolation_config=_runtime_config(auth),
+        isolation_runtime_executable=Path("/usr/bin/docker"),
+        isolation_state_root=tmp_path / "state",
+    )
+
+    result = worker.run(task, "codex")
+
+    assert result.kind is AgentResultKind.PROCESS_CLEANUP_FAILED
+    assert "synthetic failure" in (result.output or "")
+    import_call.assert_not_called()
+
+
+def test_container_cleanup_failure_outranks_execution_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#373: when the adapter raises AND the container cleanup also fails, the terminal
+    cleanup-safety error must win -- a possibly-surviving container is strictly more
+    dangerous than the lost agent result."""
+    from subsched.agents.isolation import IsolationGitContext
+
+    auth = _secure_auth_dir(tmp_path / "auth")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    task = Task.from_issue(Issue(number=373, title="Cleanup safety")).with_worktree(
+        str(worktree)
+    )
+    bootstrap_task_files(worktree, task)
+    codex = MagicMock()
+    codex.execute.side_effect = RuntimeError("adapter exploded")
+    context = IsolationGitContext(tmp_path / "sandbox.git", "a" * 40, tmp_path / "worktree.git")
+    monkeypatch.setattr(
+        "subsched.agents.native.verify_native_isolation", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "subsched.agents.native.prepare_isolated_git", lambda *args, **kwargs: context
+    )
+    monkeypatch.setattr(
+        "subsched.agents.native.wrap_native_request", lambda request, **kwargs: request
+    )
+    monkeypatch.setattr(
+        "subsched.agents.native.cleanup_native_container",
+        lambda runtime, name, **kwargs: "container cleanup failed: synthetic failure",
+    )
+    monkeypatch.setattr("subsched.agents.native.import_isolated_git", lambda *a, **k: None)
+    worker = NativeWorker(
+        codex_agent=codex,
+        subscription_billing_verified=True,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+        isolation_config=_runtime_config(auth),
+        isolation_runtime_executable=Path("/usr/bin/docker"),
+        isolation_state_root=tmp_path / "state",
+    )
+
+    result = worker.run(task, "codex")
+
+    assert result.kind is AgentResultKind.PROCESS_CLEANUP_FAILED
+    assert "synthetic failure" in (result.output or "")
+
+
 @pytest.fixture
 def compatible_commands(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # Every CLI is compatible. CLI availability alone cannot attest isolation.

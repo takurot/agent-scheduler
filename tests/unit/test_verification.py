@@ -104,6 +104,43 @@ def test_run_verification_fails_when_no_executable_gate_runs(
     assert report.summary == "FAIL (no executable verification commands configured)"
 
 
+def test_run_verification_fails_when_exit_zero_but_cleanup_unconfirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#373: exit_code=0 with an unconfirmed process-group cleanup must not PASS --
+    a leftover verification process is a terminal safety condition, not a green gate."""
+    import subsched.verification as verification
+    from subsched.agents.base import ProcessExecutionResult
+
+    monkeypatch.setattr(
+        verification,
+        "run_process_group",
+        lambda request: ProcessExecutionResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            cleanup_succeeded=False,
+        ),
+    )
+
+    report = run_verification(tmp_path, (f"{sys.executable} -c 'print(1)'",))
+
+    assert report.passed is False
+    assert report.gates[0].passed is False
+    assert report.gates[0].cleanup_succeeded is False
+    assert report.cleanup_confirmed is False
+    assert "cleanup" in report.summary.casefold()
+
+
+def test_run_verification_confirms_cleanup_on_pass(tmp_path: Path) -> None:
+    commands = (f"{sys.executable} -c \"print('gate ok')\"",)
+    report = run_verification(tmp_path, commands)
+
+    assert report.passed is True
+    assert report.gates[0].cleanup_succeeded is True
+    assert report.cleanup_confirmed is True
+
+
 def test_scheduler_does_not_finalize_when_no_verification_gate_runs(tmp_path: Path) -> None:
     from datetime import UTC, datetime
 
@@ -246,6 +283,79 @@ def test_scheduler_passes_configured_verification_timeout(
     scheduler.tick([cap])
 
     assert seen_timeouts == [45.0]
+
+
+def test_scheduler_verification_cleanup_unconfirmed_escalates_without_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#373: an unconfirmed verification-process cleanup must escalate straight to
+    NEEDS_HUMAN -- it must not consume the verification failure budget and must not
+    re-dispatch the task as if it were an ordinary gate failure."""
+    import subsched.verification as verif_mod
+    from subsched.models import (
+        AgentResult,
+        AgentResultKind,
+        Capacity,
+        CapacityState,
+        Issue,
+        TaskState,
+    )
+    from subsched.router import AgentConfig, Router
+    from subsched.scheduler import Scheduler, ScriptedWorker
+    from subsched.storage import JsonStateStore
+    from subsched.verification import GateResult, VerificationReport
+
+    def mock_run_verification(
+        worktree: Path, commands: tuple[str, ...], **_: object
+    ) -> VerificationReport:
+        return VerificationReport(
+            passed=False,
+            gates=(
+                GateResult(
+                    command="quality gate",
+                    exit_code=0,
+                    stdout="",
+                    stderr="",
+                    passed=False,
+                    cleanup_succeeded=False,
+                ),
+            ),
+            summary="quality gate: FAIL (process cleanup unconfirmed)",
+            cleanup_confirmed=False,
+        )
+
+    monkeypatch.setattr(verif_mod, "run_verification", mock_run_verification)
+
+    store = JsonStateStore(tmp_path / "state.json")
+    scheduler = Scheduler(
+        store=store,
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=ScriptedWorker({(101, "claude"): (AgentResult(AgentResultKind.PASS),)}),
+        worktree_root=tmp_path / "worktrees",
+        verification_commands=("true",),
+        max_verification_failures=5,
+    )
+    scheduler.discover([Issue(number=101, title="Task 101")])
+
+    from datetime import UTC, datetime
+
+    cap = Capacity(
+        agent="claude",
+        state=CapacityState.AVAILABLE,
+        observed_at=datetime.now(UTC),
+        source="provider",
+        confidence="high",
+    )
+    scheduler.tick([cap])
+
+    task = scheduler.tasks[0]
+    assert task.status is TaskState.NEEDS_HUMAN
+    assert task.verification_failures == 0
+    assert task.needs_human_reason_code == "operator_decision_required"
+    assert task.pr is None
+
+    # No re-dispatch: the terminal safety state must hold on a later tick.
+    assert scheduler.tick([cap]) is False
 
 
 def test_scheduler_rejects_non_positive_verification_timeout(tmp_path: Path) -> None:
