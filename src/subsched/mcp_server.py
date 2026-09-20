@@ -541,6 +541,7 @@ def reconcile_tasks(
         "reconciled_needs_human": result.reconciled_needs_human,
         "unchanged": result.unchanged,
         "dry_run": dry_run,
+        "deferred_prs": list(fetch.deferred),
         "items": [
             {
                 "issue_number": item.issue_number,

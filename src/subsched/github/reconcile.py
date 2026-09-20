@@ -45,12 +45,18 @@ class PrLifecycleFetchResult:
     kind: PrLifecycleFetchKind
     states: Mapping[int, PrLifecycleState]
     error: str = ""
+    # #377: tracked PRs left unfetched because of the per-run request cap (unknown, so
+    # UNCHANGED). Surfaced so an operator can see that a run was not exhaustive.
+    deferred: tuple[int, ...] = ()
 
 
 # #377: upper bound on `gh pr view` calls per reconcile run (rate-limit guard). PRs
-# beyond the cap are left unknown -- and therefore UNCHANGED -- until a later run;
-# resolved (MERGED/CLOSED) tasks stop being candidates, so repeated runs make progress.
+# beyond the cap are left unknown -- and therefore UNCHANGED -- and reported as deferred.
+# Order is ascending, so long-lived OPEN low-numbered PRs are re-checked first each run;
+# a backlog of >= cap open PRs can therefore defer higher-numbered ones until some of
+# them resolve.
 DEFAULT_MAX_PR_REQUESTS = 100
+_MAX_PR_NUMBER = 2**31 - 1
 
 
 def _failure(error: str) -> PrLifecycleFetchResult:
@@ -62,8 +68,8 @@ def _fetch_one_pr_state(
     number: int,
     env: dict[str, str] | None,
     timeout_seconds: float,
-) -> PrLifecycleState | str:
-    """Return the lifecycle state of one PR, or an error string (fail closed)."""
+) -> tuple[PrLifecycleState | None, str]:
+    """Return `(state, "")` for one PR, or `(None, error)` (fail closed)."""
     argv = ["gh", "pr", "view", str(number), "--repo", repo, "--json", "number,state"]
     try:
         res = subprocess.run(
@@ -77,26 +83,30 @@ def _fetch_one_pr_state(
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        return _redact(f"gh pr view invocation failed for PR #{number}: {error}")
+        return None, _redact(f"gh pr view invocation failed for PR #{number}: {error}")
     if res.returncode != 0:
-        return _redact(f"gh pr view exited {res.returncode} for PR #{number}: {res.stderr.strip()}")
+        return None, _redact(
+            f"gh pr view exited {res.returncode} for PR #{number}: {res.stderr.strip()}"
+        )
     try:
         data = json.loads(res.stdout)
     except json.JSONDecodeError:
-        return f"unparseable gh pr view output for PR #{number}"
+        return None, f"unparseable gh pr view output for PR #{number}"
     if not isinstance(data, dict):
-        return f"invalid gh pr view output structure for PR #{number}"
-    try:
-        returned_number = int(data["number"])
-        raw_state = str(data["state"]).upper()
-    except (KeyError, TypeError, ValueError):
-        return f"malformed gh pr view output for PR #{number}"
+        return None, f"invalid gh pr view output structure for PR #{number}"
+    returned_number = data.get("number")
+    if type(returned_number) is not int or "state" not in data:
+        return None, f"malformed gh pr view output for PR #{number}"
     if returned_number != number:
-        return f"gh pr view returned PR #{returned_number} which does not match PR #{number}"
+        return (
+            None,
+            f"gh pr view returned PR #{returned_number} which does not match PR #{number}",
+        )
+    raw_state = str(data["state"]).upper()
     try:
-        return PrLifecycleState(raw_state)
+        return PrLifecycleState(raw_state), ""
     except ValueError:
-        return f"unrecognized PR state '{raw_state}' for PR #{number}"
+        return None, f"unrecognized PR state '{raw_state}' for PR #{number}"
 
 
 def fetch_pr_lifecycle_states(
@@ -118,13 +128,23 @@ def fetch_pr_lifecycle_states(
     in that case. A PR beyond `max_requests` is simply absent from `states`; callers
     treat that as "unknown", not as a specific lifecycle state.
     """
+    numbers = list(pr_numbers)
+    for number in numbers:
+        # Persisted state is untrusted: only positive plain ints may reach gh's argv
+        # (a value like "--web" or -5 would otherwise be parsed as a flag).
+        if type(number) is not int or not 0 < number <= _MAX_PR_NUMBER:
+            return _failure(f"invalid tracked PR number: {number!r}")
+    ordered = sorted(set(numbers))
+    cap = max(max_requests, 0)
     states: dict[int, PrLifecycleState] = {}
-    for number in sorted(set(pr_numbers))[: max(max_requests, 0)]:
-        outcome = _fetch_one_pr_state(repo, number, env, timeout_seconds)
-        if not isinstance(outcome, PrLifecycleState):
-            return _failure(outcome)
-        states[number] = outcome
-    return PrLifecycleFetchResult(kind=PrLifecycleFetchKind.SUCCESS, states=states)
+    for number in ordered[:cap]:
+        state, error = _fetch_one_pr_state(repo, number, env, timeout_seconds)
+        if state is None:
+            return _failure(error)
+        states[number] = state
+    return PrLifecycleFetchResult(
+        kind=PrLifecycleFetchKind.SUCCESS, states=states, deferred=tuple(ordered[cap:])
+    )
 
 
 class ReconcileAction(StrEnum):

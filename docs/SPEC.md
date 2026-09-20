@@ -1467,8 +1467,11 @@ Bernsteinを採用できる場合、このverification gateを既存機能へ委
   遷移させ、`OPEN`または不明な状態のtaskは`READY_FOR_REVIEW`のまま変更しない。`gh`
   実行エラー・認証失敗・不正な出力（追跡PRのうち1件でも取得・検証に失敗した場合を含む）の場合はscheduler状態を一切変更せずnon-zeroで
   終了する（fail-closed）。1回の実行で呼び出す`gh pr view`は重複除去した追跡PR番号の昇順で最大
-  100件に制限し（rate limit対策）、超過分は不明扱い（`UNCHANGED`）として次回以降の実行で
-  処理する。`--dry-run`も同じ取得・判定を行い、状態だけを書き込まない。dispatch loopや`discover()`からは暗黙に呼ばれず、必ず
+  100件に制限し（rate limit対策）、超過分は不明扱い（`UNCHANGED`）とし、CLIは警告、MCPは`deferred_prs`で報告する。
+  昇順のため、低番号のOPENなPRが上限件数以上続くと、より大きい番号のPRは
+  それらが解決するまで繰り延べられ得る。永続state中のPR番号は1〜2^31-1の整数のみ受け付け、
+  それ以外はgh呼び出し前にfail-closedで失敗させる（`--web`や負数がgh引数として解釈される
+  のを防ぐ）。`--dry-run`も同じ取得・判定を行い、状態だけを書き込まない。dispatch loopや`discover()`からは暗黙に呼ばれず、必ず
   operatorまたはMCPクライアントが明示的に起動する。
   CLIで`--prune-worktrees`を明示した場合のみ、merge済みtaskのworktreeを削除する。削除前に
   `git status --porcelain -uall`を検査し、tracked changeまたはScheduler所有の`.ai/`配下以外の

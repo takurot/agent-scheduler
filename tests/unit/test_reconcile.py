@@ -180,6 +180,64 @@ def test_fetch_pr_lifecycle_states_rejects_bad_payloads(
     assert expected in result.error
 
 
+@pytest.mark.parametrize("bad", [-5, 0, True, "--web", "12", 1.5, None, 10**30])
+def test_fetch_pr_lifecycle_states_rejects_invalid_pr_numbers(
+    monkeypatch: pytest.MonkeyPatch, bad: object
+) -> None:
+    """Persisted PR numbers are untrusted: a non-positive/non-int value must never reach
+    gh's argv (e.g. '--web' or '-5' would be parsed as flags) and must fail closed."""
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError(f"gh must not be invoked: {argv}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = fetch_pr_lifecycle_states("owner/repo", [1, bad])  # type: ignore[list-item]
+
+    assert result.kind is PrLifecycleFetchKind.FAILURE
+    assert result.states == {}
+    assert "invalid tracked PR number" in result.error
+
+
+def test_fetch_pr_lifecycle_states_rejects_bool_number_in_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            argv, 0, stdout='{"number": true, "state": "OPEN"}', stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = fetch_pr_lifecycle_states("owner/repo", [1])
+
+    assert result.kind is PrLifecycleFetchKind.FAILURE
+
+
+def test_fetch_pr_lifecycle_states_reports_prs_beyond_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, stdout=_view_payload(argv), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = fetch_pr_lifecycle_states("owner/repo", range(1, 6), max_requests=2)
+
+    assert result.deferred == (3, 4, 5)
+    assert fetch_pr_lifecycle_states("owner/repo", [1, 2], max_requests=2).deferred == ()
+
+
+def test_fetch_pr_lifecycle_states_non_positive_cap_fetches_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("gh must not be invoked")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = fetch_pr_lifecycle_states("owner/repo", [1, 2], max_requests=0)
+
+    assert result.states == {}
+    assert result.deferred == (1, 2)
+
+
 # --- plan_reconciliation -------------------------------------------------------
 
 

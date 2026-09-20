@@ -876,6 +876,12 @@ def reconcile(
                 typer.echo(f"Failed to fetch PR state from GitHub: {fetch.error}", err=True)
                 raise typer.Exit(1)
 
+            if fetch.deferred:
+                typer.echo(
+                    f"Warning: {len(fetch.deferred)} tracked PR(s) beyond the per-run request "
+                    f"cap were not checked: {', '.join(f'#{n}' for n in fetch.deferred)}",
+                    err=True,
+                )
             result = plan_reconciliation(tasks, fetch.states)
             for item in result.items:
                 typer.echo(
