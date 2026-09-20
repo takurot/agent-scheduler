@@ -1501,7 +1501,7 @@ Bernsteinを採用できる場合、このverification gateを既存機能へ委
   昇順のため、低番号のOPENなPRが上限件数以上続くと、より大きい番号のPRは
   それらが解決するまで繰り延べられ得る。永続state中のPR番号は1〜2^31-1の整数のみ受け付け、
   それ以外はgh呼び出し前にfail-closedで失敗させる（`--web`や負数がgh引数として解釈される
-  のを防ぐ）。`--dry-run`も同じ取得・判定を行い、状態だけを書き込まない。dispatch loopや`discover()`からは暗黙に呼ばれず、必ず
+  のを防ぐ）。`gh`取得中はstore lockを保持しない（#398）: 追跡PR番号をlockなしのsnapshotから収集し、取得後にlockを再取得してtaskを再読込し、その最新stateに対して判定する。取得中にstatusが`READY_FOR_REVIEW`でなくなった、またはPR番号が変わったtaskは古い取得結果で変更せず、並行する`subsched run`も取得中はブロックされない。`--dry-run`も同じ取得・判定を行い、状態だけを書き込まない。dispatch loopや`discover()`からは暗黙に呼ばれず、必ず
   operatorまたはMCPクライアントが明示的に起動する。
   CLIで`--prune-worktrees`を明示した場合のみ、merge済みtaskのworktreeを削除する。削除前に
   `git status --porcelain -uall`を検査し、tracked changeまたはScheduler所有の`.ai/`配下以外の
