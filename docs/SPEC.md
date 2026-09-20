@@ -1509,6 +1509,22 @@ Bernsteinを採用できる場合、このverification gateを既存機能へ委
     fail-closedの設計方針に合わせ、CI失敗は常に人間の判断を挟む。
   - CI `PENDING`/`UNKNOWN` → 状態を変更しない（`READY_FOR_REVIEW`のまま様子を見る）。
 
+### `gh pr checks`応答の検証 (#376)
+
+`gh pr checks`の終了コードとJSON payloadは組として検証する。終了コードは
+`0` = all pass、`1` = some failed、`7` = no checks、`8` = some pendingを正とし、
+それ以外の終了コードはコマンド異常として全体を`UNKNOWN`にする。payload側は
+「全要素が必須キー（非空の`name`）を持つdictであること」「`bucket`と`state`が
+両方存在する場合は同じ分類を指すこと」を検証し、不正要素・必須値欠落・
+state/bucket矛盾が1つでもあれば全体を`UNKNOWN`にする（要素の間引き・黙殺はしない）。
+`bucket`が`skipping`（`state`が`SKIPPED`/`NEUTRAL`）のcheckは`PASS`相当として扱い、
+skipされたcheckを含むだけのPRが`UNKNOWN`のまま停滞しないようにする。
+payloadが失敗（`FAIL`）を示す要素を1つでも含む場合は、終了コードや不正な別要素と
+矛盾していても全体を`FAIL`とする（キャンセルされたCIをhuman escalationへ届けるため。
+`FAIL`が誤って`PASS`になることはない）。それ以外の、要素から導いた全体状態と終了コードの
+意味との矛盾（例: 終了コード1なのに全要素PASS）は`UNKNOWN`とする。`PASS`への確定は「終了コード0・全要素PASS・
+矛盾なし」が全て成立した場合のみであり、空配列は`PASS`にならない。
+
 いずれの場合も、Issueの自動close・自動mergeは行わない（既存契約を維持）。
 
 metricsは`issues_implemented`（`READY_FOR_REVIEW`/`PR_READY`/`COMPLETE`を含む「実装済み」

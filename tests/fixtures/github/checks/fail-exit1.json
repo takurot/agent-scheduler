@@ -1,0 +1,4 @@
+[
+  {"name": "pytest", "bucket": "pass", "state": "SUCCESS", "description": "", "link": ""},
+  {"name": "mypy", "bucket": "fail", "state": "FAILURE", "description": "12 errors", "link": ""}
+]
