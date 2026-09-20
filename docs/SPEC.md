@@ -2003,6 +2003,21 @@ Agent adapterが`PROCESS_CLEANUP_FAILED`を返した場合、前回のprocessが
 `needs_human_reason_code`は`operator_decision_required`とし、残存processをoperatorが
 確認するまで同一worktreeへ再dispatchしない。
 
+### cleanup失敗の伝播経路 (#373)
+
+`PROCESS_CLEANUP_FAILED`は次の両経路で同じ終端扱いにする。どちらも通常のfailure budget
+（`max_agent_failures`、`max_verification_failures`）を消費せず、retry・次Agent切替・
+push・PR作成へ進まない。
+
+- container隔離実行 (`NativeWorker._execute_isolated`) : provider processの正常終了、
+  timeout、例外のすべてで`cleanup_native_container`を強制し、失敗した場合は実行結果に
+  優先して`PROCESS_CLEANUP_FAILED`を返す。adapter例外が同時に発生してもcleanup失敗を
+  優先する。
+- verification gate (`run_verification`) : 各gateの終了時にprocess groupの停止が確認
+  できなければ`exit_code=0`でも`passed=False`とする。`VerificationReport.cleanup_confirmed`
+  が`False`のとき、Schedulerはpre-push gate・post-rebase gateのどちらでも
+  `operator_decision_required`で即座に`NEEDS_HUMAN`へ遷移する。
+
 ## Native WorkerによるNEEDS_HUMANの明示的シグナル（#297）
 
 設計判断の承認、指示の矛盾、外部前提条件など「再試行しても解消しない人手待ち」について、Workerはgeneric `FAILURE`ではなく`NEEDS_HUMAN` outcomeをSchedulerへ直接通知できる。
