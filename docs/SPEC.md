@@ -1733,6 +1733,12 @@ queueとoperator操作を再評価する。taskとcapacityが読み込み時か�
 場合も同じ期待revisionを使い、成功後のrevisionを以後のCASへ引き継ぐ。capacityとpauseは競合時に
 古いsnapshotで上書きされない。
 
+破損（JSON構文エラー、schema version不一致、サイズ超過、重複taskなど）により`scheduler.json`がquarantineへ
+退避された場合、ファイルが存在しない状態として扱われ次回プロセスや操作で空キューとして暗黙に再初期化されては
+ならない。Storeは`.ai/RECOVERY_REQUIRED.json`マーカーを永続化し、明示的に検証済みバックアップが復旧され
+`resolve_quarantine()`が呼び出されるまで、すべての読み込み・保存・dispatch操作に対して`StateCorruptionError`で
+fail closedを維持する。
+
 ---
 
 # 45. Waiting for Capacity
