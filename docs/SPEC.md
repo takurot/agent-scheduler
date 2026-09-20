@@ -2132,6 +2132,30 @@ eligible issues attempted
 
 を重要指標とする。
 
+### 指標の分母・分子の定義 (#378)
+
+- **attempted（試行済み）**: 1回以上dispatchされたTask。現在の状態が`DISCOVERED`/
+  `ELIGIBILITY_CHECK`以外であることは根拠にしない（`Task.from_issue()`は
+  dispatch前に`READY`/`WAITING_DEPENDENCY`/`BLOCKED`を直接生成するため）。確定根拠は
+  初回dispatch時に一度だけ記録される`run_started_at`（#137）。dispatch前の
+  `NEEDS_HUMAN`/`CANCELLED`は試行に含めない。
+- **旧stateの推定**: `run_started_at`を持たない旧stateは、`attempt>0`、
+  `last_dispatched_agent`、`capacity_events>0`、`verification_failures>0`、
+  `per_agent_failures`、`pr`のいずれかがある、またはdispatch後にしか到達しない状態
+  （`DISPATCHED`/`IN_PROGRESS`/`VERIFYING`/`PR_READY`/`READY_FOR_REVIEW`等）にある場合に
+  試行済みと推定する。推定分は`issues_attempted_inferred`で確定分と区別して報告する
+  （`issues_attempted`は確定分＋推定分の合計）。
+- **率**: `autonomous_completion_rate`・`task_completion_rate`・
+  `manual_intervention_rate`は`issues_attempted`を分母とし、`issues_attempted == 0`なら
+  `null`（表示は`N/A`）。未dispatchのTaskを追加しても率は変化しない。
+- **`agent_failure_switch_rate`**: 分子はAgent failure由来の切替のみ。capacity由来の
+  切替（`agent_switches`）は含めない。failure専用の永続カウンタはないため、Taskごとに
+  `min(max(actual_agent_switches - agent_switches, 0), 累積failure数)`として導出し、
+  分母は累積failure数（`per_agent_failures`の合計）。累積件数であり、現在の状態や
+  run単位の集計ではない。
+- **JSON互換性**: 既存のJSONフィールド名・型は変更しない。`issues_attempted_inferred`
+  のみ追加（旧consumerは無視してよい）。永続schemaの変更・migrationは不要。
+
 ---
 
 # 54. Scheduler Configuration

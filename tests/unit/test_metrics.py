@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -16,6 +17,19 @@ from subsched.metrics import (
 from subsched.models import Task, TaskState
 from subsched.storage import JsonStateStore
 
+_DISPATCHED_AT = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+def _task(issue: int, status: TaskState, **kwargs: object) -> Task:
+    return Task(
+        task_id=f"github-{issue}",
+        issue_number=issue,
+        title=f"Task {issue}",
+        labels=(),
+        status=status,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
 
 def test_calculate_metrics_comprehensive() -> None:
     t1 = Task(
@@ -27,6 +41,7 @@ def test_calculate_metrics_comprehensive() -> None:
         capacity_events=1,
         agent_switches=1,
         pr=1,
+        run_started_at=_DISPATCHED_AT,
     )
     t2 = Task(
         task_id="github-102",
@@ -36,6 +51,7 @@ def test_calculate_metrics_comprehensive() -> None:
         status=TaskState.READY_FOR_REVIEW,
         capacity_events=0,
         pr=2,
+        run_started_at=_DISPATCHED_AT,
     )
     t3 = Task(
         task_id="github-103",
@@ -44,6 +60,7 @@ def test_calculate_metrics_comprehensive() -> None:
         labels=(),
         status=TaskState.NEEDS_HUMAN,
         capacity_events=0,
+        run_started_at=_DISPATCHED_AT,
     )
     t4 = Task(
         task_id="github-104",
@@ -129,3 +146,102 @@ def test_cli_metrics_command(tmp_path: Path) -> None:
     assert res_report.exit_code == 0
     assert report_out.is_file()
     assert "SCHEDULER RUN REPORT" in report_out.read_text(encoding="utf-8")
+
+
+# --- #378: denominators must reflect dispatch history, not current status ----------
+
+
+def test_undispatched_queue_reports_no_attempts_and_null_rates() -> None:
+    """READY / WAITING_DEPENDENCY / BLOCKED tasks were never dispatched, so they must
+    not inflate issues_attempted or drag the completion rates down to 0.0."""
+    metrics = calculate_metrics(
+        [
+            _task(1, TaskState.READY),
+            _task(2, TaskState.WAITING_DEPENDENCY, dependencies=(1,)),
+            _task(3, TaskState.BLOCKED),
+        ]
+    )
+
+    assert metrics.productivity.issues_attempted == 0
+    assert metrics.productivity.autonomous_completion_rate is None
+    assert metrics.reliability.task_completion_rate is None
+    assert metrics.reliability.manual_intervention_rate is None
+    assert "Autonomous Issue Completion Rate: N/A" in format_run_report(metrics)
+
+
+def test_adding_waiting_tasks_does_not_change_rates() -> None:
+    done = _task(1, TaskState.COMPLETE, pr=5, run_started_at=_DISPATCHED_AT)
+    baseline = calculate_metrics([done])
+    with_waiting = calculate_metrics(
+        [done, _task(2, TaskState.READY), _task(3, TaskState.WAITING_DEPENDENCY)]
+    )
+
+    assert with_waiting.productivity == baseline.productivity
+    assert with_waiting.reliability == baseline.reliability
+
+
+def test_mixed_fixture_counts_only_dispatched_tasks() -> None:
+    tasks = [
+        _task(1, TaskState.COMPLETE, pr=1, run_started_at=_DISPATCHED_AT),
+        _task(2, TaskState.NEEDS_HUMAN, run_started_at=_DISPATCHED_AT),
+        # capacity failover: dispatched, then waiting for the next attempt
+        _task(3, TaskState.WAITING_CAPACITY, capacity_events=1, run_started_at=_DISPATCHED_AT),
+        # cancelled before it ever ran
+        _task(4, TaskState.CANCELLED),
+        # never dispatched
+        _task(5, TaskState.READY),
+        # escalated without ever being dispatched (e.g. eligibility rejection)
+        _task(6, TaskState.NEEDS_HUMAN),
+    ]
+
+    metrics = calculate_metrics(tasks)
+
+    assert metrics.productivity.issues_attempted == 3
+    assert metrics.productivity.issues_implemented == 1
+    assert metrics.productivity.autonomous_completion_rate == round(1 / 3, 4)
+    assert metrics.reliability.task_completion_rate == round(1 / 3, 4)
+    assert metrics.reliability.manual_intervention_rate == round(1 / 3, 4)
+    assert metrics.productivity.issues_attempted_inferred == 0
+
+
+def test_legacy_state_without_run_started_at_is_inferred_and_flagged() -> None:
+    """Pre-#137 state has no run_started_at; dispatch is inferred from other durable
+    evidence and reported separately from confirmed attempts."""
+    tasks = [
+        _task(1, TaskState.READY_FOR_REVIEW, pr=3),  # PR exists => it was dispatched
+        _task(2, TaskState.NEEDS_HUMAN, attempt=1),  # attempt counter recorded a dispatch
+        _task(3, TaskState.READY),  # no evidence
+        _task(4, TaskState.COMPLETE, pr=4, run_started_at=_DISPATCHED_AT),  # confirmed
+    ]
+
+    metrics = calculate_metrics(tasks)
+
+    assert metrics.productivity.issues_attempted == 3
+    assert metrics.productivity.issues_attempted_inferred == 2
+    assert "inferred" in format_run_report(metrics).lower()
+
+
+def test_failure_switch_rate_excludes_capacity_switches() -> None:
+    """Capacity-driven switches must not be counted as failure switches (SPEC: capacity
+    events are not Agent failures)."""
+    capacity_only = _task(
+        1,
+        TaskState.COMPLETE,
+        pr=1,
+        run_started_at=_DISPATCHED_AT,
+        capacity_events=2,
+        agent_switches=2,
+        actual_agent_switches=2,
+    )
+    failure_switch = _task(
+        2,
+        TaskState.READY_FOR_REVIEW,
+        pr=2,
+        run_started_at=_DISPATCHED_AT,
+        per_agent_failures=(("claude", 2),),
+        actual_agent_switches=1,
+    )
+
+    assert calculate_metrics([capacity_only]).reliability.agent_failure_switch_rate is None
+    rate = calculate_metrics([capacity_only, failure_switch]).reliability.agent_failure_switch_rate
+    assert rate == round(1 / 2, 4)
