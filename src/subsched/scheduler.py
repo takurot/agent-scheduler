@@ -154,7 +154,11 @@ class Scheduler:
         # retries. Tracked as its own durable budget via Task.verification_failures.
         max_verification_failures: int = 2,
         max_agent_switches: int = 6,
-        max_tasks: int = 50,
+        # #375: per-run dispatch budget over DISTINCT issues. Retries, verification
+        # retries, and review/revision rounds of an already-dispatched issue do not
+        # consume another slot; a new Scheduler instance (new CLI run / restart)
+        # starts a fresh budget. Persisted history never counts against it.
+        max_tasks_per_run: int = 50,
         push_enabled: bool = False,
         create_pr_enabled: bool = True,
         close_issue_enabled: bool = False,
@@ -224,14 +228,17 @@ class Scheduler:
             raise ValueError("max_agent_failures must be positive")
         if max_verification_failures <= 0:
             raise ValueError("max_verification_failures must be positive")
-        if max_agent_switches <= 0 or max_tasks <= 0:
+        if max_agent_switches <= 0 or max_tasks_per_run <= 0:
             raise ValueError("scheduler safety limits must be positive")
         if max_review_cycles <= 0:
             raise ValueError("max_review_cycles must be positive")
         self.max_agent_failures = max_agent_failures
         self.max_verification_failures = max_verification_failures
         self.max_agent_switches = max_agent_switches
-        self.max_tasks = max_tasks
+        self.max_tasks_per_run = max_tasks_per_run
+        # #375: issues dispatched by THIS scheduler instance (this run). Tracked in
+        # memory only -- a restart is a new run with a fresh budget by definition.
+        self._run_dispatched_issues: set[int] = set()
         self.workflow = workflow or WorkflowConfig()
         if self.workflow.limits.max_plan_revisions <= 0:
             raise ValueError("workflow.limits.max_plan_revisions must be positive")
@@ -821,8 +828,10 @@ class Scheduler:
 
         self.discovery_notes = tuple(notes)
         self.reactivated_cancelled = tuple(reactivated)
-        if len(new_queue.tasks) + len(additions) > self.max_tasks:
-            raise ValueError(f"task limit exceeded ({self.max_tasks})")
+        # #375: no total-queue-size cap here. Persisted history (COMPLETE/NEEDS_HUMAN/
+        # CANCELLED tasks) accumulates by design, and capping it would block all new
+        # work once the repository's lifetime issue count exceeded the limit. The
+        # run-scoped admission limit is enforced at dispatch time in tick() instead.
         new_queue = new_queue.append(additions)
         cycles = detect_dependency_cycles(new_queue.tasks)
         if cycles:
@@ -1058,6 +1067,18 @@ class Scheduler:
                 self._backoff_step = min(self._backoff_step + 1, 10)
             return False
 
+        # #375: the per-run budget bounds DISTINCT issues admitted by this run. Once
+        # exhausted, no NEW issue is dispatched -- but issues this run already started
+        # may continue (retries, verification retries, review/revision rounds never
+        # consume or get blocked by the budget). Parked tasks stay READY, never
+        # WAITING_CAPACITY: capacity is not the blocker, the budget is.
+        if len(self._run_dispatched_issues) >= self.max_tasks_per_run:
+            ready_tasks = [
+                t for t in ready_tasks if t.issue_number in self._run_dispatched_issues
+            ]
+            if not ready_tasks:
+                return False
+
         available_capacities = [
             c for c in effective.values() if not self.lease_manager.is_agent_busy(c.agent)
         ]
@@ -1083,6 +1104,10 @@ class Scheduler:
         # IN_PROGRESS, so dispatch_status is the only way to tell a PR_REVIEW/REVISING
         # dispatch apart from a normal one (see Task.dispatch_status docstring).
         task = replace(task, dispatch_status=task.status)
+        # #375: record the issue against this run's dispatch budget. Same-issue
+        # re-dispatches (retry, verification retry, review/revision rounds) are
+        # idempotent -- only distinct issues consume budget slots.
+        self._run_dispatched_issues.add(task.issue_number)
         lease = self.lease_manager.acquire(task.issue_number, agent, now=current)
         try:
             if self.worktree_adapter is not None:

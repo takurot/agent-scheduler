@@ -616,6 +616,9 @@ billing:
 execution:
   concurrency: 1
   max_agent_switches: 6
+  # Per-run dispatch budget over DISTINCT issues: retries, verification retries,
+  # and review rounds never consume extra slots, and persisted history never
+  # counts against it. A new run (CLI invocation / restart) resets the budget.
   max_tasks_per_run: 50
   pause_running_policy: continue
   # Optional: automated PR review and revision rounds before completing the task
