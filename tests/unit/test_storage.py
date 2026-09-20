@@ -126,6 +126,118 @@ def test_oversized_state_quarantined(tmp_path: Path) -> None:
         JsonStateStore(tmp_path).load_tasks()
 
 
+def test_quarantine_blocks_reload_as_new_process(tmp_path: Path) -> None:
+    state_file = tmp_path / ".ai" / "scheduler.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(StateCorruptionError):
+        JsonStateStore(tmp_path).load_tasks()
+
+    assert not state_file.exists()
+
+    # A brand new store instance (simulating a new process) must still fail closed
+    # instead of treating the missing file as a fresh, empty queue.
+    second_store = JsonStateStore(tmp_path)
+    with pytest.raises(StateCorruptionError, match="recovery"):
+        second_store.load_tasks()
+    with pytest.raises(StateCorruptionError, match="recovery"):
+        second_store.load_capacities()
+    with pytest.raises(StateCorruptionError, match="recovery"):
+        second_store.load_snapshot()
+    with pytest.raises(StateCorruptionError, match="recovery"):
+        second_store.is_paused()
+    with pytest.raises(StateCorruptionError, match="recovery"):
+        second_store.get_revision()
+    with pytest.raises(StateCorruptionError, match="recovery"):
+        second_store.save_tasks(())
+
+
+def test_quarantine_rejects_symlinked_recovery_marker(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    outside = tmp_path / "outside_marker.json"
+    outside.write_text("{}", encoding="utf-8")
+    store.recovery_marker.symlink_to(outside)
+
+    with pytest.raises(StateCorruptionError, match="refusing to use symlinked recovery marker"):
+        store.load_tasks()
+
+
+def test_new_repository_without_quarantine_history_is_unaffected(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+
+    assert store.load_tasks() == ()
+    assert store.load_capacities() == ()
+    snapshot = store.load_snapshot()
+    assert snapshot.tasks == ()
+    assert snapshot.capacities == ()
+    assert snapshot.paused is False
+    assert snapshot.revision == 0
+    assert store.is_paused() is False
+    assert store.get_revision() == 0
+
+
+def test_resolve_quarantine_requires_pending_marker(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    with pytest.raises(StateCorruptionError, match="no quarantine"):
+        store.resolve_quarantine()
+
+
+def test_resolve_quarantine_requires_state_file_present(tmp_path: Path) -> None:
+    state_file = tmp_path / ".ai" / "scheduler.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text("{broken", encoding="utf-8")
+    store = JsonStateStore(tmp_path)
+    with pytest.raises(StateCorruptionError):
+        store.load_tasks()
+
+    with pytest.raises(StateCorruptionError, match="no state file"):
+        store.resolve_quarantine()
+
+
+def test_resolve_quarantine_rejects_still_invalid_restored_state(tmp_path: Path) -> None:
+    state_file = tmp_path / ".ai" / "scheduler.json"
+    state_file.parent.mkdir(parents=True)
+    state_file.write_text("{broken", encoding="utf-8")
+    store = JsonStateStore(tmp_path)
+    with pytest.raises(StateCorruptionError):
+        store.load_tasks()
+
+    # Operator restores another still-broken file to the canonical path.
+    state_file.write_text("{also broken", encoding="utf-8")
+    with pytest.raises(StateCorruptionError):
+        store.resolve_quarantine()
+    # The marker must remain so the state stays fail-closed.
+    with pytest.raises(StateCorruptionError, match="recovery"):
+        store.load_tasks()
+
+
+def test_resolve_quarantine_restores_access_after_valid_backup_restore(
+    tmp_path: Path,
+) -> None:
+    store = JsonStateStore(tmp_path)
+    task = Task.from_issue(Issue(number=42, title="answer"))
+    store.save_tasks(())
+    store.save_tasks((task,))
+    store.save_tasks((task,))
+    backup_bytes = (tmp_path / ".ai" / "backup" / "scheduler.bak.json").read_bytes()
+
+    (tmp_path / ".ai" / "scheduler.json").write_text("{broken", encoding="utf-8")
+    with pytest.raises(StateCorruptionError):
+        store.load_tasks()
+    assert not (tmp_path / ".ai" / "scheduler.json").exists()
+
+    # Operator explicitly restores a verified backup, then acknowledges recovery.
+    (tmp_path / ".ai" / "scheduler.json").write_bytes(backup_bytes)
+    store.resolve_quarantine()
+
+    assert store.load_tasks() == (task,)
+
+    # And it stays usable for subsequent operations, e.g. saving new state.
+    store.save_tasks((task,))
+
+
 def test_standard_directory_initialization_and_backup(tmp_path: Path) -> None:
     store = JsonStateStore(tmp_path)
     store.save_tasks(())

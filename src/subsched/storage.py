@@ -308,6 +308,7 @@ class JsonStateStore:
         self.worktrees_dir = self.state_dir / "worktrees"
         self.path = self.state_dir / "scheduler.json"
         self.lock_file = self.state_dir / "scheduler.lock"
+        self.recovery_marker = self.state_dir / "RECOVERY_REQUIRED.json"
 
     def init_directories(self) -> None:
         self._validate_state_directory()
@@ -326,6 +327,7 @@ class JsonStateStore:
         return SchedulerLock(self.lock_file)
 
     def get_revision(self) -> int:
+        self._check_recovery_required()
         if not self.path.exists():
             return 0
         payload = self._load_payload()
@@ -354,6 +356,7 @@ class JsonStateStore:
         capacities: Iterable[Capacity] = (),
         expected_revision: int | None = None,
     ) -> int:
+        self._check_recovery_required()
         current_revision = self.get_revision()
         if expected_revision is not None and current_revision != expected_revision:
             raise StateCorruptionError(
@@ -399,6 +402,7 @@ class JsonStateStore:
         return new_revision
 
     def load_tasks(self) -> tuple[Task, ...]:
+        self._check_recovery_required()
         if not self.path.exists():
             return ()
         payload = self._load_payload()
@@ -416,6 +420,7 @@ class JsonStateStore:
         return tasks
 
     def load_capacities(self) -> tuple[Capacity, ...]:
+        self._check_recovery_required()
         if not self.path.exists():
             return ()
         payload = self._load_payload()
@@ -432,6 +437,7 @@ class JsonStateStore:
             raise StateCorruptionError("invalid capacity data in scheduler state") from error
 
     def load_snapshot(self) -> SchedulerStateSnapshot:
+        self._check_recovery_required()
         if not self.path.exists():
             return SchedulerStateSnapshot(tasks=(), capacities=(), paused=False, revision=0)
         payload = self._load_payload()
@@ -443,6 +449,7 @@ class JsonStateStore:
         )
 
     def is_paused(self) -> bool:
+        self._check_recovery_required()
         return bool(self._load_payload().get("paused", False)) if self.path.exists() else False
 
     def set_paused(self, paused: bool, *, expected_revision: int | None = None) -> int:
@@ -462,9 +469,67 @@ class JsonStateStore:
         try:
             os.replace(self.path, dest)
             os.chmod(dest, 0o600)
-            return dest
         except OSError:
             return None
+        self._write_recovery_marker(reason, dest)
+        return dest
+
+    def _write_recovery_marker(self, reason: str, quarantined_path: Path) -> None:
+        """Persist a marker recording that quarantine occurred, so a missing state file
+        is never mistaken for a fresh, empty queue by this or a later process. The marker
+        can only be cleared via `resolve_quarantine()`, once a valid state file has been
+        explicitly restored to `self.path`.
+        """
+        payload = {
+            "reason": reason,
+            "quarantined_file": str(quarantined_path),
+            "quarantined_at": datetime.now(UTC).isoformat(),
+        }
+        try:
+            secure_directory(self.state_dir)
+            atomic_write_secure_bytes(
+                self.recovery_marker,
+                (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+            )
+        except OSError as err:
+            logger.warning("failed to write recovery marker %s: %s", self.recovery_marker, err)
+
+    def _check_recovery_required(self) -> None:
+        if self.recovery_marker.is_symlink():
+            raise StateCorruptionError(
+                f"refusing to use symlinked recovery marker: {self.recovery_marker}"
+            )
+        if self.recovery_marker.exists():
+            raise StateCorruptionError(
+                "scheduler state was quarantined after corruption and requires explicit "
+                f"recovery: restore a verified backup to {self.path} and call "
+                "resolve_quarantine() before reading or writing state "
+                f"(marker: {self.recovery_marker})"
+            )
+
+    def resolve_quarantine(self) -> None:
+        """Explicitly acknowledge recovery from a prior quarantine.
+
+        Requires that a valid state file has already been restored to `self.path`
+        (e.g. from `self.backup_dir` or a manually verified copy). Fails closed if no
+        recovery is pending, no state file is present, or the restored file is itself
+        invalid, leaving the marker in place so state stays inaccessible.
+        """
+        if not self.recovery_marker.exists():
+            raise StateCorruptionError("no quarantine recovery is pending")
+        if not self.path.exists():
+            raise StateCorruptionError(
+                f"cannot resolve quarantine: no state file present at {self.path}; "
+                "restore a verified backup first"
+            )
+        payload = self._load_payload()
+        try:
+            tasks = tuple(Task.from_dict(item) for item in payload["tasks"])
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            raise StateCorruptionError("restored scheduler state is still invalid") from error
+        if len({task.issue_number for task in tasks}) != len(tasks):
+            raise StateCorruptionError("restored scheduler state has duplicate tasks")
+        self.recovery_marker.unlink()
 
     def _load_payload(self) -> dict[str, Any]:
         self._validate_state_directory()
