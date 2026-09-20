@@ -143,7 +143,7 @@ def test_run_process_group_invokes_heartbeat_without_busy_polling(tmp_path: Path
     loop)."""
     ticks: list[float] = []
     request = ProcessExecutionRequest(
-        argv=(sys.executable, "-c", "import time; time.sleep(0.3)"),
+        argv=(sys.executable, "-c", "import time; time.sleep(0.6)"),
         cwd=tmp_path,
         env={"PATH": os.environ.get("PATH", "")},
         timeout_seconds=5.0,
@@ -154,9 +154,10 @@ def test_run_process_group_invokes_heartbeat_without_busy_polling(tmp_path: Path
 
     assert result.exit_code == 0
     assert result.timed_out is False
-    # ~0.3s of sleep at a 0.05s heartbeat interval should yield several heartbeats, not
-    # zero (heartbeat never fired) and not hundreds (busy-polling).
-    assert 3 <= len(ticks) <= 20
+    # ~0.6s of sleep at a 0.05s heartbeat interval should yield several heartbeats, not
+    # zero (heartbeat never fired) and not hundreds (busy-polling). The lower bound is
+    # deliberately loose (~12 expected) so slow CI runners do not flake (#393).
+    assert 2 <= len(ticks) <= 20
     # Elapsed values passed to the heartbeat must be monotonically non-decreasing.
     assert ticks == sorted(ticks)
 
