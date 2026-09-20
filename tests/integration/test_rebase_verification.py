@@ -126,6 +126,116 @@ def test_scheduler_fails_and_does_not_push_on_post_rebase_verification_failure(
     assert cp.exit_code != 0
 
 
+def test_post_rebase_cleanup_unconfirmed_escalates_to_needs_human(tmp_path: Path) -> None:
+    """#373: when post-rebase verification reports an unconfirmed process cleanup,
+    the scheduler must fail closed to NEEDS_HUMAN (operator_decision_required) without
+    consuming the verification failure budget, pushing, or creating a PR."""
+    from unittest.mock import patch
+
+    import subsched.verification as verif_mod
+    from subsched.verification import GateResult, VerificationReport
+
+    seed = tmp_path / "seed"
+    _init_repo(seed)
+    (seed / ".gitignore").write_text(".ai/\n", encoding="utf-8")
+    (seed / "config.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(seed, "add", ".")
+    _git(seed, "commit", "-m", "Initial commit")
+
+    remote = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "clone", "--bare", str(seed), str(remote)], check=True, capture_output=True
+    )
+    _git(seed, "remote", "add", "origin", str(remote))
+
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", str(remote), str(clone)], check=True, capture_output=True)
+    _git(clone, "config", "user.name", "Test User")
+    _git(clone, "config", "user.email", "test@example.invalid")
+
+    class Worker:
+        def run(self, task, agent):
+            wt = Path(task.worktree)
+            (wt / "check.py").write_text(
+                "from config import VALUE\nassert VALUE == 1\n",
+                encoding="utf-8",
+            )
+            _git(wt, "add", "check.py")
+            _git(wt, "commit", "-m", "Add task check")
+
+            # Remote base moves but does NOT conflict with check.py
+            (seed / "OTHER.md").write_text("Independent change\n", encoding="utf-8")
+            _git(seed, "add", "OTHER.md")
+            _git(seed, "commit", "-m", "Unrelated base change")
+            _git(seed, "push", "origin", "main")
+            return AgentResult(AgentResultKind.PASS)
+
+    real_run_verification = verif_mod.run_verification
+    calls: list[int] = []
+
+    def staged_run_verification(worktree: Path, commands: tuple[str, ...], **kwargs: object):
+        calls.append(1)
+        if len(calls) == 1:
+            # Pre-push gate on the task branch: genuinely passes.
+            return real_run_verification(worktree, commands, **kwargs)  # type: ignore[arg-type]
+        # Post-rebase gate: command exits 0 but the process-group cleanup is unconfirmed.
+        return VerificationReport(
+            passed=False,
+            gates=(
+                GateResult(
+                    command=commands[0] if commands else "quality gate",
+                    exit_code=0,
+                    stdout="",
+                    stderr="",
+                    passed=False,
+                    cleanup_succeeded=False,
+                ),
+            ),
+            summary="quality gate: FAIL (process cleanup unconfirmed)",
+            cleanup_confirmed=False,
+        )
+
+    s = Scheduler(
+        store=JsonStateStore(clone),
+        router=Router([AgentConfig("claude", 100)]),
+        worker=Worker(),
+        worktree_root=clone / ".ai" / "worktrees",
+        worktree_adapter=GitWorktreeAdapter(clone, clone / ".ai" / "worktrees"),
+        verification_commands=(f"{sys.executable} check.py",),
+        push_enabled=True,
+        create_pr_enabled=True,
+        repo="audit/fixture",
+        base_branch="main",
+        max_verification_failures=5,
+    )
+    s.discover((Issue(1, "Add task check"),))
+
+    fake_pr = PullRequestResult(
+        PullRequestResultKind.SUCCESS,
+        PullRequestInfo(9, "https://example.invalid/pr/9", "fixture", "fixture"),
+    )
+    with patch(
+        "subsched.github.pull_requests.create_or_get_pull_request", return_value=fake_pr
+    ) as create_mock, patch(
+        "subsched.verification.run_verification", side_effect=staged_run_verification
+    ):
+        s.tick([_available("claude")])
+
+    assert len(calls) == 2
+    assert create_mock.call_count == 0
+
+    proc = subprocess.run(
+        ["git", "--git-dir", str(remote), "rev-parse", "--verify", "refs/heads/subsched/issue-1"],
+        capture_output=True,
+    )
+    assert proc.returncode != 0, "Branch must not be pushed when cleanup is unconfirmed"
+
+    task = s.tasks[0]
+    assert task.status is TaskState.NEEDS_HUMAN
+    assert task.needs_human_reason_code == "operator_decision_required"
+    assert task.verification_failures == 0
+
+
 def test_scheduler_pushes_when_post_rebase_verification_passes(tmp_path: Path) -> None:
     """When remote base changes cleanly and post-rebase verification passes,
     the scheduler pushes the rebased branch and creates a PR with the updated checkpoint.

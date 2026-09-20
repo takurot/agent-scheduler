@@ -575,13 +575,13 @@ _real_subprocess_run = subprocess.run
 
 
 def fake_gh_pr_list(stdout: str) -> object:
-    """Fake `subprocess.run` that only intercepts `gh pr list`, letting other
+    """Fake `subprocess.run` that only intercepts `gh pr view`, letting other
     invocations (e.g. the `git rev-parse` used to resolve the repository root)
     fall through to the real `subprocess.run`.
     """
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if argv[:3] != ["gh", "pr", "list"]:
+        if argv[:3] != ["gh", "pr", "view"]:
             return _real_subprocess_run(argv, **kwargs)  # type: ignore[arg-type]
         return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
@@ -598,7 +598,7 @@ def test_reconcile_tasks_advances_merged_pr_to_complete(
     monkeypatch.setattr(
         subprocess,
         "run",
-        fake_gh_pr_list('[{"number": 10, "state": "MERGED", "mergedAt": null}]'),
+        fake_gh_pr_list('{"number": 10, "state": "MERGED"}'),
     )
 
     result = reconcile_tasks(str(tmp_path), repo="owner/project")
@@ -621,7 +621,7 @@ def test_reconcile_tasks_dry_run_does_not_mutate_state(
     monkeypatch.setattr(
         subprocess,
         "run",
-        fake_gh_pr_list('[{"number": 20, "state": "MERGED", "mergedAt": null}]'),
+        fake_gh_pr_list('{"number": 20, "state": "MERGED"}'),
     )
 
     result = reconcile_tasks(str(tmp_path), repo="owner/project", dry_run=True)
@@ -677,11 +677,11 @@ def test_reconcile_tasks_uses_configured_repo_when_not_provided(
     seen_repos: list[str] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if argv[:3] != ["gh", "pr", "list"]:
+        if argv[:3] != ["gh", "pr", "view"]:
             return _real_subprocess_run(argv, **kwargs)  # type: ignore[arg-type]
         seen_repos.append(argv[argv.index("--repo") + 1])
         return subprocess.CompletedProcess(
-            argv, 0, stdout='[{"number": 40, "state": "OPEN", "mergedAt": null}]', stderr=""
+            argv, 0, stdout='{"number": 40, "state": "OPEN"}', stderr=""
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)

@@ -616,6 +616,9 @@ billing:
 execution:
   concurrency: 1
   max_agent_switches: 6
+  # Per-run dispatch budget over DISTINCT issues: retries, verification retries,
+  # and review rounds never consume extra slots, and persisted history never
+  # counts against it. A new run (CLI invocation / restart) resets the budget.
   max_tasks_per_run: 50
   pause_running_policy: continue
   # Optional: automated PR review and revision rounds before completing the task
@@ -754,7 +757,7 @@ See this repository's own [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) 
 | `subsched run` | Discover issues, initialize queue, and dispatch tasks (`--allow-native`, `--subscription-billing-verified`, `--watch`, `--dry-run`) |
 | `subsched status` | Display queue breakdown, cooldowns, and scheduler state (`-v` / `--verbose` for per-task detail) |
 | `subsched metrics` | Output Productivity, Reliability, and Capacity metrics (`--json`, `--report <file.md>`). "Attempted" counts only tasks that were actually dispatched (queued/waiting/never-run tasks are excluded; rates are `null`/`N/A` when nothing was attempted), and `agent_failure_switch_rate` excludes capacity-driven switches |
-| `subsched reconcile` | Reconcile `READY_FOR_REVIEW` tasks against actual PR state on GitHub: a merged PR advances to `COMPLETE`, an unmerged closed PR escalates to `NEEDS_HUMAN`, an open PR is left unchanged. Optional `--prune-worktrees` removes a merged worktree only when it has no tracked changes or untracked files outside Scheduler-owned `.ai/` state (`--repo`, `--dry-run`, `--prune-worktrees`) |
+| `subsched reconcile` | Reconcile `READY_FOR_REVIEW` tasks against actual PR state on GitHub (each tracked PR is fetched individually via `gh pr view`, at most 100 per run; any fetch failure leaves state untouched): a merged PR advances to `COMPLETE`, an unmerged closed PR escalates to `NEEDS_HUMAN`, an open PR is left unchanged. Optional `--prune-worktrees` removes a merged worktree only when it has no tracked changes or untracked files outside Scheduler-owned `.ai/` state (`--repo`, `--dry-run`, `--prune-worktrees`) |
 | `subsched pause` | Pause task execution cleanly after current step |
 | `subsched resume` | Resume scheduler execution from paused state |
 | `subsched cancel <id>` | Cancel a task and preserve its worktree files |

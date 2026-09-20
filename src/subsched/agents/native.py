@@ -152,7 +152,10 @@ class NativeWorker:
                 env=isolated_request.env,
             )
         if cleanup_failure is not None:
-            return AgentResult(AgentResultKind.FAILURE, output=cleanup_failure)
+            # #373: an unconfirmed container cleanup is a terminal safety condition --
+            # surface it as PROCESS_CLEANUP_FAILED so the Scheduler escalates straight
+            # to NEEDS_HUMAN without burning the retry/agent-switch budget.
+            return AgentResult(AgentResultKind.PROCESS_CLEANUP_FAILED, output=cleanup_failure)
         import_failure = import_isolated_git(request.cwd, git_context, read_only=read_only)
         if import_failure is not None:
             return AgentResult(AgentResultKind.FAILURE, output=import_failure)

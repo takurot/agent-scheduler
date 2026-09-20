@@ -110,6 +110,23 @@ def test_planning_states_can_wait_for_capacity(planning_state: TaskState) -> Non
     assert waiting.status is TaskState.WAITING_CAPACITY
 
 
+def test_blocked_task_can_return_to_waiting_dependency() -> None:
+    """#374: dependency-originated BLOCKED tasks re-enter WAITING_DEPENDENCY when
+    their dependency recovers (known, non-terminal, not yet complete)."""
+    task = Task(
+        task_id="github-2",
+        issue_number=2,
+        title="child",
+        labels=(),
+        status=TaskState.BLOCKED,
+        dependencies=(1,),
+    )
+
+    waiting = task.transition(TaskState.WAITING_DEPENDENCY)
+
+    assert waiting.status is TaskState.WAITING_DEPENDENCY
+
+
 @pytest.mark.parametrize("from_state", list(TaskState))
 def test_all_state_transitions_match_allowed_matrix(from_state: TaskState) -> None:
     from subsched.models import ALLOWED_TRANSITIONS

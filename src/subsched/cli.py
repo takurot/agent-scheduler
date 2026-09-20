@@ -491,7 +491,7 @@ def run(
             max_agent_failures=cfg.execution.max_agent_failures,
             max_verification_failures=cfg.execution.max_verification_failures,
             max_agent_switches=cfg.execution.max_agent_switches,
-            max_tasks=cfg.execution.max_tasks_per_run,
+            max_tasks_per_run=cfg.execution.max_tasks_per_run,
             push_enabled=not dry_run,
             create_pr_enabled=cfg.github.completion.create_pr,
             close_issue_enabled=cfg.github.completion.close_issue,
@@ -533,9 +533,6 @@ def run(
             snapshot_complete=is_complete_snapshot,
             reactivate_cancelled=reactivate_cancelled,
         )
-    except ValueError as error:
-        typer.echo(f"Task limit exceeded ({cfg.execution.max_tasks_per_run})", err=True)
-        raise typer.Exit(2) from error
     except (SchedulerLockError, StateCorruptionError) as error:
         typer.echo(f"State error: {error}", err=True)
         raise typer.Exit(1) from error
@@ -869,11 +866,19 @@ def reconcile(
                 typer.echo("No READY_FOR_REVIEW tasks with an associated PR to reconcile")
                 return
 
-            fetch = fetch_pr_lifecycle_states(resolved_repo)
+            fetch = fetch_pr_lifecycle_states(
+                resolved_repo, [task.pr for task in candidates if task.pr is not None]
+            )
             if fetch.kind is PrLifecycleFetchKind.FAILURE:
                 typer.echo(f"Failed to fetch PR state from GitHub: {fetch.error}", err=True)
                 raise typer.Exit(1)
 
+            if fetch.deferred:
+                typer.echo(
+                    f"Warning: {len(fetch.deferred)} tracked PR(s) beyond the per-run request "
+                    f"cap were not checked: {', '.join(f'#{n}' for n in fetch.deferred)}",
+                    err=True,
+                )
             result = plan_reconciliation(tasks, fetch.states)
             for item in result.items:
                 typer.echo(

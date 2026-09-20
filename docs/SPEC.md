@@ -589,6 +589,21 @@ while scheduler.running:
     sleep_until_next_event()
 ```
 
+## Run単位のdispatch予算 (`execution.max_tasks_per_run`) (#375)
+
+`max_tasks_per_run`は永続queueの全履歴件数の上限ではなく、1回のrun（Scheduler
+instance）で新規に着手する**distinct issue数**の予算である。
+
+- 予算の消費は「そのrunで初めてdispatchしたissue」1件につき1枠。同一issueの再試行、
+  verification再試行、PR review / revision roundは追加の枠を消費しない。
+- 予算を使い切ったrunは新規issueをdispatchしない。ただし既に着手したissueの
+  retry/reviewはrun内で継続できる。着手できなかったタスクは`READY`のまま
+  （`WAITING_CAPACITY`へは移さない。容量ではなく予算が blockerであるため）。
+- 永続化された完了履歴・NEEDS_HUMAN履歴は予算の計算に含まれない。discoveryは
+  履歴件数によってブロックされず、履歴削除による回避は行わない。
+- 再起動・新しいCLI実行・MCP実行はそれぞれ新しいrunであり、予算はリセットされる
+  （runごとに上限が守られるため、再起動を繰り返しても1 runあたりの上限を超えない）。
+
 ---
 
 # 16. Issue Priority
@@ -1363,6 +1378,21 @@ Blocked-By: #101
 
 LLM推論による依存関係生成はMVPでは行わない。
 
+## BLOCKEDタスクの再評価 (#374)
+
+依存関係由来で`BLOCKED`になったTaskは、依存先の状態変化（復旧・発見・完了）ごとに
+再評価する。`WAITING_DEPENDENCY`と同じ遷移規則を`BLOCKED`にも適用する。
+
+- 全依存先が`COMPLETE`なら`READY`へ戻す
+- 依存先がすべて既知・非terminal・未完了なら`WAITING_DEPENDENCY`へ安全に戻す
+- 依存先が`FAILED` / `CANCELLED` / `BLOCKED` / `NEEDS_HUMAN` / 未登録のままなら
+  `BLOCKED`を維持する（依存先が再び回復すれば次の再評価で戻る）
+
+自己依存と循環による`BLOCKED`は構造的なものであり、この再評価では解除しない。
+自己依存はIssue本文の変更による再discoveryでのみ、循環は依存編集で循環が解消された
+場合にのみ解除される。`BLOCKED`から`WAITING_DEPENDENCY`への遷移を許可する
+（`ALLOWED_TRANSITIONS`参照）。
+
 ---
 
 # 37. Concurrency
@@ -1461,11 +1491,17 @@ Bernsteinを採用できる場合、このverification gateを既存機能へ委
 - `execution.ci_monitoring: false`（既定）: `READY_FOR_REVIEW`のままとどまり、Scheduler
   は自動でCOMPLETEへ昇格させない。PR merge後の後始末（Issue再発見の抑止等）は#146の
   discovery-time reconciliationが別途担当する。明示的にPR状態を反映させたい場合は
-  `subsched reconcile`（#277）を実行する。これは`gh pr list`でPRのlifecycle状態を
-  batch取得し、`MERGED`なら`COMPLETE`へ、mergeされずに`CLOSED`なら`NEEDS_HUMAN`へ
+  `subsched reconcile`（#277）を実行する。これはstate中の追跡PR番号ごとに
+  `gh pr view <番号>`でlifecycle状態を個別取得し（直近N件の窓に依存しないため、古いPRも
+  照合できる。#377）、`MERGED`なら`COMPLETE`へ、mergeされずに`CLOSED`なら`NEEDS_HUMAN`へ
   遷移させ、`OPEN`または不明な状態のtaskは`READY_FOR_REVIEW`のまま変更しない。`gh`
-  実行エラー・認証失敗・不正な出力の場合はscheduler状態を一切変更せずnon-zeroで
-  終了する（fail-closed）。dispatch loopや`discover()`からは暗黙に呼ばれず、必ず
+  実行エラー・認証失敗・不正な出力（追跡PRのうち1件でも取得・検証に失敗した場合を含む）の場合はscheduler状態を一切変更せずnon-zeroで
+  終了する（fail-closed）。1回の実行で呼び出す`gh pr view`は重複除去した追跡PR番号の昇順で最大
+  100件に制限し（rate limit対策）、超過分は不明扱い（`UNCHANGED`）とし、CLIは警告、MCPは`deferred_prs`で報告する。
+  昇順のため、低番号のOPENなPRが上限件数以上続くと、より大きい番号のPRは
+  それらが解決するまで繰り延べられ得る。永続state中のPR番号は1〜2^31-1の整数のみ受け付け、
+  それ以外はgh呼び出し前にfail-closedで失敗させる（`--web`や負数がgh引数として解釈される
+  のを防ぐ）。`--dry-run`も同じ取得・判定を行い、状態だけを書き込まない。dispatch loopや`discover()`からは暗黙に呼ばれず、必ず
   operatorまたはMCPクライアントが明示的に起動する。
   CLIで`--prune-worktrees`を明示した場合のみ、merge済みtaskのworktreeを削除する。削除前に
   `git status --porcelain -uall`を検査し、tracked changeまたはScheduler所有の`.ai/`配下以外の
@@ -1478,6 +1514,22 @@ Bernsteinを採用できる場合、このverification gateを既存機能へ委
     requeueはしない**。push/PR作成失敗（#128）やcommit message違反（#140）と同じ
     fail-closedの設計方針に合わせ、CI失敗は常に人間の判断を挟む。
   - CI `PENDING`/`UNKNOWN` → 状態を変更しない（`READY_FOR_REVIEW`のまま様子を見る）。
+
+### `gh pr checks`応答の検証 (#376)
+
+`gh pr checks`の終了コードとJSON payloadは組として検証する。終了コードは
+`0` = all pass、`1` = some failed、`7` = no checks、`8` = some pendingを正とし、
+それ以外の終了コードはコマンド異常として全体を`UNKNOWN`にする。payload側は
+「全要素が必須キー（非空の`name`）を持つdictであること」「`bucket`と`state`が
+両方存在する場合は同じ分類を指すこと」を検証し、不正要素・必須値欠落・
+state/bucket矛盾が1つでもあれば全体を`UNKNOWN`にする（要素の間引き・黙殺はしない）。
+`bucket`が`skipping`（`state`が`SKIPPED`/`NEUTRAL`）のcheckは`PASS`相当として扱い、
+skipされたcheckを含むだけのPRが`UNKNOWN`のまま停滞しないようにする。
+payloadが失敗（`FAIL`）を示す要素を1つでも含む場合は、終了コードや不正な別要素と
+矛盾していても全体を`FAIL`とする（キャンセルされたCIをhuman escalationへ届けるため。
+`FAIL`が誤って`PASS`になることはない）。それ以外の、要素から導いた全体状態と終了コードの
+意味との矛盾（例: 終了コード1なのに全要素PASS）は`UNKNOWN`とする。`PASS`への確定は「終了コード0・全要素PASS・
+矛盾なし」が全て成立した場合のみであり、空配列は`PASS`にならない。
 
 いずれの場合も、Issueの自動close・自動mergeは行わない（既存契約を維持）。
 
@@ -1702,6 +1754,12 @@ queueとoperator操作を再評価する。taskとcapacityが読み込み時か�
 長時間のworker実行中にoperator操作を塞がない。pause変更をScheduler自身がeventとして保存した
 場合も同じ期待revisionを使い、成功後のrevisionを以後のCASへ引き継ぐ。capacityとpauseは競合時に
 古いsnapshotで上書きされない。
+
+破損（JSON構文エラー、schema version不一致、サイズ超過、重複taskなど）により`scheduler.json`がquarantineへ
+退避された場合、ファイルが存在しない状態として扱われ次回プロセスや操作で空キューとして暗黙に再初期化されては
+ならない。Storeは`.ai/RECOVERY_REQUIRED.json`マーカーを永続化し、明示的に検証済みバックアップが復旧され
+`resolve_quarantine()`が呼び出されるまで、すべての読み込み・保存・dispatch操作に対して`StateCorruptionError`で
+fail closedを維持する。
 
 ---
 
@@ -2002,6 +2060,21 @@ Agent adapterが`PROCESS_CLEANUP_FAILED`を返した場合、前回のprocessが
 `attempt`と`per_agent_failures`を増やさずに即座に`NEEDS_HUMAN`へ遷移する。
 `needs_human_reason_code`は`operator_decision_required`とし、残存processをoperatorが
 確認するまで同一worktreeへ再dispatchしない。
+
+### cleanup失敗の伝播経路 (#373)
+
+`PROCESS_CLEANUP_FAILED`は次の両経路で同じ終端扱いにする。どちらも通常のfailure budget
+（`max_agent_failures`、`max_verification_failures`）を消費せず、retry・次Agent切替・
+push・PR作成へ進まない。
+
+- container隔離実行 (`NativeWorker._execute_isolated`) : provider processの正常終了、
+  timeout、例外のすべてで`cleanup_native_container`を強制し、失敗した場合は実行結果に
+  優先して`PROCESS_CLEANUP_FAILED`を返す。adapter例外が同時に発生してもcleanup失敗を
+  優先する。
+- verification gate (`run_verification`) : 各gateの終了時にprocess groupの停止が確認
+  できなければ`exit_code=0`でも`passed=False`とする。`VerificationReport.cleanup_confirmed`
+  が`False`のとき、Schedulerはpre-push gate・post-rebase gateのどちらでも
+  `operator_decision_required`で即座に`NEEDS_HUMAN`へ遷移する。
 
 ## Native WorkerによるNEEDS_HUMANの明示的シグナル（#297）
 
