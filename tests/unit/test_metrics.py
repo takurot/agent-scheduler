@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from subsched.cli import app
@@ -245,3 +246,28 @@ def test_failure_switch_rate_excludes_capacity_switches() -> None:
     assert calculate_metrics([capacity_only]).reliability.agent_failure_switch_rate is None
     rate = calculate_metrics([capacity_only, failure_switch]).reliability.agent_failure_switch_rate
     assert rate == round(1 / 2, 4)
+
+
+@pytest.mark.parametrize(
+    ("actual", "capacity_switches", "failures", "expected_rate"),
+    [
+        (1, 3, 2, 0.0),  # actual < agent_switches: never negative
+        (5, 0, 2, 1.0),  # actual > failures: clamped to failures
+        (2, 0, 2, 1.0),
+        (0, 0, 2, 0.0),
+    ],
+)
+def test_failure_switch_rate_clamps_per_task(
+    actual: int, capacity_switches: int, failures: int, expected_rate: float
+) -> None:
+    task = _task(
+        1,
+        TaskState.READY_FOR_REVIEW,
+        pr=1,
+        run_started_at=_DISPATCHED_AT,
+        per_agent_failures=(("claude", failures),),
+        actual_agent_switches=actual,
+        agent_switches=capacity_switches,
+    )
+
+    assert calculate_metrics([task]).reliability.agent_failure_switch_rate == expected_rate

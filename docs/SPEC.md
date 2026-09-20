@@ -2152,7 +2152,12 @@ eligible issues attempted
   切替（`agent_switches`）は含めない。failure専用の永続カウンタはないため、Taskごとに
   `min(max(actual_agent_switches - agent_switches, 0), 累積failure数)`として導出し、
   分母は累積failure数（`per_agent_failures`の合計）。累積件数であり、現在の状態や
-  run単位の集計ではない。
+  run単位の集計ではない。この値は**近似**であり、
+  誤差は両方向にあり得る: capacity event後に同じAgentで再開してからfailureで別Agentへ
+  切り替えた場合は過小評価、`CAPACITY_TEMPORARY`後に別Agentへdispatchされた場合は
+  過大評価（いずれもfailure数で上限を切る）。正確な値には、dispatch時点で切替原因を
+  記録する専用カウンタの永続化（schema変更）が必要であり、本Issueの対象外とする。
+  `prs_created`は分母に依存しない単純な件数（PRを持つ全Task）である。
 - **JSON互換性**: 既存のJSONフィールド名・型は変更しない。`issues_attempted_inferred`
   のみ追加（旧consumerは無視してよい）。永続schemaの変更・migrationは不要。
 
