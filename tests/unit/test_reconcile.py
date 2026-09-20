@@ -41,29 +41,67 @@ def make_task(
 # --- fetch_pr_lifecycle_states -----------------------------------------------
 
 
-def test_fetch_pr_lifecycle_states_success(monkeypatch: pytest.MonkeyPatch) -> None:
+def _view_payload(argv: list[str], state: str = "OPEN") -> str:
+    number = int(argv[3])
+    return f'{{"number": {number}, "state": "{state}"}}'
+
+
+def test_fetch_pr_lifecycle_states_queries_each_tracked_pr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#377: every tracked PR is fetched individually, so PRs older than any list
+    window (e.g. #1 among 101..200) are still resolved."""
+    calls: list[list[str]] = []
+    states = {1: "MERGED", 2: "CLOSED", 500: "OPEN"}
+
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        assert argv[:3] == ["gh", "pr", "list"]
+        calls.append(argv)
+        assert argv[:3] == ["gh", "pr", "view"]
+        assert argv[argv.index("--repo") + 1] == "owner/repo"
         return subprocess.CompletedProcess(
-            argv,
-            0,
-            stdout=(
-                '[{"number": 1, "state": "MERGED", "mergedAt": "2026-01-01T00:00:00Z"},'
-                ' {"number": 2, "state": "CLOSED", "mergedAt": null},'
-                ' {"number": 3, "state": "OPEN", "mergedAt": null}]'
-            ),
-            stderr="",
+            argv, 0, stdout=_view_payload(argv, states[int(argv[3])]), stderr=""
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    result = fetch_pr_lifecycle_states("owner/repo")
+    result = fetch_pr_lifecycle_states("owner/repo", [500, 1, 2, 1])
 
     assert result.kind is PrLifecycleFetchKind.SUCCESS
     assert result.states == {
         1: PrLifecycleState.MERGED,
         2: PrLifecycleState.CLOSED,
-        3: PrLifecycleState.OPEN,
+        500: PrLifecycleState.OPEN,
     }
+    # Deduplicated, deterministic ascending order, one call per unique PR.
+    assert [c[3] for c in calls] == ["1", "2", "500"]
+
+
+def test_fetch_pr_lifecycle_states_bounds_api_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=_view_payload(argv), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = fetch_pr_lifecycle_states("owner/repo", range(1, 11), max_requests=3)
+
+    assert result.kind is PrLifecycleFetchKind.SUCCESS
+    assert len(calls) == 3
+    # PRs beyond the cap are simply absent (unknown), never guessed.
+    assert set(result.states) == {1, 2, 3}
+
+
+def test_fetch_pr_lifecycle_states_no_prs_makes_no_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("gh must not be called without tracked PRs")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = fetch_pr_lifecycle_states("owner/repo", [])
+
+    assert result.kind is PrLifecycleFetchKind.SUCCESS
+    assert result.states == {}
 
 
 def test_fetch_pr_lifecycle_states_gh_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -71,11 +109,29 @@ def test_fetch_pr_lifecycle_states_gh_nonzero_exit(monkeypatch: pytest.MonkeyPat
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not authenticated")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    result = fetch_pr_lifecycle_states("owner/repo")
+    result = fetch_pr_lifecycle_states("owner/repo", [1])
 
     assert result.kind is PrLifecycleFetchKind.FAILURE
     assert result.states == {}
     assert "not authenticated" in result.error
+
+
+def test_fetch_pr_lifecycle_states_partial_failure_discards_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure on any tracked PR fails the whole fetch so no state is mutated."""
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if argv[3] == "2":
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not found")
+        return subprocess.CompletedProcess(argv, 0, stdout=_view_payload(argv), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = fetch_pr_lifecycle_states("owner/repo", [1, 2, 3])
+
+    assert result.kind is PrLifecycleFetchKind.FAILURE
+    assert result.states == {}
+    assert "#2" in result.error
 
 
 def test_fetch_pr_lifecycle_states_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,7 +139,7 @@ def test_fetch_pr_lifecycle_states_oserror(monkeypatch: pytest.MonkeyPatch) -> N
         raise OSError("gh not found")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    result = fetch_pr_lifecycle_states("owner/repo")
+    result = fetch_pr_lifecycle_states("owner/repo", [1])
 
     assert result.kind is PrLifecycleFetchKind.FAILURE
     assert "invocation failed" in result.error
@@ -94,70 +150,92 @@ def test_fetch_pr_lifecycle_states_timeout(monkeypatch: pytest.MonkeyPatch) -> N
         raise subprocess.TimeoutExpired(cmd=argv, timeout=30.0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    result = fetch_pr_lifecycle_states("owner/repo")
+    result = fetch_pr_lifecycle_states("owner/repo", [1])
 
     assert result.kind is PrLifecycleFetchKind.FAILURE
 
 
-def test_fetch_pr_lifecycle_states_unparseable_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 0, stdout="not json", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    result = fetch_pr_lifecycle_states("owner/repo")
-
-    assert result.kind is PrLifecycleFetchKind.FAILURE
-    assert "unparseable" in result.error
-
-
-def test_fetch_pr_lifecycle_states_non_list_structure(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 0, stdout='{"not": "a list"}', stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    result = fetch_pr_lifecycle_states("owner/repo")
-
-    assert result.kind is PrLifecycleFetchKind.FAILURE
-    assert "invalid gh pr list output structure" in result.error
-
-
-def test_fetch_pr_lifecycle_states_malformed_entry_not_dict(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ("not json", "unparseable"),
+        ("[1, 2]", "invalid gh pr view output structure"),
+        ('{"number": "x", "state": "OPEN"}', "malformed"),
+        ('{"number": 1}', "malformed"),
+        ('{"number": 2, "state": "OPEN"}', "does not match"),
+        ('{"number": 1, "state": "DRAFT"}', "unrecognized PR state"),
+    ],
+)
+def test_fetch_pr_lifecycle_states_rejects_bad_payloads(
+    monkeypatch: pytest.MonkeyPatch, stdout: str, expected: str
 ) -> None:
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 0, stdout="[1, 2]", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    result = fetch_pr_lifecycle_states("owner/repo")
+    result = fetch_pr_lifecycle_states("owner/repo", [1])
 
     assert result.kind is PrLifecycleFetchKind.FAILURE
-    assert "malformed entry" in result.error
+    assert result.states == {}
+    assert expected in result.error
 
 
-def test_fetch_pr_lifecycle_states_malformed_entry_missing_fields(
+@pytest.mark.parametrize("bad", [-5, 0, True, "--web", "12", 1.5, None, 10**30])
+def test_fetch_pr_lifecycle_states_rejects_invalid_pr_numbers(
+    monkeypatch: pytest.MonkeyPatch, bad: object
+) -> None:
+    """Persisted PR numbers are untrusted: a non-positive/non-int value must never reach
+    gh's argv (e.g. '--web' or '-5' would be parsed as flags) and must fail closed."""
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError(f"gh must not be invoked: {argv}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = fetch_pr_lifecycle_states("owner/repo", [1, bad])  # type: ignore[list-item]
+
+    assert result.kind is PrLifecycleFetchKind.FAILURE
+    assert result.states == {}
+    assert "invalid tracked PR number" in result.error
+
+
+def test_fetch_pr_lifecycle_states_rejects_bool_number_in_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 0, stdout='[{"number": "x"}]', stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    result = fetch_pr_lifecycle_states("owner/repo")
-
-    assert result.kind is PrLifecycleFetchKind.FAILURE
-    assert "malformed entry" in result.error
-
-
-def test_fetch_pr_lifecycle_states_unrecognized_state(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
-            argv, 0, stdout='[{"number": 5, "state": "DRAFT"}]', stderr=""
+            argv, 0, stdout='{"number": true, "state": "OPEN"}', stderr=""
         )
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    result = fetch_pr_lifecycle_states("owner/repo")
+    result = fetch_pr_lifecycle_states("owner/repo", [1])
 
     assert result.kind is PrLifecycleFetchKind.FAILURE
-    assert "unrecognized PR state" in result.error
+
+
+def test_fetch_pr_lifecycle_states_reports_prs_beyond_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, stdout=_view_payload(argv), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = fetch_pr_lifecycle_states("owner/repo", range(1, 6), max_requests=2)
+
+    assert result.deferred == (3, 4, 5)
+    assert fetch_pr_lifecycle_states("owner/repo", [1, 2], max_requests=2).deferred == ()
+
+
+def test_fetch_pr_lifecycle_states_non_positive_cap_fetches_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("gh must not be invoked")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = fetch_pr_lifecycle_states("owner/repo", [1, 2], max_requests=0)
+
+    assert result.states == {}
+    assert result.deferred == (1, 2)
 
 
 # --- plan_reconciliation -------------------------------------------------------
