@@ -1363,6 +1363,21 @@ Blocked-By: #101
 
 LLM推論による依存関係生成はMVPでは行わない。
 
+## BLOCKEDタスクの再評価 (#374)
+
+依存関係由来で`BLOCKED`になったTaskは、依存先の状態変化（復旧・発見・完了）ごとに
+再評価する。`WAITING_DEPENDENCY`と同じ遷移規則を`BLOCKED`にも適用する。
+
+- 全依存先が`COMPLETE`なら`READY`へ戻す
+- 依存先がすべて既知・非terminal・未完了なら`WAITING_DEPENDENCY`へ安全に戻す
+- 依存先が`FAILED` / `CANCELLED` / `BLOCKED` / `NEEDS_HUMAN` / 未登録のままなら
+  `BLOCKED`を維持する（依存先が再び回復すれば次の再評価で戻る）
+
+自己依存と循環による`BLOCKED`は構造的なものであり、この再評価では解除しない。
+自己依存はIssue本文の変更による再discoveryでのみ、循環は依存編集で循環が解消された
+場合にのみ解除される。`BLOCKED`から`WAITING_DEPENDENCY`への遷移を許可する
+（`ALLOWED_TRANSITIONS`参照）。
+
 ---
 
 # 37. Concurrency

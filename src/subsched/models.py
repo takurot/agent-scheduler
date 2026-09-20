@@ -258,7 +258,13 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     TaskState.WAITING_DEPENDENCY: frozenset(
         {TaskState.READY, TaskState.BLOCKED, TaskState.NEEDS_HUMAN, TaskState.CANCELLED}
     ),
-    TaskState.BLOCKED: frozenset({TaskState.READY, TaskState.NEEDS_HUMAN, TaskState.CANCELLED}),
+    # #374: BLOCKED may return to WAITING_DEPENDENCY when a dependency-originated
+    # block re-evaluates and finds its dependency recovered (known and non-terminal
+    # but not yet complete). Self-dependency and cycle blocks never take this path --
+    # their dependencies remain terminally blocked, so the re-evaluation keeps them.
+    TaskState.BLOCKED: frozenset(
+        {TaskState.READY, TaskState.WAITING_DEPENDENCY, TaskState.NEEDS_HUMAN, TaskState.CANCELLED}
+    ),
     TaskState.NEEDS_HUMAN: frozenset({TaskState.READY, TaskState.CANCELLED}),
     TaskState.FAILED: frozenset(),
     TaskState.CANCELLED: frozenset({TaskState.READY}),
