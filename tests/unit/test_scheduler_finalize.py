@@ -401,6 +401,26 @@ def test_ci_monitoring_leaves_pending_unchanged(tmp_path: Path) -> None:
     assert scheduler.tasks[0].status is TaskState.READY_FOR_REVIEW
 
 
+def test_ci_monitoring_leaves_unknown_unchanged(tmp_path: Path) -> None:
+    """#376: a malformed/anomalous gh checks response (UNKNOWN) must never complete the
+    task -- it stays READY_FOR_REVIEW until the response is trustworthy."""
+    from subsched.github.checks import CICheckState, PRChecksStatus
+
+    scheduler = _scheduler(
+        tmp_path,
+        push_enabled=True,
+        ci_checker=lambda pr: PRChecksStatus(
+            pr_number=pr, overall_state=CICheckState.UNKNOWN, checks=()
+        ),
+    )
+    task = _ready_for_review_task(101, pr=7)
+    scheduler.discover([])
+    scheduler.queue = scheduler.queue.append([task])
+    scheduler.tick([])
+
+    assert scheduler.tasks[0].status is TaskState.READY_FOR_REVIEW
+
+
 def test_ci_monitoring_continues_while_new_dispatch_is_paused(tmp_path: Path) -> None:
     from subsched.github.checks import CICheckState, PRChecksStatus
 
