@@ -855,30 +855,37 @@ def reconcile(
         )
 
     try:
+        # #398: read a snapshot without the lock, fetch outside it (up to 100 sequential
+        # `gh` calls), then re-acquire the lock and plan against freshly loaded tasks so
+        # a concurrent `subsched run` is never blocked for the duration of the fetch.
+        # A task whose status or PR changed meanwhile is left untouched by
+        # `plan_reconciliation` (its PR is absent from, or no longer matches, the fetch).
+        snapshot = context.store.load_tasks()
+        candidates = [
+            task
+            for task in snapshot
+            if task.status is TaskState.READY_FOR_REVIEW and task.pr is not None
+        ]
+        if not candidates:
+            typer.echo("No READY_FOR_REVIEW tasks with an associated PR to reconcile")
+            return
+
+        fetch = fetch_pr_lifecycle_states(
+            resolved_repo, [task.pr for task in candidates if task.pr is not None]
+        )
+        if fetch.kind is PrLifecycleFetchKind.FAILURE:
+            typer.echo(f"Failed to fetch PR state from GitHub: {fetch.error}", err=True)
+            raise typer.Exit(1)
+
+        if fetch.deferred:
+            typer.echo(
+                f"Warning: {len(fetch.deferred)} tracked PR(s) beyond the per-run request "
+                f"cap were not checked: {', '.join(f'#{n}' for n in fetch.deferred)}",
+                err=True,
+            )
+
         with context.store.lock():
             tasks = context.store.load_tasks()
-            candidates = [
-                task
-                for task in tasks
-                if task.status is TaskState.READY_FOR_REVIEW and task.pr is not None
-            ]
-            if not candidates:
-                typer.echo("No READY_FOR_REVIEW tasks with an associated PR to reconcile")
-                return
-
-            fetch = fetch_pr_lifecycle_states(
-                resolved_repo, [task.pr for task in candidates if task.pr is not None]
-            )
-            if fetch.kind is PrLifecycleFetchKind.FAILURE:
-                typer.echo(f"Failed to fetch PR state from GitHub: {fetch.error}", err=True)
-                raise typer.Exit(1)
-
-            if fetch.deferred:
-                typer.echo(
-                    f"Warning: {len(fetch.deferred)} tracked PR(s) beyond the per-run request "
-                    f"cap were not checked: {', '.join(f'#{n}' for n in fetch.deferred)}",
-                    err=True,
-                )
             result = plan_reconciliation(tasks, fetch.states)
             for item in result.items:
                 typer.echo(

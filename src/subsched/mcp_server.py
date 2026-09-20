@@ -508,29 +508,31 @@ def reconcile_tasks(
     store = _store_for(repository_path)
     resolved_repo = repo or _github_repo(store.state_dir.parent)
     try:
+        # #398: fetch outside the store lock, then plan against freshly loaded tasks
+        # (see the `reconcile` CLI command).
+        snapshot = store.load_tasks()
+        candidates = [
+            task
+            for task in snapshot
+            if task.status is TaskState.READY_FOR_REVIEW and task.pr is not None
+        ]
+        if not candidates:
+            return {
+                "reconciled_complete": 0,
+                "reconciled_needs_human": 0,
+                "unchanged": 0,
+                "dry_run": dry_run,
+                "items": [],
+            }
+
+        fetch = fetch_pr_lifecycle_states(
+            resolved_repo, [task.pr for task in candidates if task.pr is not None]
+        )
+        if fetch.kind is PrLifecycleFetchKind.FAILURE:
+            raise McpToolError(f"failed to fetch PR state from GitHub: {fetch.error}")
+
         with store.lock():
-            tasks = store.load_tasks()
-            candidates = [
-                task
-                for task in tasks
-                if task.status is TaskState.READY_FOR_REVIEW and task.pr is not None
-            ]
-            if not candidates:
-                return {
-                    "reconciled_complete": 0,
-                    "reconciled_needs_human": 0,
-                    "unchanged": 0,
-                    "dry_run": dry_run,
-                    "items": [],
-                }
-
-            fetch = fetch_pr_lifecycle_states(
-                resolved_repo, [task.pr for task in candidates if task.pr is not None]
-            )
-            if fetch.kind is PrLifecycleFetchKind.FAILURE:
-                raise McpToolError(f"failed to fetch PR state from GitHub: {fetch.error}")
-
-            result = plan_reconciliation(tasks, fetch.states)
+            result = plan_reconciliation(store.load_tasks(), fetch.states)
             if not dry_run:
                 store.save_tasks(result.updated_tasks, paused=store.is_paused())
     except (SchedulerLockError, StateCorruptionError) as error:

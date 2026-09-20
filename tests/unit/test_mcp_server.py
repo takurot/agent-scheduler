@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -609,6 +610,40 @@ def test_reconcile_tasks_advances_merged_pr_to_complete(
     assert result["dry_run"] is False
     assert result["items"][0]["action"] == "COMPLETE"
     assert store.load_tasks()[0].status is TaskState.COMPLETE
+
+
+def test_reconcile_tasks_does_not_hold_store_lock_while_calling_gh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    store.save_tasks((_task(1, TaskState.READY_FOR_REVIEW, pr=10),))
+    lock_free: list[bool] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[:3] != ["gh", "pr", "view"]:
+            return _real_subprocess_run(argv, **kwargs)  # type: ignore[arg-type]
+        try:
+            with store.lock():
+                lock_free.append(True)
+                (task,) = store.load_tasks()
+                store.save_tasks((replace(task, pr=11),))
+        except Exception:
+            lock_free.append(False)
+        return subprocess.CompletedProcess(
+            argv, 0, stdout='{"number": 10, "state": "MERGED"}', stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = reconcile_tasks(str(tmp_path), repo="owner/project")
+
+    assert lock_free == [True]
+    # The PR changed mid-fetch, so the stale MERGED state must not be applied.
+    assert result["reconciled_complete"] == 0
+    (task,) = store.load_tasks()
+    assert task.status is TaskState.READY_FOR_REVIEW
+    assert task.pr == 11
 
 
 def test_reconcile_tasks_dry_run_does_not_mutate_state(

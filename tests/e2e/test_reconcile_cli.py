@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -237,3 +238,85 @@ def test_reconcile_prune_worktrees_removes_clean_worktree_after_merge(
     assert result.exit_code == 0, result.output
     assert "PRUNED" in result.output
     assert removed
+
+
+# --- #398: the store lock is not held across `gh` calls ---------------------------
+
+
+def _during_fetch_fake(
+    repository: Path, states: dict[int, str], during: object
+) -> tuple[object, list[bool]]:
+    """Fake `gh pr view` that first probes the store lock, then runs `during`."""
+    lock_free: list[bool] = []
+    store = JsonStateStore(repository)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[:3] != ["gh", "pr", "view"]:
+            return _real_run(argv, **kwargs)  # type: ignore[arg-type]
+        try:
+            with store.lock():
+                lock_free.append(True)
+                during()  # type: ignore[operator]
+        except Exception:
+            lock_free.append(False)
+        number = int(argv[3])
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=f'{{"number": {number}, "state": "{states[number]}"}}', stderr=""
+        )
+
+    return fake_run, lock_free
+
+
+def test_reconcile_does_not_hold_store_lock_while_calling_gh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_task(tmp_path, 1, pr=10)
+    fake, lock_free = _during_fetch_fake(tmp_path, {10: "MERGED"}, lambda: None)
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    result = invoke(tmp_path, "reconcile", "--repo", "owner/project")
+
+    assert result.exit_code == 0, result.output
+    assert lock_free == [True]
+    assert JsonStateStore(tmp_path).load_tasks()[0].status is TaskState.COMPLETE
+
+
+def test_reconcile_does_not_apply_stale_state_to_task_changed_during_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_task(tmp_path, 1, pr=10)
+    store = JsonStateStore(tmp_path)
+
+    def change_task() -> None:
+        # The task's PR was replaced while the fetch was in flight.
+        (task,) = store.load_tasks()
+        store.save_tasks((replace(task, pr=11),))
+
+    fake, _ = _during_fetch_fake(tmp_path, {10: "MERGED"}, change_task)
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    result = invoke(tmp_path, "reconcile", "--repo", "owner/project")
+
+    assert result.exit_code == 0, result.output
+    (task,) = store.load_tasks()
+    assert task.status is TaskState.READY_FOR_REVIEW
+    assert task.pr == 11
+
+
+def test_reconcile_leaves_task_that_left_ready_for_review_during_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_task(tmp_path, 1, pr=10)
+    store = JsonStateStore(tmp_path)
+
+    def change_task() -> None:
+        (task,) = store.load_tasks()
+        store.save_tasks((task.transition(TaskState.NEEDS_HUMAN, reason="manual"),))
+
+    fake, _ = _during_fetch_fake(tmp_path, {10: "MERGED"}, change_task)
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    result = invoke(tmp_path, "reconcile", "--repo", "owner/project")
+
+    assert result.exit_code == 0, result.output
+    assert store.load_tasks()[0].status is TaskState.NEEDS_HUMAN
