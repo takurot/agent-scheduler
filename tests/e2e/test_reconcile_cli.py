@@ -45,14 +45,17 @@ _real_run = subprocess.run
 
 
 def fake_gh_pr_list(states: dict[int, str]) -> object:
+    """Fake `gh pr view <n>`: answers per tracked PR number (#377)."""
+
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if argv[:3] != ["gh", "pr", "list"]:
+        if argv[:3] != ["gh", "pr", "view"]:
             return _real_run(argv, **kwargs)  # type: ignore[arg-type]
-        payload = ",".join(
-            f'{{"number": {number}, "state": "{state}", "mergedAt": null}}'
-            for number, state in states.items()
+        number = int(argv[3])
+        if number not in states:
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="not found")
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=f'{{"number": {number}, "state": "{states[number]}"}}', stderr=""
         )
-        return subprocess.CompletedProcess(argv, 0, stdout=f"[{payload}]", stderr="")
 
     return fake_run
 
@@ -111,6 +114,50 @@ def test_reconcile_dry_run_does_not_mutate_state(
     assert "Dry run" in result.output
     status = invoke(tmp_path, "status")
     assert "READY_FOR_REVIEW" in status.output
+
+
+def test_reconcile_resolves_old_tracked_prs_with_bounded_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#377: tracked PRs far older than any recent-PR window are still reconciled, and
+    dry-run reports the same result with exactly one gh call per tracked PR."""
+    seed_task(tmp_path, 1, pr=1)
+    store = JsonStateStore(tmp_path)
+    store.save_tasks(
+        (
+            *store.load_tasks(),
+            Task(
+                task_id="github-2",
+                issue_number=2,
+                title="Task 2",
+                labels=(),
+                status=TaskState.READY_FOR_REVIEW,
+                pr=900,
+            ),
+        )
+    )
+    gh_run = fake_gh_pr_list({1: "MERGED", 900: "OPEN"})
+    view_calls: list[list[str]] = []
+
+    def counting_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[:3] == ["gh", "pr", "view"]:
+            view_calls.append(argv)
+        return gh_run(argv, **kwargs)  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(subprocess, "run", counting_run)
+
+    dry = invoke(tmp_path, "reconcile", "--repo", "owner/project", "--dry-run")
+    assert dry.exit_code == 0, dry.output
+    assert "reconciled_complete=1" in dry.output
+    assert "unchanged=1" in dry.output
+    assert len(view_calls) == 2
+
+    real = invoke(tmp_path, "reconcile", "--repo", "owner/project")
+    assert real.exit_code == 0, real.output
+    assert "reconciled_complete=1" in real.output
+    assert len(view_calls) == 4
+    states = {task.issue_number: task.status for task in store.load_tasks()}
+    assert states == {1: TaskState.COMPLETE, 2: TaskState.READY_FOR_REVIEW}
 
 
 def test_reconcile_fails_closed_on_gh_error(
@@ -174,7 +221,7 @@ def test_reconcile_prune_worktrees_removes_clean_worktree_after_merge(
     removed: list[list[str]] = []
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if argv[:3] == ["gh", "pr", "list"]:
+        if argv[:3] == ["gh", "pr", "view"]:
             return gh_run(argv, **kwargs)  # type: ignore[no-any-return]
         if "status" in argv:
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")

@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -47,32 +47,24 @@ class PrLifecycleFetchResult:
     error: str = ""
 
 
-def fetch_pr_lifecycle_states(
-    repo: str,
-    env: dict[str, str] | None = None,
-    timeout_seconds: float = 30.0,
-    limit: int = 100,
-) -> PrLifecycleFetchResult:
-    """Batch-fetch PR number -> lifecycle state via a single `gh pr list` call.
+# #377: upper bound on `gh pr view` calls per reconcile run (rate-limit guard). PRs
+# beyond the cap are left unknown -- and therefore UNCHANGED -- until a later run;
+# resolved (MERGED/CLOSED) tasks stop being candidates, so repeated runs make progress.
+DEFAULT_MAX_PR_REQUESTS = 100
 
-    Fails closed (FAILURE, empty states) on any `gh` invocation error, non-zero exit,
-    or malformed JSON -- callers must not mutate scheduler state in that case. A PR
-    number absent from the result (e.g. older than `limit`) is simply not present in
-    `states`; callers treat that as "unknown", not as a specific lifecycle state.
-    """
-    argv = [
-        "gh",
-        "pr",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        "all",
-        "--limit",
-        str(limit),
-        "--json",
-        "number,state,mergedAt",
-    ]
+
+def _failure(error: str) -> PrLifecycleFetchResult:
+    return PrLifecycleFetchResult(kind=PrLifecycleFetchKind.FAILURE, states={}, error=error)
+
+
+def _fetch_one_pr_state(
+    repo: str,
+    number: int,
+    env: dict[str, str] | None,
+    timeout_seconds: float,
+) -> PrLifecycleState | str:
+    """Return the lifecycle state of one PR, or an error string (fail closed)."""
+    argv = ["gh", "pr", "view", str(number), "--repo", repo, "--json", "number,state"]
     try:
         res = subprocess.run(
             argv,
@@ -85,64 +77,53 @@ def fetch_pr_lifecycle_states(
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        return PrLifecycleFetchResult(
-            kind=PrLifecycleFetchKind.FAILURE,
-            states={},
-            error=_redact(f"gh pr list invocation failed: {error}"),
-        )
+        return _redact(f"gh pr view invocation failed for PR #{number}: {error}")
     if res.returncode != 0:
-        return PrLifecycleFetchResult(
-            kind=PrLifecycleFetchKind.FAILURE,
-            states={},
-            error=_redact(
-                f"gh pr list exited {res.returncode}: {res.stderr.strip()}"
-            ),
-        )
+        return _redact(f"gh pr view exited {res.returncode} for PR #{number}: {res.stderr.strip()}")
     try:
         data = json.loads(res.stdout)
     except json.JSONDecodeError:
-        return PrLifecycleFetchResult(
-            kind=PrLifecycleFetchKind.FAILURE,
-            states={},
-            error="unparseable gh pr list output",
-        )
-    if not isinstance(data, list):
-        return PrLifecycleFetchResult(
-            kind=PrLifecycleFetchKind.FAILURE,
-            states={},
-            error="invalid gh pr list output structure",
-        )
+        return f"unparseable gh pr view output for PR #{number}"
+    if not isinstance(data, dict):
+        return f"invalid gh pr view output structure for PR #{number}"
+    try:
+        returned_number = int(data["number"])
+        raw_state = str(data["state"]).upper()
+    except (KeyError, TypeError, ValueError):
+        return f"malformed gh pr view output for PR #{number}"
+    if returned_number != number:
+        return f"gh pr view returned PR #{returned_number} which does not match PR #{number}"
+    try:
+        return PrLifecycleState(raw_state)
+    except ValueError:
+        return f"unrecognized PR state '{raw_state}' for PR #{number}"
 
+
+def fetch_pr_lifecycle_states(
+    repo: str,
+    pr_numbers: Iterable[int],
+    env: dict[str, str] | None = None,
+    timeout_seconds: float = 30.0,
+    max_requests: int = DEFAULT_MAX_PR_REQUESTS,
+) -> PrLifecycleFetchResult:
+    """Fetch the lifecycle state of each tracked PR with one `gh pr view` call apiece.
+
+    Querying the tracked PR numbers directly (rather than a fixed window of recent
+    PRs) means an old PR is never silently missed (#377). PR numbers are deduplicated
+    and processed in ascending order; at most `max_requests` calls are made per
+    invocation.
+
+    Fails closed (FAILURE, empty states) if any call errors, times out, exits non-zero,
+    or returns malformed / mismatching JSON -- callers must not mutate scheduler state
+    in that case. A PR beyond `max_requests` is simply absent from `states`; callers
+    treat that as "unknown", not as a specific lifecycle state.
+    """
     states: dict[int, PrLifecycleState] = {}
-    for item in data:
-        if not isinstance(item, dict):
-            return PrLifecycleFetchResult(
-                kind=PrLifecycleFetchKind.FAILURE,
-                states={},
-                error="malformed entry in gh pr list output",
-            )
-        try:
-            number = int(item["number"])
-            raw_state = str(item["state"]).upper()
-        except (KeyError, TypeError, ValueError):
-            return PrLifecycleFetchResult(
-                kind=PrLifecycleFetchKind.FAILURE,
-                states={},
-                error="malformed entry in gh pr list output",
-            )
-        if raw_state == "MERGED":
-            states[number] = PrLifecycleState.MERGED
-        elif raw_state == "CLOSED":
-            states[number] = PrLifecycleState.CLOSED
-        elif raw_state == "OPEN":
-            states[number] = PrLifecycleState.OPEN
-        else:
-            return PrLifecycleFetchResult(
-                kind=PrLifecycleFetchKind.FAILURE,
-                states={},
-                error=f"unrecognized PR state '{raw_state}' for PR #{number}",
-            )
-
+    for number in sorted(set(pr_numbers))[: max(max_requests, 0)]:
+        outcome = _fetch_one_pr_state(repo, number, env, timeout_seconds)
+        if not isinstance(outcome, PrLifecycleState):
+            return _failure(outcome)
+        states[number] = outcome
     return PrLifecycleFetchResult(kind=PrLifecycleFetchKind.SUCCESS, states=states)
 
 
@@ -188,8 +169,8 @@ def plan_reconciliation(
     """Compute (but do not persist) state transitions for `READY_FOR_REVIEW` tasks
     with an associated PR, based on `pr_states` fetched from GitHub.
 
-    A task whose PR number is absent from `pr_states` (e.g. older than the batch
-    query's `limit`) is left UNCHANGED -- an unknown PR state is never treated as
+    A task whose PR number is absent from `pr_states` (e.g. beyond the
+    per-run request cap) is left UNCHANGED -- an unknown PR state is never treated as
     "still open" or "merged" (fail closed).
     """
     current = now or datetime.now(UTC)
@@ -231,7 +212,7 @@ def plan_reconciliation(
             reason = (
                 "PR is still open"
                 if state is PrLifecycleState.OPEN
-                else f"PR #{task.pr} state could not be determined from gh output"
+                else f"PR #{task.pr} state was not fetched or could not be determined"
             )
             items.append(
                 ReconcilePlanItem(

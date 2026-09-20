@@ -869,7 +869,9 @@ def reconcile(
                 typer.echo("No READY_FOR_REVIEW tasks with an associated PR to reconcile")
                 return
 
-            fetch = fetch_pr_lifecycle_states(resolved_repo)
+            fetch = fetch_pr_lifecycle_states(
+                resolved_repo, [task.pr for task in candidates if task.pr is not None]
+            )
             if fetch.kind is PrLifecycleFetchKind.FAILURE:
                 typer.echo(f"Failed to fetch PR state from GitHub: {fetch.error}", err=True)
                 raise typer.Exit(1)

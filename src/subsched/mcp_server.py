@@ -524,7 +524,9 @@ def reconcile_tasks(
                     "items": [],
                 }
 
-            fetch = fetch_pr_lifecycle_states(resolved_repo)
+            fetch = fetch_pr_lifecycle_states(
+                resolved_repo, [task.pr for task in candidates if task.pr is not None]
+            )
             if fetch.kind is PrLifecycleFetchKind.FAILURE:
                 raise McpToolError(f"failed to fetch PR state from GitHub: {fetch.error}")
 

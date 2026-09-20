@@ -1461,11 +1461,14 @@ Bernsteinを採用できる場合、このverification gateを既存機能へ委
 - `execution.ci_monitoring: false`（既定）: `READY_FOR_REVIEW`のままとどまり、Scheduler
   は自動でCOMPLETEへ昇格させない。PR merge後の後始末（Issue再発見の抑止等）は#146の
   discovery-time reconciliationが別途担当する。明示的にPR状態を反映させたい場合は
-  `subsched reconcile`（#277）を実行する。これは`gh pr list`でPRのlifecycle状態を
-  batch取得し、`MERGED`なら`COMPLETE`へ、mergeされずに`CLOSED`なら`NEEDS_HUMAN`へ
+  `subsched reconcile`（#277）を実行する。これはstate中の追跡PR番号ごとに
+  `gh pr view <番号>`でlifecycle状態を個別取得し（直近N件の窓に依存しないため、古いPRも
+  照合できる。#377）、`MERGED`なら`COMPLETE`へ、mergeされずに`CLOSED`なら`NEEDS_HUMAN`へ
   遷移させ、`OPEN`または不明な状態のtaskは`READY_FOR_REVIEW`のまま変更しない。`gh`
-  実行エラー・認証失敗・不正な出力の場合はscheduler状態を一切変更せずnon-zeroで
-  終了する（fail-closed）。dispatch loopや`discover()`からは暗黙に呼ばれず、必ず
+  実行エラー・認証失敗・不正な出力（追跡PRのうち1件でも取得・検証に失敗した場合を含む）の場合はscheduler状態を一切変更せずnon-zeroで
+  終了する（fail-closed）。1回の実行で呼び出す`gh pr view`は重複除去した追跡PR番号の昇順で最大
+  100件に制限し（rate limit対策）、超過分は不明扱い（`UNCHANGED`）として次回以降の実行で
+  処理する。`--dry-run`も同じ取得・判定を行い、状態だけを書き込まない。dispatch loopや`discover()`からは暗黙に呼ばれず、必ず
   operatorまたはMCPクライアントが明示的に起動する。
   CLIで`--prune-worktrees`を明示した場合のみ、merge済みtaskのworktreeを削除する。削除前に
   `git status --porcelain -uall`を検査し、tracked changeまたはScheduler所有の`.ai/`配下以外の
