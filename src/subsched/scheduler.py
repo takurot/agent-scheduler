@@ -2425,6 +2425,26 @@ class Scheduler:
                     dep in terminal_failed or dep not in all_known for dep in task.dependencies
                 ):
                     self.queue = self.queue.replace(task.transition(TaskState.BLOCKED, now=now))
+            elif task.status is TaskState.BLOCKED:
+                # #374: re-evaluate dependency-originated BLOCKED tasks when their
+                # dependency situation changes (parent recovered, discovered, or
+                # completed). Structural blocks are never released here:
+                # - self-dependency can only be cleared by an issue-body edit on discovery
+                # - cycle members depend on each other and stay terminally blocked
+                if task.issue_number in task.dependencies:
+                    continue
+                if set(task.dependencies) <= completed:
+                    self.queue = self.queue.replace(task.transition(TaskState.READY, now=now))
+                elif any(
+                    dep in terminal_failed or dep not in all_known for dep in task.dependencies
+                ):
+                    continue
+                else:
+                    # Every dependency is known, non-terminal, and not yet complete:
+                    # safe to resume waiting instead of staying hard-blocked.
+                    self.queue = self.queue.replace(
+                        task.transition(TaskState.WAITING_DEPENDENCY, now=now)
+                    )
 
     def _validate_worktree(self, task: Task) -> None:
         self._validate_worktree_path(task)
