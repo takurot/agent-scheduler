@@ -746,7 +746,9 @@ class Scheduler:
                 if task.status is TaskState.READY_FOR_REVIEW and self.merged_pr_checker is not None:
                     check = self.merged_pr_checker(task.issue_number)
                     if check.kind is MergedPrCheckKind.CONFIRMED:
-                        task = task.transition(TaskState.COMPLETE)
+                        task = replace(
+                            task.transition(TaskState.COMPLETE), completion_kind="merged"
+                        )
                         reconciled_tasks.append(task)
                         continue
                 if snapshot_complete and task.status is not TaskState.NEEDS_HUMAN:
@@ -985,6 +987,9 @@ class Scheduler:
                 return
 
             if task.status is TaskState.READY_FOR_REVIEW:
+                if task.pr is not None:
+                    # An event is not evidence that GitHub merged the PR.
+                    return
                 updated = task.transition(
                     TaskState.COMPLETE, current_agent=task.current_agent, now=current
                 )
@@ -1419,12 +1424,8 @@ class Scheduler:
         self._persist()
 
     def _poll_ci_checks(self, now: datetime) -> None:
-        """#142: promote READY_FOR_REVIEW to COMPLETE only once CI actually PASSes (when
-        CI monitoring is configured); FAIL escalates to NEEDS_HUMAN (no auto-requeue, per
-        docs/SPEC.md's "unknown/failed GitHub state is not silently retried" policy, same
-        as push/PR-creation/commit-message failures elsewhere in this class);
-        PENDING/UNKNOWN leave the task exactly as-is -- an unknown CI state must never be
-        promoted to COMPLETE.
+        """Record CI PASS without completing an unmerged PR. FAIL escalates to
+        NEEDS_HUMAN; PENDING/UNKNOWN leave the task unchanged.
         """
         if self.ci_checker is None:
             return
@@ -1432,12 +1433,12 @@ class Scheduler:
             if task.status is not TaskState.READY_FOR_REVIEW or task.pr is None:
                 continue
             status = self.ci_checker(task.pr)
-            if status.overall_state is CICheckState.PASS:
-                updated = task.transition(
-                    TaskState.COMPLETE, current_agent=task.current_agent, now=now
-                )
-                self.queue = self.queue.replace(updated)
+            if task.ci_result != status.overall_state.value:
+                task = replace(task, ci_result=status.overall_state.value, updated_at=now)
+                self.queue = self.queue.replace(task)
                 self._persist()
+            if status.overall_state is CICheckState.PASS:
+                continue
             elif status.overall_state is CICheckState.FAIL:
                 from subsched.agents.process import redact_sensitive_command_audit
 
@@ -2476,7 +2477,12 @@ class Scheduler:
                 self.queue = self.queue.replace(task.transition(TaskState.READY, now=now))
 
     def _release_dependencies(self, now: datetime) -> None:
-        completed = {task.issue_number for task in self.tasks if task.status is TaskState.COMPLETE}
+        completed = {
+            task.issue_number
+            for task in self.tasks
+            if task.status is TaskState.COMPLETE
+            and (task.pr is None or task.completion_kind == "merged")
+        }
         terminal_failed = {
             task.issue_number
             for task in self.tasks

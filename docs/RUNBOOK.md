@@ -110,6 +110,12 @@ once its PR is created, so tasks accumulate under `READY_FOR_REVIEW` even after 
 maintainer merges (or closes) the PR on GitHub. Run `subsched reconcile` periodically
 (e.g. from cron or CI) to close that gap:
 
+With CI monitoring enabled, a PASS is recorded as `ci_result: PASS` while the task
+remains `READY_FOR_REVIEW`. It does not release dependent Issues. Existing PR-backed
+`COMPLETE` records without merge evidence are read as `READY_FOR_REVIEW`; run
+`subsched reconcile` to confirm their current GitHub state. Local-only tasks without a
+PR remain `COMPLETE` after local verification.
+
 ```bash
 # Preview planned transitions without mutating .ai/scheduler.json
 uv run subsched reconcile --dry-run

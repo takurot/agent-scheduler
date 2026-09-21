@@ -161,7 +161,10 @@ def _format_effective_config_summary(
 def _watch_needed(scheduler: Scheduler, *, ci_monitoring: bool) -> bool:
     return scheduler.is_waiting_for_capacity or (
         ci_monitoring
-        and any(task.status is TaskState.READY_FOR_REVIEW for task in scheduler.tasks)
+        and any(
+            task.status is TaskState.READY_FOR_REVIEW and task.ci_result != "PASS"
+            for task in scheduler.tasks
+        )
     )
 
 

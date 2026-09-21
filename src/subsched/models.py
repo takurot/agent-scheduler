@@ -413,8 +413,17 @@ class Task:
     dispatch_model: str | None = None
     # #313: the reasoning effort configured for this dispatch's execution stage
     dispatch_effort: str | None = None
+    # CI success is an observation, while PR merge is completion evidence.
+    ci_result: str | None = None
+    completion_kind: str | None = None
 
     def __post_init__(self) -> None:
+        if self.ci_result not in (None, "PASS", "FAIL", "PENDING", "UNKNOWN"):
+            raise ValueError("invalid ci_result")
+        if self.completion_kind not in (None, "merged"):
+            raise ValueError("invalid completion_kind")
+        if self.completion_kind == "merged" and self.pr is None:
+            raise ValueError("merged completion requires a PR")
         if (
             self.needs_human_reason_code is not None
             and self.needs_human_reason_code not in NEEDS_HUMAN_REASON_CODES
@@ -506,6 +515,8 @@ class Task:
             "dispatch_stage": self.dispatch_stage,
             "dispatch_model": self.dispatch_model,
             "dispatch_effort": self.dispatch_effort,
+            "ci_result": self.ci_result,
+            "completion_kind": self.completion_kind,
         }
 
     @classmethod
@@ -518,7 +529,15 @@ class Task:
                 issue_number=int(value["issue_number"]),
                 title=str(value["title"]),
                 labels=tuple(str(label) for label in value["labels"]),
-                status=TaskState(value["status"]),
+                # Old COMPLETE+PR records may mean only CI PASS. Reconciliation
+                # must confirm merge before they can release dependencies.
+                status=(
+                    TaskState.READY_FOR_REVIEW
+                    if value["status"] == TaskState.COMPLETE.value
+                    and value.get("pr") is not None
+                    and value.get("completion_kind") != "merged"
+                    else TaskState(value["status"])
+                ),
                 attempt=int(value["attempt"]),
                 agent_switches=int(value.get("agent_switches", 0)),
                 capacity_events=int(value.get("capacity_events", 0)),
@@ -552,6 +571,8 @@ class Task:
                 dispatch_stage=value.get("dispatch_stage"),
                 dispatch_model=value.get("dispatch_model"),
                 dispatch_effort=value.get("dispatch_effort"),
+                ci_result=value.get("ci_result"),
+                completion_kind=value.get("completion_kind"),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("invalid task state") from error
