@@ -2577,6 +2577,7 @@ subsched/
 │
 ├── cli.py
 ├── scheduler.py
+├── stage_handlers.py
 ├── router.py
 ├── state.py
 │
@@ -2611,6 +2612,13 @@ subsched/
     ├── lock.py
     └── process.py
 ```
+
+### 段階別ハンドラ抽出計画 (#382)
+`scheduler.py` の責務集中を段階的に解消するため、以下の順序で段階別ハンドラを外部契約（状態遷移、ログ、永続化、fail-closed）を厳格に保持しながら抽出する：
+1. **PlanningStageHandler (#382 初回抽出)**: `PLANNING` / `PLAN_REVIEW` ゲートのディスパッチ・判定・再計画ループ（`stage_handlers.py`）。
+2. **PRReviewStageHandler**: `PR_REVIEW` 後のレポート検証と判定（`_process_pr_review`）の抽出。
+3. **VerificationStageHandler**: `VERIFYING` ゲート実行およびPR公開処理（`_finalize_verified_task`）の抽出。
+4. **RecoveryReconciler**: 起動時リカバリ・孤立プロセス判定（`_reconcile_recovery`）の抽出。
 
 ---
 
