@@ -22,6 +22,7 @@ from subsched.mcp_server import (
     cancel_task,
     control,
     get_capacities_resource,
+    get_dispatch_run,
     get_guidelines_resource,
     get_metrics,
     get_queue_resource,
@@ -340,7 +341,9 @@ def test_trigger_dispatch_launches_detached_dry_run_subprocess(
 
     result = trigger_dispatch(str(tmp_path))
 
-    assert result["status"] == "dispatched"
+    assert result["status"] == "accepted"
+    assert len(result["run_id"]) == 24
+    assert get_dispatch_run(result["run_id"], str(tmp_path))["status"] == "accepted"
     assert result["pid"] == 4321
     assert result["allow_native"] is False
     assert "--dry-run" in captured["argv"]
@@ -378,10 +381,52 @@ def test_trigger_dispatch_native_forwards_gates(
     )
 
     assert result["allow_native"] is True
+    assert result["status"] == "accepted"
     assert "--allow-native" in captured["argv"]
     assert "--subscription-billing-verified" in captured["argv"]
     assert "--issues" in captured["argv"]
     assert "--config" in captured["argv"]
+
+
+def test_trigger_dispatch_spawn_failure_is_queryable_without_raw_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "subsched.yaml").write_text("github:\n  repo: acme/widgets\n", encoding="utf-8")
+
+    def fail_spawn(*_args: object, **_kwargs: object) -> None:
+        raise OSError("private credential should not be returned")
+
+    monkeypatch.setattr("subsched.mcp_server.subprocess.Popen", fail_spawn)
+    result = trigger_dispatch(str(tmp_path))
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "spawn_failed"
+    assert "private credential" not in str(result)
+    assert get_dispatch_run(result["run_id"], str(tmp_path))["status"] == "failed"
+
+
+def test_concurrent_dispatch_requests_have_separate_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "subsched.yaml").write_text("github:\n  repo: acme/widgets\n", encoding="utf-8")
+
+    class _FakeProcess:
+        pid = 4321
+
+    real_popen = subprocess.Popen
+
+    def fake_popen(argv: list[str], **kwargs: object) -> object:
+        if argv[:3] == [sys.executable, "-m", "subsched.dispatch_runs"]:
+            return _FakeProcess()
+        return real_popen(argv, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("subsched.mcp_server.subprocess.Popen", fake_popen)
+    first = trigger_dispatch(str(tmp_path))
+    second = trigger_dispatch(str(tmp_path))
+
+    assert first["run_id"] != second["run_id"]
+    assert get_dispatch_run(first["run_id"], str(tmp_path))["status"] == "accepted"
+    assert get_dispatch_run(second["run_id"], str(tmp_path))["status"] == "accepted"
 
 
 # --- init_repo -------------------------------------------------------------------
@@ -818,6 +863,7 @@ def test_build_server_registers_all_tools_resources_and_prompts(tmp_path: Path) 
         "subsched_inspect_task",
         "subsched_queue_issues",
         "subsched_trigger_dispatch",
+        "subsched_get_dispatch_run",
         "subsched_init_repo",
         "subsched_resolve_needs_human",
         "subsched_cancel_task",

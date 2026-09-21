@@ -3311,6 +3311,16 @@ subsched mcp [--repository PATH]
 確認し（存在しなければ `McpToolError` でfail-closed）、起動する `subsched run` の引数に
 明示的に `--config <path>` を付与する（#268）。
 
+`subsched_trigger_dispatch`は永続`run_id`と`accepted`を返す。これは起動要求の受理であり、
+CLI起動・実行成功とは区別する。runごとの0600 lifecycle record/logを
+`.ai/runtime/dispatch-runs/`へ保存し、logは64KiBで1世代rotationする。
+wrapper processは`starting`→`running`→`succeeded`/`failed`を記録する。
+起動失敗・非ゼロ終了は固定のsanitized reason codeとexit codeを記録し、
+providerのstdout/stderrやcredentialを公開API・lifecycle logに含めない。
+`subsched_get_dispatch_run`と`subsched dispatch-status RUN_ID --json`は読み取り専用で、
+受理直後の遅延、再起動後の終端状態、PIDとprocess start timeの不一致による`stale`を
+区別する。同時要求は別の`run_id`へ分離する。billing/native実行の既存gateは維持する。
+
 
 `subsched_queue_issues` requires a valid, regular repository-root `subsched.yaml`.
 Selection precedence is explicit `issues` > explicit `label` > configured
@@ -3350,18 +3360,19 @@ CLIとの並行実行時にも競合やデータ破損を完全に防止する�
 
 ## 6. 公開仕様
 
-### Tools (11個)
+### Tools (12個)
 1. `subsched_get_status`: キュー状態内訳、タスク一覧、プロバイダークールダウン状態の取得。
 2. `subsched_inspect_task`: 指定Issueの詳細情報、パース済みセマンティックハンドオフ、直近コミットの取得。
 3. `subsched_queue_issues`: GitHubからのIssue自動検出およびキュー登録（`dry_run` 対応）。
 4. `subsched_trigger_dispatch`: バックグラウンドプロセスでの `subsched run` 起動。
-5. `subsched_init_repo`: リポジトリのスタック検出および `subsched.yaml` / `AGENTS.md` / `CLAUDE.md` のスキャフォールド。
-6. `subsched_resolve_needs_human`: `NEEDS_HUMAN` 状態のタスクを `READY` に遷移。
-7. `subsched_cancel_task`: ワークツリーおよびハンドオフファイルを温存したままタスクを `CANCELLED` に遷移。
-8. `subsched_reset_task`: `CANCELLED` taskだけをworktreeとhandoffを温存したまま`READY`へ復帰。
-9. `subsched_control`: スケジューラーの新規ディスパッチの一時停止 (`pause`) / 再開 (`resume`)。
-10. `subsched_get_metrics`: 生産性、信頼性、キャパシティ指標の集計取得。
-11. `subsched_reconcile`（#277）: `READY_FOR_REVIEW` タスクを実際のPR状態と突き合わせ、mergeされたPRを`COMPLETE`へ、mergeされずcloseされたPRを`NEEDS_HUMAN`へ遷移させる（`dry_run` 対応、`gh`エラー時はfail-closed）。ワークツリーのpruneはCLI (`subsched reconcile --prune-worktrees`) 専用で、このツールからは行わない。
+5. `subsched_get_dispatch_run`: `run_id`で非同期起動の状態と安全な失敗理由を取得。
+6. `subsched_init_repo`: リポジトリのスタック検出および `subsched.yaml` / `AGENTS.md` / `CLAUDE.md` のスキャフォールド。
+7. `subsched_resolve_needs_human`: `NEEDS_HUMAN` 状態のタスクを `READY` に遷移。
+8. `subsched_cancel_task`: ワークツリーおよびハンドオフファイルを温存したままタスクを `CANCELLED` に遷移。
+9. `subsched_reset_task`: `CANCELLED` taskだけをworktreeとhandoffを温存したまま`READY`へ復帰。
+10. `subsched_control`: スケジューラーの新規ディスパッチの一時停止 (`pause`) / 再開 (`resume`)。
+11. `subsched_get_metrics`: 生産性、信頼性、キャパシティ指標の集計取得。
+12. `subsched_reconcile`（#277）: `READY_FOR_REVIEW` タスクを実際のPR状態と突き合わせ、mergeされたPRを`COMPLETE`へ、mergeされずcloseされたPRを`NEEDS_HUMAN`へ遷移させる（`dry_run` 対応、`gh`エラー時はfail-closed）。ワークツリーのpruneはCLI (`subsched reconcile --prune-worktrees`) 専用で、このツールからは行わない。
 
 ### Resources (4個)
 1. `subsched://queue`: タスク一覧および一時停止状態のリアルタイムJSONスナップショット。

@@ -390,7 +390,8 @@ Desktop, Cursor, Antigravity/Gemini) can therefore infer the workflow, argument 
 - **`subsched_get_status`**: Retrieve current queue breakdown, active cooldowns, and task lists. Supports optional `repository_path` and `verbose` flag.
 - **`subsched_inspect_task`**: Fetch complete task detail, parsed semantic handoff (`.ai/handoffs/<issue>.md`), and recent worktree commits.
 - **`subsched_queue_issues`**: Discover issues from GitHub and queue them atomically. Supports `dry_run=True` to preview discoveries without state mutations.
-- **`subsched_trigger_dispatch`**: Non-blocking background dispatch of `subsched run`. Execution runs out-of-process to avoid blocking the MCP stdio loop. Requires explicit `allow_native=True` and `subscription_billing_verified=True` for live worker execution (fails closed by default).
+- **`subsched_trigger_dispatch`**: Non-blocking background dispatch of `subsched run`. Returns a persistent `run_id` with `accepted` status; this only means the launch request was accepted. Requires explicit `allow_native=True` and `subscription_billing_verified=True` for live worker execution (fails closed by default).
+- **`subsched_get_dispatch_run`**: Read `accepted`, `starting`, `running`, `succeeded`, `failed`, or `stale` status for that `run_id` without waiting for the worker. `subsched dispatch-status RUN_ID --json` provides the same CLI view. PID start time is checked to detect PID reuse. A fixed failure reason and exit code are returned; raw provider output is never exposed. Private lifecycle logs live under `.ai/runtime/dispatch-runs/` with 0600 permissions and bounded rotation.
 - **`subsched_init_repo`**: Scaffold `subsched.yaml`, `AGENTS.md`, and `CLAUDE.md` in the target repository.
 - **`subsched_resolve_needs_human`**: Transition a remediated task from `NEEDS_HUMAN` back to `READY`.
 - **`subsched_cancel_task`**: Transition task to `CANCELLED` while strictly preserving worktree and handoff files.
