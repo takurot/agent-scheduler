@@ -102,6 +102,16 @@ Outputs:
 - Active cooldowns and earliest reset timestamps
 - Queue breakdown by state (`READY`, `IN_PROGRESS`, `VERIFYING`, `NEEDS_HUMAN`, `COMPLETE`)
 
+### Explaining Issue Dispatch Readiness
+```bash
+# Diagnose why an issue is or is not dispatchable
+uv run subsched explain 101
+
+# Output machine-readable JSON diagnosis
+uv run subsched explain 101 --json
+```
+Reports whether the issue is eligible, dependency status, provider routing with freshness, cooldowns, run budget, and recommended operator actions without modifying scheduler state or making paid provider probes.
+
 ### Generating Metrics & Reports
 ```bash
 # Console summary

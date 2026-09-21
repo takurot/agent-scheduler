@@ -25,6 +25,7 @@ from subsched.config import (
     validate_repo,
 )
 from subsched.dispatch_runs import DispatchRunStore
+from subsched.explain import explain_issue
 from subsched.github.checks import fetch_pr_checks
 from subsched.github.issues import (
     GitHubCliError,
@@ -42,7 +43,7 @@ from subsched.github.reconcile import (
     prune_worktree_if_clean,
 )
 from subsched.init import InitError, build_scaffold_plan, write_scaffold_plan
-from subsched.models import Capacity, TaskState
+from subsched.models import Capacity, Issue, TaskState
 from subsched.preflight import validate_native_preflight
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler
@@ -835,6 +836,66 @@ def status(
             )
             summary = f"  {cap.agent} ({cap.scope}): {cap.state.value}{usage_str}{reset_str}"
             typer.echo(summary)
+
+
+@app.command()
+def explain(
+    ctx: typer.Context,
+    issue_number: Annotated[int, typer.Argument(help="GitHub issue number to explain", min=1)],
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Output machine-readable JSON")
+    ] = False,
+    config: Annotated[
+        Path | None, typer.Option("--config", help="Path to YAML configuration file")
+    ] = None,
+) -> None:
+    """Explain why an issue is or is not dispatchable without mutating state."""
+    context: Context = ctx.obj
+    try:
+        cfg = _load_effective_config(context.repository, config)
+    except ConfigError as error:
+        typer.echo(f"Configuration error: {error}", err=True)
+        raise typer.Exit(1) from error
+
+    try:
+        tasks = context.store.load_tasks()
+        capacities = context.store.load_capacities()
+    except StateCorruptionError as error:
+        typer.echo(f"State error: {error}", err=True)
+        raise typer.Exit(1) from error
+
+    matching_task = next((t for t in tasks if t.issue_number == issue_number), None)
+    if matching_task:
+        issue = Issue(
+            number=matching_task.issue_number,
+            title=matching_task.title,
+            labels=matching_task.labels,
+            body=matching_task.description or "",
+        )
+    else:
+        issue = Issue(number=issue_number, title=f"Issue #{issue_number}")
+
+    result = explain_issue(issue, tasks, cfg, capacities)
+
+    if json_output:
+        typer.echo(json.dumps(result, indent=2))
+        return
+
+    typer.echo(f"Issue #{result['issue_number']}: {result['title']}")
+    typer.echo(f"Current Status:     {result['current_status']}")
+    typer.echo(f"Dispatchable:       {'YES' if result['dispatchable'] else 'NO'}")
+    if result.get("selected_provider"):
+        typer.echo(f"Selected Provider:  {result['selected_provider']}")
+    if result.get("reason_codes"):
+        typer.echo(f"Reason Codes:       {', '.join(result['reason_codes'])}")
+    if result.get("reasons"):
+        typer.echo("Reasons:")
+        for r in result["reasons"]:
+            typer.echo(f"  - {r}")
+    if result.get("operator_actions"):
+        typer.echo("Operator Actions:")
+        for a in result["operator_actions"]:
+            typer.echo(f"  - {a}")
 
 
 @app.command()
