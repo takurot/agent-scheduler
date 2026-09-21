@@ -34,6 +34,7 @@ from subsched.handoff import parse_semantic_handoff
 from subsched.init import InitError, build_scaffold_plan, write_scaffold_plan
 from subsched.metrics import calculate_metrics
 from subsched.models import Issue, Task, TaskState, resolve_stage
+from subsched.recovery import ResolveError, resolve_needs_human_task
 from subsched.router import Router
 from subsched.scheduler import Scheduler
 from subsched.selection import discover_selected_issues, excluded_issue_labels, resolve_intent
@@ -426,29 +427,19 @@ def resolve_needs_human(
     issue_number: int,
     resolution_notes: str | None = None,
     repository_path: str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Reset a NEEDS_HUMAN task back to READY after human/agent remediation."""
     store = _store_for(repository_path)
+    note = resolution_notes or "resolved via subsched_resolve_needs_human"
     try:
-        with store.lock():
-            tasks = store.load_tasks()
-            matches = [task for task in tasks if task.issue_number == issue_number]
-            if not matches:
-                raise McpToolError(f"issue #{issue_number} is not in scheduler state")
-            task = matches[0]
-            if task.status is not TaskState.NEEDS_HUMAN:
-                raise McpToolError(
-                    f"issue #{issue_number} is not in NEEDS_HUMAN (status: {task.status.value})"
-                )
-            reason = resolution_notes or "resolved via subsched_resolve_needs_human"
-            replacement = task.transition(TaskState.READY, reason=reason)
-            updated = tuple(
-                replacement if item.issue_number == issue_number else item for item in tasks
-            )
-            store.save_tasks(updated, paused=store.is_paused())
-    except (SchedulerLockError, StateCorruptionError, ValueError) as error:
+        res = resolve_needs_human_task(store, issue_number, note=note, dry_run=dry_run)
+    except (ResolveError, SchedulerLockError, StateCorruptionError, ValueError) as error:
         raise McpToolError(f"resolution failed: {error}") from error
-    return {"issue_number": issue_number, "status": TaskState.READY.value}
+    return {
+        "issue_number": res.issue_number,
+        "status": res.new_status.value,
+    }
 
 
 def cancel_task(issue_number: int, repository_path: str | None = None) -> dict[str, Any]:
@@ -845,9 +836,15 @@ def build_server(options: ServerOptions) -> Any:
                 "transition history."
             ),
         ),
+        dry_run: bool = Field(
+            default=False,
+            description="Preview resolution without mutating scheduler state.",
+        ),
         repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
     ) -> dict[str, Any]:
-        return resolve_needs_human(issue_number, resolution_notes, _default(repository_path))
+        return resolve_needs_human(
+            issue_number, resolution_notes, _default(repository_path), dry_run=dry_run
+        )
 
     @server.tool(
         name="subsched_cancel_task",
