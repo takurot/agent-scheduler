@@ -25,12 +25,13 @@ jobs:
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
+      - run: uv lock --check
       - run: uv sync --frozen
-      - run: uv run ruff check .
-      - run: uv run mypy src
-      - run: uv run pytest --cov=subsched --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=80
-      - run: uv run python scripts/check_branch_coverage.py coverage.json
-      - run: uv run pip-audit
+      - run: uv run --frozen ruff check .
+      - run: uv run --frozen mypy src
+      - run: uv run --frozen pytest --cov=subsched --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=80
+      - run: uv run --frozen python scripts/check_branch_coverage.py coverage.json
+      - run: uv run --frozen pip-audit
 
   all-checks:
     name: all-checks
