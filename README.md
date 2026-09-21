@@ -783,6 +783,8 @@ See this repository's own [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) 
 | `subsched resume` | Resume scheduler execution from paused state |
 | `subsched cancel <id>` | Cancel a task and preserve its worktree files |
 | `subsched uncancel <id>` | Restore a `CANCELLED` task to `READY` and preserve its worktree files |
+| `subsched resolve <id> --note <text>` | Resolve a `NEEDS_HUMAN` task to `READY` with sanitized audit logging (`--dry-run`) |
+| `subsched restore-state <file>` | Safely restore scheduler state from a validated backup or quarantine snapshot (`--dry-run`) |
 | `subsched explain <id>` | Explain why an issue is or is not dispatchable without modifying state or making paid probes (`--json`) |
 | `subsched mcp` | Run subsched as an MCP server over stdio (`agent-scheduler[mcp]`) |
 | `subsched dispatch-status RUN_ID --json` | Read the persistent status of one detached MCP dispatch |

@@ -250,6 +250,23 @@ When a task branch conflicts with the base branch:
 - The worktree is preserved in a clean state.
 - The task is escalated to `NEEDS_HUMAN` for manual review.
 
+### Resolving NEEDS_HUMAN Tasks and Restoring State
+After manually diagnosing and remediating the root cause in the worktree:
+```bash
+# Preview resolution
+uv run subsched resolve 101 --note "Fixed lockfile conflict" --dry-run
+
+# Apply resolution and record sanitized audit log under .ai/audit/resolutions.jsonl
+uv run subsched resolve 101 --note "Fixed lockfile conflict"
+```
+To safely recover scheduler state from a validated backup or quarantine snapshot:
+```bash
+# Validate and restore snapshot
+uv run subsched restore-state .ai/backups/scheduler.bak.json --dry-run
+uv run subsched restore-state .ai/backups/scheduler.bak.json
+```
+
+
 ---
 
 ## 6. Release & Distribution

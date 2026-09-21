@@ -1093,6 +1093,67 @@ def uncancel(ctx: typer.Context, issue: Annotated[int, typer.Argument(min=1)]) -
 
 
 @app.command()
+def resolve(
+    ctx: typer.Context,
+    issue: Annotated[int, typer.Argument(help="Issue number in NEEDS_HUMAN to resolve", min=1)],
+    note: Annotated[str, typer.Option("--note", help="Explanation of the remediation applied")],
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Preview resolution without mutating state")
+    ] = False,
+) -> None:
+    """Resolve a NEEDS_HUMAN task to READY with audit logging."""
+    from subsched.recovery import ResolveError, resolve_needs_human_task
+
+    context: Context = ctx.obj
+    try:
+        res = resolve_needs_human_task(context.store, issue, note=note, dry_run=dry_run)
+    except ResolveError as error:
+        typer.echo(f"Resolve error: {error}", err=True)
+        raise typer.Exit(1) from error
+    except (SchedulerLockError, StateCorruptionError) as error:
+        typer.echo(f"State error: {error}", err=True)
+        raise typer.Exit(1) from error
+
+    prefix = "[DRY RUN] " if dry_run else ""
+    typer.echo(
+        f"{prefix}Resolved issue #{res.issue_number} "
+        f"({res.previous_status.value} -> {res.new_status.value})"
+    )
+    typer.echo(f"Resolution note: {res.resolution_note}")
+
+
+@app.command("restore-state")
+def restore_state(
+    ctx: typer.Context,
+    snapshot: Annotated[
+        Path,
+        typer.Argument(help="Path to validated backup or quarantine JSON file to restore"),
+    ],
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Validate snapshot without mutating state")
+    ] = False,
+) -> None:
+    """Safely restore scheduler state from a validated backup or quarantine snapshot."""
+    from subsched.recovery import RestoreError, restore_state_from_snapshot
+
+    context: Context = ctx.obj
+    try:
+        res = restore_state_from_snapshot(context.store, snapshot, dry_run=dry_run)
+    except RestoreError as error:
+        typer.echo(f"Restore error: {error}", err=True)
+        raise typer.Exit(1) from error
+    except (SchedulerLockError, StateCorruptionError) as error:
+        typer.echo(f"State error: {error}", err=True)
+        raise typer.Exit(1) from error
+
+    prefix = "[DRY RUN] " if dry_run else ""
+    typer.echo(
+        f"{prefix}Restored state from {res.source_file} "
+        f"({res.restored_tasks_count} tasks, revision {res.revision})"
+    )
+
+
+@app.command()
 def doctor(
     ctx: typer.Context,
     config: Annotated[
