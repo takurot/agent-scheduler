@@ -292,7 +292,14 @@ You can connect `subsched` to your preferred AI coding assistant using either `u
 > If `agent-scheduler[mcp]` is installed in your active environment or via `pipx` / `uv tool install`, you can replace `"command": "uvx", "args": ["--from", "agent-scheduler[mcp]", "subsched", "mcp"]` with `"command": "subsched", "args": ["mcp"]`. To target a specific repository path when running outside its root, pass `"--repository", "/path/to/repo"` before `"mcp"` in the argument list.
 
 #### Exposed Tools, Resources, and Prompts
-- **Tools**: `subsched_get_status`, `subsched_inspect_task`, `subsched_queue_issues`, `subsched_trigger_dispatch` (non-blocking background dispatch), `subsched_init_repo`, `subsched_resolve_needs_human`, `subsched_cancel_task`, `subsched_reset_task`, `subsched_control`, `subsched_get_metrics`, `subsched_reconcile`. All tools accept an optional `repository_path`.
+- **Tools**: `subsched_get_status`, `subsched_inspect_task`, `subsched_queue_issues`, `subsched_trigger_dispatch` (returns a persistent `run_id`), `subsched_get_dispatch_run` (read-only lifecycle lookup), `subsched_init_repo`, `subsched_resolve_needs_human`, `subsched_cancel_task`, `subsched_reset_task`, `subsched_control`, `subsched_get_metrics`, `subsched_reconcile`. All tools accept an optional `repository_path`.
+
+`subsched_trigger_dispatch` reports `accepted` when the child launch is requested;
+that response does not imply the CLI started or completed. Query
+`subsched_get_dispatch_run(run_id=...)` or `subsched dispatch-status RUN_ID --json`
+for `starting`, `running`, `succeeded`, `failed`, or `stale`. Failure reasons are
+fixed codes and include no raw provider output. Each run has a private 0600
+lifecycle log under `.ai/runtime/dispatch-runs/`.
 
 `subsched_queue_issues` requires a valid, regular repository-root `subsched.yaml`.
 Selection precedence is explicit `issues` > explicit `label` > configured
@@ -777,6 +784,7 @@ See this repository's own [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) 
 | `subsched cancel <id>` | Cancel a task and preserve its worktree files |
 | `subsched uncancel <id>` | Restore a `CANCELLED` task to `READY` and preserve its worktree files |
 | `subsched mcp` | Run subsched as an MCP server over stdio (`agent-scheduler[mcp]`) |
+| `subsched dispatch-status RUN_ID --json` | Read the persistent status of one detached MCP dispatch |
 
 ---
 
