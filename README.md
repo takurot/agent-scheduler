@@ -378,6 +378,13 @@ flowchart TD
 
 ### Container Sandbox Setup Guide
 
+For an operator-controlled live boundary check, run the manual
+[`Live Docker isolation` workflow](.github/workflows/live-isolation.yml) on a trusted
+self-hosted Linux Docker runner. It requires digest-pinned worker/proxy image variables,
+runs four real container tests with synthetic credentials, and publishes a non-secret
+result report. See the [operator runbook](docs/RUNBOOK.md#operator-run-docker-boundary-check)
+for setup and release confirmation.
+
 To set up native container isolation for `subsched`:
 
 > [!TIP]

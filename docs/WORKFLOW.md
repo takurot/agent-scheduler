@@ -246,6 +246,10 @@ uv run pip-audit
 GitHub write、長時間soak testは通常CIへ混ぜず、明示承認された隔離環境で実行結果を
 記録する。実行できないgateをPASSと表現しない。
 
+実Docker隔離の検証はoperator管理のhostで`Live Docker isolation`を明示起動し、
+4件のテストがskipなしでPASSしたreportのcommit SHA、Docker version、worker/proxy
+digestとcleanup結果を確認する。通常CI/releaseのskipを実Docker検証の成功と数えない。
+
 ### 7.1 コンテナ隔離環境下のワーカー責務とホスト検証の分離 (#337)
 
 Schedulerが管理するコンテナ隔離ワークツリー（`subsched/issue-N`）で自律エージェントが実行される場合、ワーカーは自身が担当する変更のスコープ付きテスト（例: `uv run pytest <targeted_tests>`, `uv run mypy <path>`）を実行してTDDを完遂する。

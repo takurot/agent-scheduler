@@ -1,0 +1,35 @@
+name: Live Docker isolation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: subsched-live-isolation
+  cancel-in-progress: false
+
+jobs:
+  adversarial-isolation:
+    runs-on: [self-hosted, linux, subsched-isolation]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: "3.12"
+      - name: Run all four real Docker isolation tests
+        env:
+          SUBSCHED_ISOLATION_WORKER_IMAGE: ${{ vars.SUBSCHED_ISOLATION_WORKER_IMAGE }}
+          SUBSCHED_ISOLATION_PROXY_IMAGE: ${{ vars.SUBSCHED_ISOLATION_PROXY_IMAGE }}
+          SUBSCHED_ISOLATION_REPORT: ${{ runner.temp }}/subsched-isolation-${{ github.run_id }}-${{ github.run_attempt }}.json
+        run: bash scripts/live-isolation-check.sh
+      - name: Upload non-secret execution evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-isolation-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/subsched-isolation-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: error
+          retention-days: 30
