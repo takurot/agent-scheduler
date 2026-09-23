@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -176,36 +177,52 @@ def probe_subscription_authentication(
         return PreflightCheckResult(name=f"{name}-auth", found=False, error=failure)
     if auth_dir.is_symlink() or not resolved_auth.is_dir():
         return PreflightCheckResult(name=f"{name}-auth", found=False, error=failure)
+    if name == "claude" and not _claude_settings_are_subscription_only(resolved_auth):
+        return PreflightCheckResult(name="claude-auth", found=True, error=failure)
 
-    env = {"HOME": str(resolved_auth), "NO_COLOR": "1"}
-    if name == "codex":
-        env["CODEX_HOME"] = str(resolved_auth)
-        argv = [str(resolved_executable), "login", "status"]
-    else:
-        env["CLAUDE_CONFIG_DIR"] = str(resolved_auth)
-        if not _claude_settings_are_subscription_only(resolved_auth):
-            return PreflightCheckResult(name="claude-auth", found=True, error=failure)
-        oauth_token = resolved_auth / "oauth-token"
-        if oauth_token.exists():
-            try:
-                if (
-                    oauth_token.is_symlink()
-                    or not oauth_token.is_file()
-                    or oauth_token.stat().st_size > 16_384
-                ):
-                    return PreflightCheckResult(name="claude-auth", found=True, error=failure)
-                token = oauth_token.read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeError):
-                return PreflightCheckResult(name="claude-auth", found=True, error=failure)
-            if not token:
-                return PreflightCheckResult(name="claude-auth", found=True, error=failure)
-            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
-        argv = [str(resolved_executable), "auth", "status", "--json"]
-
+    # The status CLI may write to its config directory (e.g. Claude's `backups/`), which
+    # would poison the operator's dedicated auth directory and break its 0700/0600 layout
+    # for later native runs. Probe against a private, discarded copy instead.
     try:
-        proc = _safe_run(argv, run_cmd=run_cmd, env=env)
-    except (OSError, subprocess.SubprocessError):
+        scratch_dir = tempfile.mkdtemp(prefix="subsched-auth-probe-")
+    except OSError:
         return PreflightCheckResult(name=f"{name}-auth", found=True, error=failure)
+    try:
+        scratch_home = Path(scratch_dir)
+        try:
+            shutil.copytree(resolved_auth, scratch_home, dirs_exist_ok=True, symlinks=True)
+        except OSError:
+            return PreflightCheckResult(name=f"{name}-auth", found=True, error=failure)
+
+        env = {"HOME": str(scratch_home), "NO_COLOR": "1"}
+        if name == "codex":
+            env["CODEX_HOME"] = str(scratch_home)
+            argv = [str(resolved_executable), "login", "status"]
+        else:
+            env["CLAUDE_CONFIG_DIR"] = str(scratch_home)
+            oauth_token = scratch_home / "oauth-token"
+            if oauth_token.exists():
+                try:
+                    if (
+                        oauth_token.is_symlink()
+                        or not oauth_token.is_file()
+                        or oauth_token.stat().st_size > 16_384
+                    ):
+                        return PreflightCheckResult(name="claude-auth", found=True, error=failure)
+                    token = oauth_token.read_text(encoding="utf-8").strip()
+                except (OSError, UnicodeError):
+                    return PreflightCheckResult(name="claude-auth", found=True, error=failure)
+                if not token:
+                    return PreflightCheckResult(name="claude-auth", found=True, error=failure)
+                env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+            argv = [str(resolved_executable), "auth", "status", "--json"]
+
+        try:
+            proc = _safe_run(argv, run_cmd=run_cmd, env=env)
+        except (OSError, subprocess.SubprocessError):
+            return PreflightCheckResult(name=f"{name}-auth", found=True, error=failure)
+    finally:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
     authenticated = proc.returncode == 0 and (
         proc.stderr.strip() == "Logged in using ChatGPT"
         if name == "codex"
@@ -461,13 +478,16 @@ def validate_native_preflight(
         auth_by_agent = dict(isolation_config.auth)
         for agent in enabled:
             agent_check = next((check for check in checks if check.name == agent), None)
-            auth_dir = auth_by_agent.get(agent)
             if (
                 agent_check is None
                 or not agent_check.compatible
                 or agent_check.executable_path is None
             ):
                 continue
+            # verify_native_isolation() fails closed above when any enabled agent lacks
+            # configured auth, so auth_dir is only unset here when tests substitute their
+            # own isolation verification stub.
+            auth_dir = auth_by_agent.get(agent)
             if auth_dir is None:
                 auth_result = PreflightCheckResult(
                     name=f"{agent}-auth",

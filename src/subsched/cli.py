@@ -1167,7 +1167,8 @@ def doctor(
     """Check required local executables and warn on an overly broad `gh` token scope.
 
     Reads the locally cached `gh` auth state to report token scopes; never prints the token
-    value and never invokes Claude or Codex, so no Agent capacity is consumed.
+    value. Only probes Claude/Codex `--version`/`--help` output and local subscription auth
+    status, so no model call or Agent capacity is consumed.
     """
     context: Context = ctx.obj
     try:

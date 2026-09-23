@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
 from pathlib import Path
 
@@ -64,11 +65,11 @@ def test_probe_subscription_authentication_accepts_subscription_login(
     )
     env = captured["env"]
     assert isinstance(env, dict)
-    assert env["HOME"] == str(auth_dir)
+    home = env["HOME"]
+    assert isinstance(home, str)
+    assert home != str(auth_dir)
     assert env["NO_COLOR"] == "1"
-    assert env["CODEX_HOME" if agent == "codex" else "CLAUDE_CONFIG_DIR"] == str(
-        auth_dir
-    )
+    assert env["CODEX_HOME" if agent == "codex" else "CLAUDE_CONFIG_DIR"] == home
 
 
 @pytest.mark.parametrize(
@@ -211,6 +212,49 @@ def test_probe_subscription_authentication_rejects_claude_metered_settings(
     assert result.compatible is False
     assert result.error == "claude subscription authentication could not be verified"
     assert "synthetic-secret" not in result.error
+
+
+@pytest.mark.parametrize("agent", ("claude", "codex"))
+def test_probe_subscription_authentication_does_not_mutate_configured_auth_dir(
+    tmp_path: Path, agent: str
+) -> None:
+    """A status CLI that writes into its HOME/config dir must not poison the operator's
+    dedicated auth directory (e.g. Claude Code writing a `backups/` dir there breaks
+    verify_native_isolation's 0700/0600 requirement for later native runs)."""
+    executable = tmp_path / agent
+    executable.write_text("", encoding="utf-8")
+    executable.chmod(0o755)
+    auth_dir = tmp_path / f"{agent}-auth"
+    auth_dir.mkdir(mode=0o700)
+    before = sorted(p.relative_to(auth_dir) for p in auth_dir.rglob("*"))
+    stdout = (
+        ""
+        if agent == "codex"
+        else json.dumps(
+            {
+                "loggedIn": True,
+                "authMethod": "oauth_token",
+                "apiProvider": "firstParty",
+            }
+        )
+    )
+    stderr = "Logged in using ChatGPT" if agent == "codex" else ""
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        home = Path(env["HOME"])
+        (home / "backups").mkdir(mode=0o755)
+        (home / "written-by-cli").write_text("junk", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=stderr)
+
+    result = probe_subscription_authentication(
+        agent, executable, auth_dir=auth_dir, run_cmd=fake_run
+    )
+
+    assert result.compatible is True
+    assert sorted(p.relative_to(auth_dir) for p in auth_dir.rglob("*")) == before
+    assert stat.S_IMODE(auth_dir.stat().st_mode) == 0o700
 
 
 def test_probe_command_capabilities_claude_success(tmp_path: Path) -> None:
