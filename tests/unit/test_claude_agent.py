@@ -583,3 +583,95 @@ def test_parse_claude_result_plan_review_markdown_code_fence() -> None:
     assert res.plan_verdict == PlanVerdict(
         verdict="APPROVE", summary="Implementation plan looks solid", findings=()
     )
+
+
+@pytest.mark.parametrize(
+    ("message", "observed", "kind", "expected"),
+    [
+        (
+            "5-hour limit reached ∙ resets 12pm",
+            "2026-09-23T10:00:00+00:00",
+            AgentResultKind.CAPACITY_SESSION,
+            "2026-09-23T12:00:00+00:00",
+        ),
+        (
+            "5-hour limit reached · resets 12am",
+            "2026-09-23T23:00:00+00:00",
+            AgentResultKind.CAPACITY_SESSION,
+            "2026-09-24T00:00:00+00:00",
+        ),
+        (
+            "Sonnet weekly limit reached · resets Dec 1, 10pm",
+            "2026-09-23T10:00:00+00:00",
+            AgentResultKind.CAPACITY_WEEKLY,
+            "2026-12-01T22:00:00+00:00",
+        ),
+        (
+            "You've hit your limit - resets Feb 4, 9pm (Africa/Johannesburg)",
+            "2026-09-23T10:00:00+00:00",
+            AgentResultKind.CAPACITY_SESSION,
+            "2027-02-04T21:00:00+02:00",
+        ),
+        (
+            "You've hit your weekly limit - resets Jan 1, 9:15am (Asia/Tokyo)",
+            "2026-12-31T23:00:00+00:00",
+            AgentResultKind.CAPACITY_WEEKLY,
+            "2027-01-01T09:15:00+09:00",
+        ),
+        (
+            "You've hit your limit - RESETS FEB 29, 9PM",
+            "2028-02-28T10:00:00+00:00",
+            AgentResultKind.CAPACITY_SESSION,
+            "2028-02-29T21:00:00+00:00",
+        ),
+        (
+            "You've hit your limit - resets 9pm",
+            "2026-09-23T10:00:00+02:00",
+            AgentResultKind.CAPACITY_SESSION,
+            "2026-09-23T21:00:00+02:00",
+        ),
+    ],
+)
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_reported_natural_capacity_formats(
+    message: str, observed: str, kind: AgentResultKind, expected: str, exit_code: int
+) -> None:
+    payload = json.loads(fixture("session-429.json"))
+    payload["result"] = message
+    result = parse_claude_result(
+        ClaudeProcessOutcome(exit_code=exit_code, stdout=json.dumps(payload)),
+        observed_at=datetime.fromisoformat(observed),
+    )
+    assert result.kind is kind
+    assert result.reset_at == datetime.fromisoformat(expected)
+    assert result.output == "claude capacity exhausted"
+
+
+@pytest.mark.parametrize(
+    "reset",
+    [
+        "",
+        "tomorrow",
+        "13pm",
+        "0am",
+        "9:60pm",
+        "Feb 30, 9pm",
+        "Feb 29, 9pm",
+        "Foo 4, 9pm",
+        "Dec 0, 9pm",
+        "9pm (Not/AZone)",
+        "9pm (",
+        "9pm (UTC) garbage",
+        "9pmjunk",
+    ],
+)
+def test_invalid_natural_capacity_formats_fail_closed(reset: str) -> None:
+    payload = json.loads(fixture("session-429.json"))
+    payload["result"] = f"You've hit your limit - resets {reset}"
+    result = parse_claude_result(
+        ClaudeProcessOutcome(exit_code=1, stdout=json.dumps(payload)),
+        observed_at=datetime(2026, 9, 23, tzinfo=UTC),
+    )
+    assert result.kind is AgentResultKind.UNKNOWN
+    assert result.reset_at is None
+    assert result.output == "claude capacity reset unknown"

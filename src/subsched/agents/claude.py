@@ -418,13 +418,17 @@ def _failure_message(payload: dict[str, Any] | None, stderr: str) -> str:
 def _capacity_kind(message: str) -> AgentResultKind | None:
     if "weekly" in message and "limit" in message:
         return AgentResultKind.CAPACITY_WEEKLY
-    if _contains_any(message, ("5-hour", "5 hour", "session limit", "usage limit")):
+    if _contains_any(
+        message, ("5-hour", "5 hour", "session limit", "usage limit", "hit your limit")
+    ):
         return AgentResultKind.CAPACITY_SESSION
     return None
 
 
 _NATURAL_RESET_AT_PATTERN = re.compile(
-    r"resets (\d{1,2}:\d{2}(?:am|pm))(?:\s*\(([^)]+)\))?", re.IGNORECASE
+    r"\bresets\s+(?:([a-z]{3})\s+(\d{1,2}),\s*)?"
+    r"(\d{1,2}(?::\d{2})?(?:am|pm))(?:\s*\(([^)]+)\))?\s*[.!]?\s*$",
+    re.IGNORECASE,
 )
 
 
@@ -446,9 +450,11 @@ def _parse_natural_language_reset_at(result: Any, observed_at: datetime) -> date
     match = _NATURAL_RESET_AT_PATTERN.search(result)
     if match is None:
         return None
-    time_text, tz_name = match.group(1), match.group(2)
+    month_text, day_text, time_text, tz_name = match.groups()
     try:
-        parsed_time = datetime.strptime(time_text.lower(), "%I:%M%p")
+        parsed_time = datetime.strptime(
+            time_text.lower(), "%I:%M%p" if ":" in time_text else "%I%p"
+        )
     except ValueError:
         return None
     tzinfo = observed_at.tzinfo or UTC
@@ -461,8 +467,31 @@ def _parse_natural_language_reset_at(result: Any, observed_at: datetime) -> date
     reset_at = localized_observed_at.replace(
         hour=parsed_time.hour, minute=parsed_time.minute, second=0, microsecond=0
     )
-    if reset_at < localized_observed_at:
-        reset_at += timedelta(days=1)
+    try:
+        if month_text is not None:
+            # Provider month abbreviations are English, independent of host locale.
+            months = (
+                "jan",
+                "feb",
+                "mar",
+                "apr",
+                "may",
+                "jun",
+                "jul",
+                "aug",
+                "sep",
+                "oct",
+                "nov",
+                "dec",
+            )
+            month = months.index(month_text.casefold()) + 1
+            reset_at = reset_at.replace(month=month, day=int(day_text))
+            if reset_at < localized_observed_at:
+                reset_at = reset_at.replace(year=reset_at.year + 1)
+        elif reset_at < localized_observed_at:
+            reset_at += timedelta(days=1)
+    except (ValueError, OverflowError):
+        return None
     return reset_at
 
 
