@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import subprocess
 from pathlib import Path
@@ -110,7 +111,9 @@ test ! -e "$1"
 test ! -e /var/run/docker.sock
 test -z "${GIT_DIR:-}"
 test -z "${GIT_WORK_TREE:-}"
-test "$(git rev-parse --absolute-git-dir)" = /run/subsched-git
+git config --global --add safe.directory "$PWD"
+test -f /run/subsched-git/HEAD
+test "$(git rev-parse --absolute-git-dir)" = "$PWD/.git"
 git rev-parse --verify origin/main >/dev/null
 git diff origin/main...HEAD >/dev/null
 git log origin/main..HEAD >/dev/null
@@ -141,8 +144,10 @@ printf 'ok\\n'
         container_name=name,
     )
 
-    result = run_process_group(wrapped)
-    cleanup_failure = cleanup_native_container(runtime, name, env=wrapped.env)
+    try:
+        result = run_process_group(wrapped)
+    finally:
+        cleanup_failure = cleanup_native_container(runtime, name, env=wrapped.env)
 
     assert result.exit_code == 0, result.stderr
     assert result.stdout.strip() == "ok"
@@ -175,8 +180,10 @@ def test_real_container_timeout_cleanup_kills_descendants(tmp_path: Path) -> Non
         container_name=name,
     )
 
-    result = run_process_group(wrapped)
-    cleanup_failure = cleanup_native_container(runtime, name, env=wrapped.env)
+    try:
+        result = run_process_group(wrapped)
+    finally:
+        cleanup_failure = cleanup_native_container(runtime, name, env=wrapped.env)
 
     assert result.timed_out is True
     assert cleanup_failure is None
@@ -214,7 +221,8 @@ def test_real_container_cannot_rewrite_linked_worktree_git_pointer(
         argv=(
             "/bin/sh",
             "-ceu",
-            "if printf 'evil\\n' > .git; then exit 42; fi; git status --short >/dev/null",
+            "if printf 'evil\\n' > .git; then exit 42; fi; "
+            "git -c safe.directory=\"$PWD\" status --short >/dev/null",
         ),
         cwd=worktree,
         env={"HOME": os.environ["HOME"], "PATH": os.environ["PATH"]},
@@ -238,8 +246,10 @@ def test_real_container_cannot_rewrite_linked_worktree_git_pointer(
         container_name=name,
     )
 
-    result = run_process_group(wrapped)
-    cleanup_failure = cleanup_native_container(runtime, name, env=wrapped.env)
+    try:
+        result = run_process_group(wrapped)
+    finally:
+        cleanup_failure = cleanup_native_container(runtime, name, env=wrapped.env)
 
     assert result.exit_code == 0, result.stderr
     assert cleanup_failure is None
@@ -289,9 +299,17 @@ def test_real_container_reproduces_and_resolves_codex_bwrap_sandbox_conflict(
     worktree = tmp_path / "worktree"
     worktree.mkdir()
 
-    network = f"subsched-bwrap-repro-{os.getpid()}"
-    image = f"subsched-bwrap-repro:{os.getpid()}"
-    subprocess.run(["docker", "network", "create", network], check=True, timeout=30)
+    nonce = secrets.token_hex(6)
+    network = f"subsched-bwrap-repro-{nonce}"
+    image = f"subsched-bwrap-repro:{nonce}"
+    created = subprocess.run(
+        ["docker", "network", "create", network],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    network_id = created.stdout.strip()
     try:
         _build_local_bwrap_image(image)
         config = NativeIsolationConfig(
@@ -322,7 +340,7 @@ def test_real_container_reproduces_and_resolves_codex_bwrap_sandbox_conflict(
             try:
                 return run_process_group(wrapped)
             finally:
-                cleanup_native_container(runtime, name, env=wrapped.env)
+                assert cleanup_native_container(runtime, name, env=wrapped.env) is None
 
         # The bug: Codex's own sandbox invokes bwrap, which the kernel refuses inside
         # the outer container boundary -- exactly the field-reported failure.
@@ -340,5 +358,5 @@ def test_real_container_reproduces_and_resolves_codex_bwrap_sandbox_conflict(
         assert direct_result.exit_code == 0
         assert direct_result.stdout.strip() == "direct-ok"
     finally:
-        subprocess.run(["docker", "network", "rm", network], check=False, timeout=30)
-        subprocess.run(["docker", "image", "rm", image], check=False, timeout=30)
+        subprocess.run(["docker", "network", "rm", network_id], check=True, timeout=30)
+        subprocess.run(["docker", "image", "rm", image], check=True, timeout=30)

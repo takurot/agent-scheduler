@@ -58,6 +58,29 @@ empty before dispatch. Use the complete schema in `examples/scheduler.yaml`; do 
 SSH, GitHub CLI, or Scheduler write credentials in provider auth directories. A skipped
 real-container integration test is not evidence that a deployment is ready.
 
+### Operator-run Docker boundary check
+
+On a trusted host with a Linux Docker engine, use **Actions → Live Docker isolation →
+Run workflow**. The job runs only on a self-hosted runner labeled
+`subsched-isolation`; do not attach that label to a shared or untrusted runner. Set the
+repository variables `SUBSCHED_ISOLATION_WORKER_IMAGE` and
+`SUBSCHED_ISOLATION_PROXY_IMAGE` to locally available RepoDigest references. The job
+uses synthetic auth and no real provider credentials. Missing settings, a missing image,
+any skipped test, or any failed test cause the job to fail.
+
+The job creates its own internal network and proxy, runs all four tests in
+`tests/integration/test_native_isolation_container.py`, then removes only the Docker
+resources it created. It uploads a 0600 JSON report with commit SHA, Docker version,
+image digests, network/proxy configuration, result, and cleanup result. The same check
+can be run locally by setting both image variables and a new path in
+`SUBSCHED_ISOLATION_REPORT`, then running `bash scripts/live-isolation-check.sh`.
+
+Before a release that claims live Docker isolation validation, the operator must inspect
+a successful report for the release commit and intended worker/proxy digests. The normal
+CI and release jobs run the opt-in tests as skips; their green status alone does not
+establish a live Docker boundary result. A failed or missing report requires another
+explicit run after correction.
+
 ### Initializing & Running Scheduler
 ```bash
 # Natural language instruction discovery
