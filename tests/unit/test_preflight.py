@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -18,23 +19,25 @@ FIXTURES = Path(__file__).parents[1] / "fixtures"
 
 
 @pytest.mark.parametrize(
-    ("agent", "stdout"),
+    ("agent", "stdout", "stderr"),
     (
-        ("codex", "Logged in using ChatGPT\n"),
+        ("codex", "", "Logged in using ChatGPT\n"),
         (
             "claude",
             '{"loggedIn":true,"authMethod":"claude.ai",'
             '"apiProvider":"firstParty","subscriptionType":"pro"}',
+            "",
         ),
         (
             "claude",
             '{"loggedIn":true,"authMethod":"oauth_token",'
             '"apiProvider":"firstParty"}',
+            "",
         ),
     ),
 )
 def test_probe_subscription_authentication_accepts_subscription_login(
-    tmp_path: Path, agent: str, stdout: str
+    tmp_path: Path, agent: str, stdout: str, stderr: str
 ) -> None:
     executable = tmp_path / agent
     executable.write_text("", encoding="utf-8")
@@ -46,7 +49,7 @@ def test_probe_subscription_authentication_accepts_subscription_login(
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         captured["argv"] = argv
         captured["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=stderr)
 
     result = probe_subscription_authentication(
         agent, executable, auth_dir=auth_dir, run_cmd=fake_run
@@ -110,6 +113,35 @@ def test_probe_subscription_authentication_rejects_non_subscription_or_unknown_s
     assert result.compatible is False
     assert result.error == f"{agent} subscription authentication could not be verified"
     assert "credential detail" not in result.error
+
+
+@pytest.mark.parametrize("subscription_type", ([], {}))
+def test_probe_subscription_authentication_rejects_non_string_claude_subscription_type(
+    tmp_path: Path, subscription_type: object
+) -> None:
+    executable = tmp_path / "claude"
+    executable.write_text("", encoding="utf-8")
+    executable.chmod(0o755)
+    auth_dir = tmp_path / "claude-auth"
+    auth_dir.mkdir()
+    status = {
+        "loggedIn": True,
+        "authMethod": "claude.ai",
+        "apiProvider": "firstParty",
+        "subscriptionType": subscription_type,
+    }
+
+    result = probe_subscription_authentication(
+        "claude",
+        executable,
+        auth_dir=auth_dir,
+        run_cmd=lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps(status), stderr=""
+        ),
+    )
+
+    assert result.compatible is False
+    assert result.error == "claude subscription authentication could not be verified"
 
 
 def test_probe_subscription_authentication_supplies_claude_oauth_token_without_logging_it(
@@ -428,7 +460,7 @@ def test_validate_native_preflight_checks_configured_auth_for_each_enabled_agent
             )
         if name == "codex" and argv[1:] == ["login", "status"]:
             return subprocess.CompletedProcess(
-                argv, 0, stdout="Logged in using ChatGPT\n", stderr=""
+                argv, 0, stdout="", stderr="Logged in using ChatGPT\n"
             )
         return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected")
 

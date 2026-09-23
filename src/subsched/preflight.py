@@ -150,9 +150,11 @@ def _claude_subscription_status(stdout: str) -> bool:
     auth_method = payload.get("authMethod")
     if auth_method == "oauth_token":
         return True
+    subscription_type = payload.get("subscriptionType")
     return (
         auth_method == "claude.ai"
-        and payload.get("subscriptionType") in _CLAUDE_SUBSCRIPTION_TYPES
+        and isinstance(subscription_type, str)
+        and subscription_type in _CLAUDE_SUBSCRIPTION_TYPES
     )
 
 
@@ -205,7 +207,7 @@ def probe_subscription_authentication(
     except (OSError, subprocess.SubprocessError):
         return PreflightCheckResult(name=f"{name}-auth", found=True, error=failure)
     authenticated = proc.returncode == 0 and (
-        proc.stdout.strip() == "Logged in using ChatGPT"
+        proc.stderr.strip() == "Logged in using ChatGPT"
         if name == "codex"
         else _claude_subscription_status(proc.stdout)
     )
