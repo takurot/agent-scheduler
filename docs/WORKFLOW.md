@@ -219,10 +219,10 @@ Schedulerが対象repositoryへ行うpush/PR機能はnative worker権限と分�
 
 ```bash
 uv lock --check
-uv run pip-audit
+uv run --frozen pip-audit
 ```
 
-`pip-audit` は dev dependency として `uv.lock` へ固定されており、local/CI とも `uv run pip-audit` で実行する。未固定の audit tool を実行する際も不要な credential を environment へ渡さない。
+`pip-audit` は dev dependency として `uv.lock` へ固定されており、local/CI とも `uv run --frozen pip-audit` で実行する。未固定の audit tool を実行する際も不要な credential を environment へ渡さない。
 
 脆弱性を無視してgateを通さない。修正版がない場合は影響、到達可能性、暫定対策をIssue
 またはPRへ記録する。
@@ -232,13 +232,17 @@ uv run pip-audit
 PR前にCIと同じコマンドを実行する。
 
 ```bash
+uv lock --check
 uv sync --frozen
-uv run ruff check .
-uv run mypy src
-uv run pytest --cov=subsched --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=80
-uv run python scripts/check_branch_coverage.py coverage.json
-uv run pip-audit
+uv run --frozen ruff check .
+uv run --frozen mypy src
+uv run --frozen pytest --cov=subsched --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=80
+uv run --frozen python scripts/check_branch_coverage.py coverage.json
+uv run --frozen pip-audit
 ```
+
+品質ゲートはlockと`pyproject.toml`が不整合なら更新せず失敗する。依存更新は
+品質ゲートとは別に明示的に行い、`uv.lock`の差分をレビューする。
 
 総合 coverage（line）および branch coverage（`covered_branches / num_branches`）の双方で 80% 以上を維持する。CI は line coverage（`--cov-fail-under=80`）および branch coverage（`scripts/check_branch_coverage.py`、branch が 0 本の場合は 100% 扱い）の閾値を自動強制する。
 
