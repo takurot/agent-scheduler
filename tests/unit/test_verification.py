@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from subsched.config import NativeIsolationConfig
 from subsched.verification import MAX_VERIFICATION_ERROR_CHARS, run_verification
 
 
@@ -141,6 +142,123 @@ def test_run_verification_confirms_cleanup_on_pass(tmp_path: Path) -> None:
     assert report.cleanup_confirmed is True
 
 
+def test_run_verification_uses_networkless_container_when_isolation_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subsched.verification as verification
+    from subsched.agents.base import ProcessExecutionResult
+
+    requests = []
+    cleanup_calls: list[tuple[Path, str, dict[str, str]]] = []
+
+    def fake_run(request: object) -> ProcessExecutionResult:
+        requests.append(request)
+        return ProcessExecutionResult(exit_code=0, stdout="ok", stderr="")
+
+    def fake_cleanup(
+        runtime: Path, container_name: str, *, env: dict[str, str]
+    ) -> None:
+        cleanup_calls.append((runtime, container_name, env))
+
+    monkeypatch.setattr(verification, "run_process_group", fake_run)
+    monkeypatch.setattr(verification, "cleanup_native_container", fake_cleanup)
+    monkeypatch.setattr(verification, "native_container_name", lambda _: "verification-test")
+    config = NativeIsolationConfig(
+        backend="container",
+        runtime="docker",
+        image="registry.invalid/worker@sha256:" + "a" * 64,
+        network="provider-network",
+        proxy_url="http://provider-proxy:3128",
+        auth=(("claude", Path("/host/provider-auth")),),
+    )
+
+    report = run_verification(
+        tmp_path,
+        ("python -m pytest tests/unit",),
+        env={"PATH": "/usr/bin", "HOME": "/host/home", "SECRET_TOKEN": "do-not-pass"},
+        isolation_config=config,
+        isolation_runtime_executable=Path("/usr/bin/docker"),
+    )
+
+    assert report.passed is True
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.argv[:3] == ("/usr/bin/docker", "run", "--rm")
+    assert request.argv[request.argv.index("--network") + 1] == "none"
+    assert "HOME=/isolated-home" in request.argv
+    assert "SECRET_TOKEN" not in " ".join(request.argv)
+    assert "provider-network" not in request.argv
+    assert "http://provider-proxy:3128" not in request.argv
+    assert "/host/provider-auth" not in " ".join(request.argv)
+    mounts = [
+        request.argv[index + 1]
+        for index, value in enumerate(request.argv)
+        if value == "--mount"
+    ]
+    assert mounts == [f"type=bind,src={tmp_path},dst={tmp_path}"]
+    assert request.argv[-4:] == ("python", "-m", "pytest", "tests/unit")
+    assert request.env == {"PATH": "/usr/bin"}
+    assert cleanup_calls == [(Path("/usr/bin/docker"), "verification-test", request.env)]
+
+
+def test_run_verification_fails_closed_when_container_cleanup_is_unconfirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subsched.verification as verification
+    from subsched.agents.base import ProcessExecutionResult
+
+    monkeypatch.setattr(
+        verification,
+        "run_process_group",
+        lambda request: ProcessExecutionResult(exit_code=0, stdout="ok", stderr=""),
+    )
+    monkeypatch.setattr(
+        verification,
+        "cleanup_native_container",
+        lambda *args, **kwargs: "verification container cleanup could not be confirmed",
+    )
+    config = NativeIsolationConfig(
+        backend="container",
+        runtime="docker",
+        image="registry.invalid/worker@sha256:" + "a" * 64,
+    )
+
+    report = run_verification(
+        tmp_path,
+        ("true",),
+        isolation_config=config,
+        isolation_runtime_executable=Path("/usr/bin/docker"),
+    )
+
+    assert report.passed is False
+    assert report.cleanup_confirmed is False
+    assert report.gates[0].cleanup_succeeded is False
+
+
+def test_run_verification_fails_closed_when_container_runtime_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subsched.verification as verification
+
+    monkeypatch.setattr(
+        verification,
+        "run_process_group",
+        lambda request: pytest.fail("verification must not fall back to host execution"),
+    )
+    config = NativeIsolationConfig(
+        backend="container",
+        runtime="docker",
+        image="registry.invalid/worker@sha256:" + "a" * 64,
+    )
+
+    report = run_verification(tmp_path, ("true",), isolation_config=config)
+
+    assert report.passed is False
+    assert report.gates[0].stderr == (
+        "verification container runtime was not supplied by preflight"
+    )
+
+
 def test_scheduler_does_not_finalize_when_no_verification_gate_runs(tmp_path: Path) -> None:
     from datetime import UTC, datetime
 
@@ -235,6 +353,63 @@ def test_scheduler_passes_configured_verification_commands(
 
     assert len(passed_commands) == 1
     assert passed_commands[0] == custom_commands
+
+
+def test_scheduler_passes_container_isolation_to_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subsched.verification as verif_mod
+    from subsched.models import AgentResult, AgentResultKind, Capacity, CapacityState, Issue
+    from subsched.router import AgentConfig, Router
+    from subsched.scheduler import Scheduler, ScriptedWorker
+    from subsched.storage import JsonStateStore
+
+    passed_isolation: list[tuple[NativeIsolationConfig | None, Path | None]] = []
+
+    def mock_run_verification(
+        worktree: Path, commands: tuple[str, ...], **kwargs: object
+    ) -> object:
+        passed_isolation.append(
+            (
+                kwargs.get("isolation_config"),  # type: ignore[arg-type]
+                kwargs.get("isolation_runtime_executable"),  # type: ignore[arg-type]
+            )
+        )
+        from subsched.verification import VerificationReport
+
+        return VerificationReport(passed=True, gates=(), summary="PASS")
+
+    monkeypatch.setattr(verif_mod, "run_verification", mock_run_verification)
+    isolation = NativeIsolationConfig(
+        backend="container",
+        runtime="docker",
+        image="registry.invalid/worker@sha256:" + "a" * 64,
+    )
+    scheduler = Scheduler(
+        store=JsonStateStore(tmp_path / "state.json"),
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=ScriptedWorker({(101, "claude"): (AgentResult(AgentResultKind.PASS),)}),
+        worktree_root=tmp_path / "worktrees",
+        isolation_config=isolation,
+        isolation_runtime_executable=Path("/usr/bin/docker"),
+    )
+    scheduler.discover([Issue(number=101, title="Task 101")])
+
+    from datetime import UTC, datetime
+
+    scheduler.tick(
+        [
+            Capacity(
+                agent="claude",
+                state=CapacityState.AVAILABLE,
+                observed_at=datetime.now(UTC),
+                source="provider",
+                confidence="high",
+            )
+        ]
+    )
+
+    assert passed_isolation == [(isolation, Path("/usr/bin/docker"))]
 
 
 def test_scheduler_passes_configured_verification_timeout(

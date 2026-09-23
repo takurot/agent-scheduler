@@ -1487,6 +1487,13 @@ def test_run_propagates_workflow_and_dispatches_expected_stage(
     assert result.exit_code == 0, result.output
     assert dispatched_stages == [expected_stage]
     assert scheduler_factory.call_args.kwargs["workflow"] == load_config(config_file).workflow
+    assert (
+        scheduler_factory.call_args.kwargs["isolation_config"]
+        == load_config(config_file).isolation
+    )
+    assert scheduler_factory.call_args.kwargs["isolation_runtime_executable"] == Path(
+        "/usr/bin/docker"
+    )
     assert JsonStateStore(tmp_path).load_tasks()[0].status is TaskState.NEEDS_HUMAN
 
 

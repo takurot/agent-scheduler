@@ -755,6 +755,85 @@ def wrap_native_request(
     )
 
 
+def wrap_verification_request(
+    request: ProcessExecutionRequest,
+    *,
+    config: NativeIsolationConfig,
+    runtime_executable: Path,
+    container_name: str,
+) -> ProcessExecutionRequest:
+    """Run a verification gate in the worker image without credentials or network."""
+    if config.backend != "container" or config.image is None:
+        raise ValueError("verification container configuration is incomplete")
+    if not runtime_executable.is_absolute():
+        raise ValueError("verification container runtime path is not absolute")
+    if not request.cwd.is_absolute() or request.cwd.is_symlink() or not request.cwd.is_dir():
+        raise ValueError("verification worktree is not a valid absolute directory")
+
+    uid = os.getuid()
+    gid = os.getgid()
+    argv = (
+        str(runtime_executable),
+        "run",
+        "--rm",
+        "--init",
+        "--name",
+        container_name,
+        "--user",
+        f"{uid}:{gid}",
+        "--network",
+        "none",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges=true",
+        "--pids-limit",
+        "512",
+        "--memory",
+        "8g",
+        "--cpus",
+        "4",
+        "--read-only",
+        "--tmpfs",
+        f"/tmp:rw,exec,nosuid,nodev,size=1g,mode=1777,uid={uid},gid={gid}",
+        "--tmpfs",
+        f"/isolated-home:rw,exec,nosuid,nodev,size=256m,mode=700,uid={uid},gid={gid}",
+        "--mount",
+        _mount_value(request.cwd, str(request.cwd)),
+        "--workdir",
+        str(request.cwd),
+        "--env",
+        "HOME=/isolated-home",
+        "--entrypoint",
+        "/bin/sh",
+        config.image,
+        "-ceu",
+        'exec "$@"',
+        "subsched-verification",
+        *request.argv,
+    )
+    runtime_env = {
+        key: value
+        for key, value in request.env.items()
+        if key
+        in {
+            "PATH",
+            "DOCKER_HOST",
+            "DOCKER_CERT_PATH",
+            "DOCKER_TLS_VERIFY",
+            "CONTAINER_HOST",
+        }
+    }
+    return ProcessExecutionRequest(
+        argv=argv,
+        cwd=request.cwd,
+        env=runtime_env,
+        timeout_seconds=request.timeout_seconds,
+        grace_seconds=request.grace_seconds,
+        output_limit_bytes=request.output_limit_bytes,
+    )
+
+
 def native_isolation_failure() -> str | None:
     """Retain fail-closed admission until callers supply and attest a backend."""
     return verify_native_isolation(NativeIsolationConfig(), enabled_agents=())

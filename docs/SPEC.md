@@ -3081,6 +3081,16 @@ Docker Engine on Linux or Docker Desktop's Linux VM on macOS. Other runtimes and
 unverifiable configurations fail closed. Existing subscription and native opt-in gates
 remain necessary.
 
+When `isolation.backend: container`, every Scheduler `VERIFYING` gate (including the
+post-rebase gate) executes in the attested, digest-pinned worker image with
+`--network none`. The verification container receives one writable bind mount for the
+validated task worktree, an isolated tmpfs HOME and `/tmp`, and no provider credentials,
+proxy settings, private Git database, runtime socket, Scheduler state, or other host
+filesystem mounts. The read-only root, unprivileged user, dropped capabilities,
+resource limits, `no-new-privileges`, exact-name forced cleanup, and cleanup confirmation
+remain mandatory. Direct host verification is permitted only when isolation is explicitly
+disabled; an enabled container backend with missing runtime inputs fails closed.
+
 The opt-in real-Docker suite uses synthetic host/provider credential canaries and covers
 host-path and runtime-socket denial, allowed proxy egress, direct proxy bypass denial,
 task-local commit import, and timeout descendant cleanup. Mocked tests additionally cover
@@ -3113,7 +3123,7 @@ authoritative. When container isolation is not active, standard Bubblewrap sandb
 unaltered. Outside container isolation this dispatch path is inadmissible (see 72.2 above),
 so the legacy mode remains fail-closed.
 
-### Scoped worker verification vs. Host quality gate (issue #337)
+### Scoped worker verification vs. Scheduler quality gate (issues #337, #416)
 
 The Docker worker container operates under hardened security constraints: capability drops
 (`cap-drop=ALL`), ephemeral `/tmp` mounts, and unprivileged user isolation. Furthermore, worker
@@ -3128,9 +3138,11 @@ Under this design:
    full verification commands encounter unrelated test failures arising from container environment
    constraints, the worker must NOT escalate to `NEEDS_HUMAN` as an `external_prerequisite` when all
    scoped tests pass; the worker commits its changes locally and reports `pass`.
-2. **Scheduler Responsibility (Host)**: The full repository-wide verification gate
-   (`verification.commands`) is independently and strictly executed by the Scheduler in the host
-   `VERIFYING` stage before creating the pull request.
+2. **Scheduler Responsibility**: The full repository-wide verification gate
+   (`verification.commands`) is independently and strictly executed by the Scheduler in the
+   `VERIFYING` stage before creating the pull request. With container isolation enabled, this
+   gate runs in a fresh worker-image container with `--network none`; it never executes modified
+   repository code directly on the host.
 3. **Container Mounts**: The container's `/tmp` and `/isolated-home` tmpfs mounts are configured
    with `rw,exec,nosuid,nodev` so that temporary test runner scripts and compiled artifacts in `/tmp`
    can execute without `PermissionError`.

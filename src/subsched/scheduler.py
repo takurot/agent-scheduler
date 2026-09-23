@@ -12,7 +12,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from subsched.config import AgentSettings, WorkflowConfig, validate_base_branch
+from subsched.config import (
+    AgentSettings,
+    NativeIsolationConfig,
+    WorkflowConfig,
+    validate_base_branch,
+)
 from subsched.contract import bootstrap_task_files
 from subsched.events import Clock, Event, EventSource, EventType, SystemClock
 from subsched.github.checks import CICheckState, PRChecksStatus
@@ -145,6 +150,8 @@ class Scheduler:
         event_sources: tuple[EventSource, ...] = (),
         verification_commands: tuple[str, ...] = ("true",),
         verification_timeout_seconds: float = 120.0,
+        isolation_config: NativeIsolationConfig | None = None,
+        isolation_runtime_executable: Path | None = None,
         label_scores: dict[str, int] | None = None,
         concurrency: int = 1,
         max_agent_failures: int = 2,
@@ -213,6 +220,8 @@ class Scheduler:
         self.discovery_notes: tuple[tuple[int, str], ...] = ()
         self.reactivated_cancelled: tuple[int, ...] = ()
         self.verification_commands = verification_commands
+        self.isolation_config = isolation_config
+        self.isolation_runtime_executable = isolation_runtime_executable
         if verification_timeout_seconds <= 0:
             raise ValueError("verification_timeout_seconds must be positive")
         self.verification_timeout_seconds = verification_timeout_seconds
@@ -1491,6 +1500,8 @@ class Scheduler:
             worktree_dir,
             self.verification_commands,
             timeout_seconds=self.verification_timeout_seconds,
+            isolation_config=self.isolation_config,
+            isolation_runtime_executable=self.isolation_runtime_executable,
         )
         self._log(
             "gate_result",
@@ -1953,6 +1964,8 @@ class Scheduler:
                     Path(task.worktree),
                     self.verification_commands,
                     timeout_seconds=self.verification_timeout_seconds,
+                    isolation_config=self.isolation_config,
+                    isolation_runtime_executable=self.isolation_runtime_executable,
                 )
                 verification_ok = v_report.passed
                 verification_summary = v_report.summary

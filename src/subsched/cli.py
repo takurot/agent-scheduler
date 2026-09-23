@@ -493,6 +493,8 @@ def run(
             label_scores=dict(cfg.queue.priority.label_scores),
             verification_commands=cfg.verification.commands,
             verification_timeout_seconds=float(cfg.verification.timeout_seconds),
+            isolation_config=cfg.isolation,
+            isolation_runtime_executable=isolation_runtime_executable,
             concurrency=cfg.execution.concurrency,
             max_agent_failures=cfg.execution.max_agent_failures,
             max_verification_failures=cfg.execution.max_verification_failures,
