@@ -6,12 +6,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from subsched.agents.base import ProcessExecutionRequest
+from subsched.agents.isolation import (
+    cleanup_native_container,
+    native_container_name,
+    wrap_verification_request,
+)
 from subsched.agents.process import (
     COMMON_ENV_ALLOWLIST,
     filter_environment,
     redact_sensitive_command_audit,
     run_process_group,
 )
+from subsched.config import NativeIsolationConfig
 
 MAX_VERIFICATION_ERROR_CHARS = 2000
 
@@ -60,8 +66,10 @@ def run_verification(
     env: dict[str, str] | None = None,
     timeout_seconds: float = 120.0,
     output_limit_bytes: int = 524288,
+    isolation_config: NativeIsolationConfig | None = None,
+    isolation_runtime_executable: Path | None = None,
 ) -> VerificationReport:
-    """Execute verification commands in worktree using isolated process runner."""
+    """Execute verification gates on the host or in the configured container boundary."""
     source_env = dict(os.environ) if env is None else env
     clean_env = filter_environment(source_env, allowlist=COMMON_ENV_ALLOWLIST)
     gate_results: list[GateResult] = []
@@ -93,18 +101,64 @@ def run_verification(
             timeout_seconds=timeout_seconds,
             output_limit_bytes=output_limit_bytes,
         )
-        res = run_process_group(req)
+        container_name: str | None = None
+        container_runtime: Path | None = None
+        if isolation_config is not None and isolation_config.backend == "container":
+            if isolation_runtime_executable is None:
+                all_passed = False
+                gate_results.append(
+                    GateResult(
+                        command=cmd,
+                        exit_code=1,
+                        stdout="",
+                        stderr="verification container runtime was not supplied by preflight",
+                        passed=False,
+                    )
+                )
+                break
+            container_runtime = isolation_runtime_executable
+            container_name = native_container_name("verification")
+            try:
+                req = wrap_verification_request(
+                    req,
+                    config=isolation_config,
+                    runtime_executable=isolation_runtime_executable,
+                    container_name=container_name,
+                )
+            except ValueError as error:
+                all_passed = False
+                gate_results.append(
+                    GateResult(
+                        command=cmd,
+                        exit_code=1,
+                        stdout="",
+                        stderr=str(error),
+                        passed=False,
+                    )
+                )
+                break
+        cleanup_failure: str | None = None
+        try:
+            res = run_process_group(req)
+        finally:
+            if container_name is not None and container_runtime is not None:
+                cleanup_failure = cleanup_native_container(
+                    container_runtime,
+                    container_name,
+                    env=req.env,
+                )
+        cleanup_succeeded = res.cleanup_succeeded and cleanup_failure is None
         # #373: an unconfirmed cleanup invalidates the gate even at exit 0 -- leftover
         # processes are a terminal safety condition, not a green result.
         passed = (
             res.exit_code == 0
             and not res.timed_out
             and not res.output_limit_exceeded
-            and res.cleanup_succeeded
+            and cleanup_succeeded
         )
         if not passed:
             all_passed = False
-        if not res.cleanup_succeeded:
+        if not cleanup_succeeded:
             all_cleanups_confirmed = False
         gate_results.append(
             GateResult(
@@ -115,7 +169,7 @@ def run_verification(
                 passed=passed,
                 timed_out=res.timed_out,
                 command_not_found=res.command_not_found,
-                cleanup_succeeded=res.cleanup_succeeded,
+                cleanup_succeeded=cleanup_succeeded,
             )
         )
         if not passed:
