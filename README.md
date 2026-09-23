@@ -492,6 +492,13 @@ stateDiagram-v2
     READY_FOR_REVIEW --> COMPLETE: PR merged on GitHub
 ```
 
+CI監視を有効にした場合、CI PASSは`ci_result: PASS`として記録され、PRが
+mergeされるまで`READY_FOR_REVIEW`を維持します。PRを持つ親Issueに依存する
+タスクはmerge確認後に解放されます。PRを作らないlocal-onlyタスクは、
+ローカル検証成功後に`COMPLETE`になります。旧stateでPR付き`COMPLETE`の
+merge証拠がない場合は、次回読み込み時にレビュー待ちへ戻して
+`subsched reconcile`で再確認します。
+
 ### Execution Stages
 
 | Stage | Workspace Mode | Primary Responsibility | Success Transition | Escalation / Retry |

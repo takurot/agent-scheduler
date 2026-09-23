@@ -337,7 +337,7 @@ def test_ci_monitoring_disabled_by_default_leaves_ready_for_review_unchanged(
     assert scheduler.tasks[0].status is TaskState.READY_FOR_REVIEW
 
 
-def test_ci_monitoring_promotes_to_complete_on_pass(tmp_path: Path) -> None:
+def test_ci_pass_waits_for_pr_merge_before_completing_or_releasing_child(tmp_path: Path) -> None:
     from subsched.github.checks import CICheckState, PRChecksStatus
 
     scheduler = _scheduler(
@@ -348,11 +348,51 @@ def test_ci_monitoring_promotes_to_complete_on_pass(tmp_path: Path) -> None:
         ),
     )
     task = _ready_for_review_task(101, pr=7)
+    child = replace(
+        Task.from_issue(Issue(number=102, title="Child", body="Blocked-By: #101")),
+        status=TaskState.WAITING_DEPENDENCY,
+    )
     scheduler.discover([])
-    scheduler.queue = scheduler.queue.append([task])
+    scheduler.queue = scheduler.queue.append([task, child])
     scheduler.tick([])
 
-    assert scheduler.tasks[0].status is TaskState.COMPLETE
+    assert scheduler.queue.get(101).status is TaskState.READY_FOR_REVIEW
+    assert scheduler.queue.get(102).status is not TaskState.READY
+
+
+def test_merged_pr_releases_dependency_after_ci_pass(tmp_path: Path) -> None:
+    from subsched.github.reconcile import PrLifecycleState, plan_reconciliation
+
+    scheduler = _scheduler(tmp_path, push_enabled=True)
+    parent = _ready_for_review_task(101, pr=7)
+    child = replace(
+        Task.from_issue(Issue(number=102, title="Child", body="Blocked-By: #101")),
+        status=TaskState.WAITING_DEPENDENCY,
+    )
+    scheduler.queue = scheduler.queue.append([parent, child])
+    result = plan_reconciliation(scheduler.tasks, {7: PrLifecycleState.MERGED})
+    scheduler.queue = scheduler.queue.replace(result.updated_tasks[0])
+    scheduler._release_dependencies(datetime.now(UTC))
+
+    assert scheduler.queue.get(101).status is TaskState.COMPLETE
+    assert scheduler.queue.get(101).completion_kind == "merged"
+    assert scheduler.queue.get(102).status is TaskState.READY
+
+
+def test_legacy_complete_with_pr_requires_reconciliation(tmp_path: Path) -> None:
+    scheduler = _scheduler(tmp_path, push_enabled=True)
+    old_parent = replace(_ready_for_review_task(101, pr=7), status=TaskState.COMPLETE)
+    child = replace(
+        Task.from_issue(Issue(number=102, title="Child", body="Blocked-By: #101")),
+        status=TaskState.WAITING_DEPENDENCY,
+    )
+    scheduler.store.save_tasks((old_parent, child))
+
+    loaded = scheduler.store.load_tasks()
+    assert loaded[0].status is TaskState.READY_FOR_REVIEW
+    scheduler.queue = scheduler.queue.append(loaded)
+    scheduler._release_dependencies(datetime.now(UTC))
+    assert scheduler.queue.get(102).status is not TaskState.READY
 
 
 def test_ci_monitoring_escalates_to_needs_human_on_fail(tmp_path: Path) -> None:
@@ -437,7 +477,7 @@ def test_ci_monitoring_continues_while_new_dispatch_is_paused(tmp_path: Path) ->
     scheduler.store.set_paused(True)
 
     assert scheduler.tick([]) is False
-    assert scheduler.tasks[0].status is TaskState.COMPLETE
+    assert scheduler.tasks[0].status is TaskState.READY_FOR_REVIEW
     assert scheduler.store.is_paused() is True
 
 

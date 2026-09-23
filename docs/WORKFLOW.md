@@ -268,6 +268,10 @@ Schedulerが管理するコンテナ隔離ワークツリー（`subsched/issue-N
 SPECから逸脱する実装を先にmergeしない。別のstate layoutや延期されたUXを採用する場合、
 同等の安全性を示し、SPEC変更を先に承認する。
 
+PRを持つTaskの`COMPLETE`はmerge確認を要する。CI PASSは`ci_result`として別に記録し、
+依存Issueの解放に使わない。旧stateのPR付き`COMPLETE`にmerge確認記録がない場合は
+`READY_FOR_REVIEW`として読み、operatorの`subsched reconcile`で再確認する。
+
 ## 9. コミットとPull Request
 
 対象ファイルだけをstageする。

@@ -1055,13 +1055,12 @@ def test_native_run_drives_scheduler_to_ready_for_review_and_opens_pr(
     assert not (task_worktree / "CLAUDE.md").exists()
 
 
-def test_ci_monitoring_promotes_ready_for_review_to_complete(
+def test_ci_monitoring_records_pass_without_completing_unmerged_pr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression test for #142: with execution.ci_monitoring enabled, the Scheduler's
+    """With execution.ci_monitoring enabled, the Scheduler's
     run_until_waiting loop re-ticks after PR creation within the same `run` invocation,
-    polls CI for the READY_FOR_REVIEW task, and promotes it to COMPLETE once CI actually
-    PASSes -- not just because a PR was opened."""
+    polls CI for the READY_FOR_REVIEW task, and records PASS without completing the PR."""
     import shutil
 
     monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
@@ -1134,11 +1133,13 @@ def test_ci_monitoring_promotes_ready_for_review_to_complete(
         "10",
     )
     assert result.exit_code == 0, result.output
-    assert "COMPLETE" in result.output
+    assert "READY_FOR_REVIEW" in result.output
     assert sleeps == [1.0]
 
     status = invoke(repo_dir, "status", "--verbose")
-    assert "COMPLETE" in status.output
+    assert "READY_FOR_REVIEW" in status.output
+    task = JsonStateStore(repo_dir).load_tasks()[0]
+    assert task.ci_result == "PASS"
 
 
 def test_native_run_escalates_when_handoff_never_updated(

@@ -1486,7 +1486,9 @@ Bernsteinを採用できる場合、このverification gateを既存機能へ委
 
 `COMPLETE`は「PRを作成した」ことを意味しない。PR作成直後の既定terminal stateは
 `READY_FOR_REVIEW`であり、これはSchedulerローカルのverification（上記IMPLEMENTED）は
-通過したが、CI結果・人間によるreviewはまだ得られていないことを示す。
+通過したが、PR mergeは確認されていないことを示す。CI結果はTaskの`ci_result`に独立して記録する。
+PRを作らないlocal-onlyタスクはverification後に`COMPLETE`となり、依存先を解放できる。
+PRを持つタスクはCI監視の設定に関係なく、GitHubでmergeを確認して初めて`COMPLETE`となる。
 
 - `execution.ci_monitoring: false`（既定）: `READY_FOR_REVIEW`のままとどまり、Scheduler
   は自動でCOMPLETEへ昇格させない。PR merge後の後始末（Issue再発見の抑止等）は#146の
@@ -1509,11 +1511,18 @@ Bernsteinを採用できる場合、このverification gateを既存機能へ委
   pruneを妨げない。
 - `execution.ci_monitoring: true`: 各tickで`READY_FOR_REVIEW`かつ`pr`を持つTaskの
   CI状態を`gh pr checks`経由で確認する。
-  - CI `PASS` → `COMPLETE`へ昇格する。
+  - CI `PASS` → `ci_result: PASS`を記録し、`READY_FOR_REVIEW`を維持する。
   - CI `FAIL` → `NEEDS_HUMAN`へ遷移する（失敗したcheck名を理由として記録）。**自動
     requeueはしない**。push/PR作成失敗（#128）やcommit message違反（#140）と同じ
     fail-closedの設計方針に合わせ、CI失敗は常に人間の判断を挟む。
-  - CI `PENDING`/`UNKNOWN` → 状態を変更しない（`READY_FOR_REVIEW`のまま様子を見る）。
+  - CI `PENDING`/`UNKNOWN` → `ci_result`を更新し、Task状態は変更しない
+    （`READY_FOR_REVIEW`のまま様子を見る）。
+
+既存stateに`COMPLETE`かつPR番号があり、`completion_kind: merged`の確認記録がない場合、
+過去のCI PASSによる完了とmerge完了を識別できない。読み込み時に
+`READY_FOR_REVIEW`として扱い、明示的な`subsched reconcile`またはmerge確認付きdiscoveryで
+再判定する。PRなしの既存`COMPLETE`はlocal-only完了として維持する。判定不能な親は
+依存先を解放しない。`TASK_COMPLETED`イベントもPRのmerge証拠にはしない。
 
 ### `gh pr checks`応答の検証 (#376)
 

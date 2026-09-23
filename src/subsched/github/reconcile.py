@@ -1,10 +1,10 @@
 """Reconciliation of `READY_FOR_REVIEW` tasks against actual GitHub PR state (#277).
 
-Under the default configuration (`execution.ci_monitoring: false`), the Scheduler
-never revisits a task once its PR is created -- `READY_FOR_REVIEW` is a durable
+The Scheduler does not complete a PR-backed task merely because CI passes.
+`READY_FOR_REVIEW` is a durable
 "awaiting human review" state (docs/SPEC.md's COMPLETE definition, #142). Once a
 maintainer merges (or closes without merging) that PR on GitHub, nothing in the
-normal dispatch loop notices, so completed work accumulates indefinitely under
+normal dispatch loop notices, so merged work accumulates indefinitely under
 `READY_FOR_REVIEW`. `subsched reconcile` closes that gap by explicitly querying `gh`
 for the current state of every tracked PR and advancing tasks accordingly -- it is
 never invoked implicitly by `discover()` or the dispatch loop.
@@ -16,7 +16,7 @@ import json
 import shutil
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -203,7 +203,9 @@ def plan_reconciliation(
 
         state = pr_states.get(task.pr)
         if state is PrLifecycleState.MERGED:
-            new_task = task.transition(TaskState.COMPLETE, now=current)
+            new_task = replace(
+                task.transition(TaskState.COMPLETE, now=current), completion_kind="merged"
+            )
             items.append(
                 ReconcilePlanItem(
                     issue_number=task.issue_number,
