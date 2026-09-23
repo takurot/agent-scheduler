@@ -153,6 +153,57 @@ agents:
     assert observed_agents == [("codex",)]
 
 
+def test_allow_native_dry_run_still_performs_subscription_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(
+        """
+github:
+  repo: owner/project
+  mode: all-open
+agents:
+  claude:
+    enabled: true
+  codex:
+    enabled: false
+""",
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_preflight(*, enabled_agents, **kwargs):
+        calls.append(enabled_agents)
+        return PreflightReport(
+            checks=(ISOLATION_CHECK,),
+            passed=False,
+            failure_reasons=("claude subscription authentication could not be verified",),
+        )
+
+    monkeypatch.setattr("subsched.cli.validate_native_preflight", fake_preflight)
+    monkeypatch.setattr(
+        GitHubIssueSource,
+        "list_open",
+        lambda self, repo, **kwargs: pytest.fail("discovery must not run"),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--config",
+            str(config_file),
+            "--allow-native",
+            "--subscription-billing-verified",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "subscription authentication could not be verified" in result.output
+    assert calls == [("claude",)]
+
+
 def test_native_preflight_fails_when_enabled_agent_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

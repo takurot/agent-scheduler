@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import stat
 import subprocess
 from pathlib import Path
 
@@ -10,10 +12,249 @@ from subsched.preflight import (
     PreflightCheckResult,
     PreflightReport,
     probe_command_capabilities,
+    probe_subscription_authentication,
     validate_native_preflight,
 )
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
+
+
+@pytest.mark.parametrize(
+    ("agent", "stdout", "stderr"),
+    (
+        ("codex", "", "Logged in using ChatGPT\n"),
+        (
+            "claude",
+            '{"loggedIn":true,"authMethod":"claude.ai",'
+            '"apiProvider":"firstParty","subscriptionType":"pro"}',
+            "",
+        ),
+        (
+            "claude",
+            '{"loggedIn":true,"authMethod":"oauth_token",'
+            '"apiProvider":"firstParty"}',
+            "",
+        ),
+    ),
+)
+def test_probe_subscription_authentication_accepts_subscription_login(
+    tmp_path: Path, agent: str, stdout: str, stderr: str
+) -> None:
+    executable = tmp_path / agent
+    executable.write_text("", encoding="utf-8")
+    executable.chmod(0o755)
+    auth_dir = tmp_path / f"{agent}-auth"
+    auth_dir.mkdir()
+    captured: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["argv"] = argv
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=stderr)
+
+    result = probe_subscription_authentication(
+        agent, executable, auth_dir=auth_dir, run_cmd=fake_run
+    )
+
+    assert result.compatible is True
+    assert result.error is None
+    assert captured["argv"] == (
+        [str(executable.resolve()), "login", "status"]
+        if agent == "codex"
+        else [str(executable.resolve()), "auth", "status", "--json"]
+    )
+    env = captured["env"]
+    assert isinstance(env, dict)
+    home = env["HOME"]
+    assert isinstance(home, str)
+    assert home != str(auth_dir)
+    assert env["NO_COLOR"] == "1"
+    assert env["CODEX_HOME" if agent == "codex" else "CLAUDE_CONFIG_DIR"] == home
+
+
+@pytest.mark.parametrize(
+    ("agent", "returncode", "stdout"),
+    (
+        ("codex", 0, "Logged in using an API key\n"),
+        ("codex", 1, "Not logged in\n"),
+        (
+            "claude",
+            0,
+            '{"loggedIn":true,"authMethod":"api_key",'
+            '"apiProvider":"firstParty"}',
+        ),
+        (
+            "claude",
+            0,
+            '{"loggedIn":true,"authMethod":"claude.ai",'
+            '"apiProvider":"bedrock","subscriptionType":"pro"}',
+        ),
+        ("claude", 1, '{"loggedIn":false,"authMethod":"none"}'),
+        ("claude", 0, "not-json"),
+    ),
+)
+def test_probe_subscription_authentication_rejects_non_subscription_or_unknown_state(
+    tmp_path: Path, agent: str, returncode: int, stdout: str
+) -> None:
+    executable = tmp_path / agent
+    executable.write_text("", encoding="utf-8")
+    executable.chmod(0o755)
+    auth_dir = tmp_path / f"{agent}-auth"
+    auth_dir.mkdir()
+
+    result = probe_subscription_authentication(
+        agent,
+        executable,
+        auth_dir=auth_dir,
+        run_cmd=lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, returncode, stdout=stdout, stderr="credential detail must not escape"
+        ),
+    )
+
+    assert result.compatible is False
+    assert result.error == f"{agent} subscription authentication could not be verified"
+    assert "credential detail" not in result.error
+
+
+@pytest.mark.parametrize("subscription_type", ([], {}))
+def test_probe_subscription_authentication_rejects_non_string_claude_subscription_type(
+    tmp_path: Path, subscription_type: object
+) -> None:
+    executable = tmp_path / "claude"
+    executable.write_text("", encoding="utf-8")
+    executable.chmod(0o755)
+    auth_dir = tmp_path / "claude-auth"
+    auth_dir.mkdir()
+    status = {
+        "loggedIn": True,
+        "authMethod": "claude.ai",
+        "apiProvider": "firstParty",
+        "subscriptionType": subscription_type,
+    }
+
+    result = probe_subscription_authentication(
+        "claude",
+        executable,
+        auth_dir=auth_dir,
+        run_cmd=lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout=json.dumps(status), stderr=""
+        ),
+    )
+
+    assert result.compatible is False
+    assert result.error == "claude subscription authentication could not be verified"
+
+
+def test_probe_subscription_authentication_supplies_claude_oauth_token_without_logging_it(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "claude"
+    executable.write_text("", encoding="utf-8")
+    executable.chmod(0o755)
+    auth_dir = tmp_path / "claude-auth"
+    auth_dir.mkdir()
+    token = "synthetic-sensitive-oauth-token"
+    token_file = auth_dir / "oauth-token"
+    token_file.write_text(token, encoding="utf-8")
+    token_file.chmod(0o600)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == token
+        assert all(token not in arg for arg in argv)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=(
+                '{"loggedIn":true,"authMethod":"oauth_token",'
+                '"apiProvider":"firstParty"}'
+            ),
+            stderr="",
+        )
+
+    result = probe_subscription_authentication(
+        "claude", executable, auth_dir=auth_dir, run_cmd=fake_run
+    )
+
+    assert result.compatible is True
+    assert token not in result.details
+
+
+@pytest.mark.parametrize(
+    "settings",
+    (
+        '{"env":{"ANTHROPIC_API_KEY":"synthetic-secret"}}',
+        '{"env":{"ANTHROPIC_BASE_URL":"https://gateway.invalid"}}',
+        '{"apiKeyHelper":"/bin/false"}',
+        "not-json",
+    ),
+)
+def test_probe_subscription_authentication_rejects_claude_metered_settings(
+    tmp_path: Path, settings: str
+) -> None:
+    executable = tmp_path / "claude"
+    executable.write_text("", encoding="utf-8")
+    executable.chmod(0o755)
+    auth_dir = tmp_path / "claude-auth"
+    auth_dir.mkdir()
+    (auth_dir / "settings.json").write_text(settings, encoding="utf-8")
+
+    result = probe_subscription_authentication(
+        "claude",
+        executable,
+        auth_dir=auth_dir,
+        run_cmd=lambda *args, **kwargs: pytest.fail(
+            "auth status must not run with a metered or unknown settings file"
+        ),
+    )
+
+    assert result.compatible is False
+    assert result.error == "claude subscription authentication could not be verified"
+    assert "synthetic-secret" not in result.error
+
+
+@pytest.mark.parametrize("agent", ("claude", "codex"))
+def test_probe_subscription_authentication_does_not_mutate_configured_auth_dir(
+    tmp_path: Path, agent: str
+) -> None:
+    """A status CLI that writes into its HOME/config dir must not poison the operator's
+    dedicated auth directory (e.g. Claude Code writing a `backups/` dir there breaks
+    verify_native_isolation's 0700/0600 requirement for later native runs)."""
+    executable = tmp_path / agent
+    executable.write_text("", encoding="utf-8")
+    executable.chmod(0o755)
+    auth_dir = tmp_path / f"{agent}-auth"
+    auth_dir.mkdir(mode=0o700)
+    before = sorted(p.relative_to(auth_dir) for p in auth_dir.rglob("*"))
+    stdout = (
+        ""
+        if agent == "codex"
+        else json.dumps(
+            {
+                "loggedIn": True,
+                "authMethod": "oauth_token",
+                "apiProvider": "firstParty",
+            }
+        )
+    )
+    stderr = "Logged in using ChatGPT" if agent == "codex" else ""
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        home = Path(env["HOME"])
+        (home / "backups").mkdir(mode=0o755)
+        (home / "written-by-cli").write_text("junk", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=stderr)
+
+    result = probe_subscription_authentication(
+        agent, executable, auth_dir=auth_dir, run_cmd=fake_run
+    )
+
+    assert result.compatible is True
+    assert sorted(p.relative_to(auth_dir) for p in auth_dir.rglob("*")) == before
+    assert stat.S_IMODE(auth_dir.stat().st_mode) == 0o700
 
 
 def test_probe_command_capabilities_claude_success(tmp_path: Path) -> None:
@@ -219,6 +460,122 @@ def test_validate_native_preflight_only_probes_enabled_agents(
     assert report.get("claude").compatible is True
     # Codex was not enabled, so it should not be in report checks
     assert report.get("codex") is None
+
+
+def test_validate_native_preflight_checks_configured_auth_for_each_enabled_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from subsched.config import NativeIsolationConfig
+
+    monkeypatch.setattr("subsched.preflight.verify_native_isolation", lambda *a, **k: None)
+    executables: dict[str, Path] = {}
+    for name in ("git", "gh", "claude", "codex", "docker"):
+        executable = tmp_path / name
+        executable.write_text("", encoding="utf-8")
+        executable.chmod(0o755)
+        executables[name] = executable
+    auth_dirs = {name: tmp_path / f"{name}-auth" for name in ("claude", "codex")}
+    for auth_dir in auth_dirs.values():
+        auth_dir.mkdir()
+
+    claude_help = (FIXTURES / "claude" / "cli-help.txt").read_text(encoding="utf-8")
+    codex_help = (FIXTURES / "codex" / "cli-exec-help.txt").read_text(encoding="utf-8")
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        name = Path(argv[0]).name
+        if name in {"git", "gh"}:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{name} version 1\n", stderr="")
+        if "--version" in argv:
+            version = "2.1.229\n" if name == "claude" else "codex-cli 0.147.0\n"
+            return subprocess.CompletedProcess(argv, 0, stdout=version, stderr="")
+        if name == "claude" and "--help" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=claude_help, stderr="")
+        if name == "codex" and "--help" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=codex_help, stderr="")
+        if name == "claude" and argv[1:3] == ["auth", "status"]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=(
+                    '{"loggedIn":true,"authMethod":"claude.ai",'
+                    '"apiProvider":"firstParty","subscriptionType":"max"}'
+                ),
+                stderr="",
+            )
+        if name == "codex" and argv[1:] == ["login", "status"]:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="", stderr="Logged in using ChatGPT\n"
+            )
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected")
+
+    report = validate_native_preflight(
+        enabled_agents=("claude", "codex"),
+        isolation_config=NativeIsolationConfig(
+            backend="container",
+            runtime="docker",
+            image="worker@sha256:" + "a" * 64,
+            network="internal",
+            proxy_url="http://proxy:3128",
+            proxy_image="proxy@sha256:" + "b" * 64,
+            auth=tuple(auth_dirs.items()),
+        ),
+        executable_resolver=lambda name: executables.get(name),
+        run_cmd=fake_run,
+    )
+
+    assert report.passed is True
+    assert report.get("claude-auth").compatible is True
+    assert report.get("codex-auth").compatible is True
+
+
+def test_validate_native_preflight_fails_when_enabled_agent_auth_is_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from subsched.config import NativeIsolationConfig
+
+    monkeypatch.setattr("subsched.preflight.verify_native_isolation", lambda *a, **k: None)
+    executables: dict[str, Path] = {}
+    for name in ("git", "gh", "codex", "docker"):
+        executable = tmp_path / name
+        executable.write_text("", encoding="utf-8")
+        executable.chmod(0o755)
+        executables[name] = executable
+    auth_dir = tmp_path / "codex-auth"
+    auth_dir.mkdir()
+    codex_help = (FIXTURES / "codex" / "cli-exec-help.txt").read_text(encoding="utf-8")
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        name = Path(argv[0]).name
+        if name in {"git", "gh"}:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{name} version 1\n", stderr="")
+        if "--version" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="codex-cli 0.147.0\n", stderr=""
+            )
+        if "--help" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=codex_help, stderr="")
+        return subprocess.CompletedProcess(
+            argv, 0, stdout="Logged in using an API key\n", stderr=""
+        )
+
+    report = validate_native_preflight(
+        enabled_agents=("codex",),
+        isolation_config=NativeIsolationConfig(
+            backend="container",
+            runtime="docker",
+            image="worker@sha256:" + "a" * 64,
+            network="internal",
+            proxy_url="http://proxy:3128",
+            proxy_image="proxy@sha256:" + "b" * 64,
+            auth=(("codex", auth_dir),),
+        ),
+        executable_resolver=lambda name: executables.get(name),
+        run_cmd=fake_run,
+    )
+
+    assert report.passed is False
+    assert report.get("codex-auth").compatible is False
+    assert any("codex subscription authentication" in reason for reason in report.failure_reasons)
 
 
 def test_validate_native_preflight_fails_closed_when_model_configured_but_unsupported(
@@ -808,6 +1165,3 @@ def test_validate_native_preflight_passes_when_isolation_toolchain_present(
     assert check.found is True
     assert check.compatible is True
     assert "cargo" in check.details
-
-
-

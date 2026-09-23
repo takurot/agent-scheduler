@@ -1332,10 +1332,17 @@ DISABLED_BILLING
 
 を用意する。
 
-`subsched run --allow-native`はbilling modeを推測しない。各enabled CLIがsubscription認証で、
-metered/API fallbackが無効であることを独立に確認したoperatorが、実行ごとに
-`--subscription-billing-verified`を明示しなければnative workerを起動しない。この確認は
-capacity観測の代替ではなく、合成capacityのprovenanceをprovider/highへ昇格させない。
+`subsched run --allow-native`はbilling modeを推測しない。実行ごとの
+`--subscription-billing-verified`はoperatorの明示的な実行許可として必須だが、認証状態の
+証拠としては扱わない。preflightは各enabled CLIへmodelを呼ばないauth status commandを、
+workerへmountする専用`isolation.auth` directoryを指定して実行する。CodexはChatGPT login、
+Claudeはfirst-partyのsubscription/OAuth loginだけを許可し、API key、third-party provider、
+未認証、malformed、unknownをfail closedにする。Claude auth directoryのsettingsに
+API key helper、API credential、custom base URL、Bedrock、Vertex、Foundry overrideがあれば、
+subscription loginが存在してもmetered routeを否定できないため拒否する。この検査は
+`--allow-native --dry-run`でも同じように実施し、通常の`--dry-run`だけはAgentを使用しない
+queue previewとしてprovider authを要求しない。この確認はcapacity観測の代替ではなく、
+合成capacityのprovenanceをprovider/highへ昇格させない。
 
 ---
 

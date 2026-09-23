@@ -259,8 +259,8 @@ def run(
         typer.Option(
             "--subscription-billing-verified",
             help=(
-                "Confirm that Claude/Codex use subscription billing with metered/API "
-                "fallback disabled for this run"
+                "Authorize subscription-only native execution after preflight verifies "
+                "provider authentication and metered/API fallback remains disabled"
             ),
         ),
     ] = False,
@@ -331,7 +331,7 @@ def run(
     # dry-run/discovery-only paths that never call worker.run().
     codex_approval_mode: CodexApprovalMode | None = None
     isolation_runtime_executable: Path | None = None
-    if allow_native and not dry_run:
+    if allow_native:
         if not subscription_billing_verified:
             typer.echo(
                 "Native execution blocked: subscription billing is unverified; pass "
@@ -403,7 +403,8 @@ def run(
             raise typer.Exit(2)
         isolation_runtime_executable = isolation_check.executable_path
         typer.echo(
-            "Pre-flight safety checks passed: subscription verified, API fallback disabled."
+            "Pre-flight safety checks passed: provider subscription authentication verified, "
+            "API fallback disabled."
         )
 
     # push must reflect Scheduler._finalize_verified_task()'s actual gate: create_pr=false
@@ -1166,7 +1167,8 @@ def doctor(
     """Check required local executables and warn on an overly broad `gh` token scope.
 
     Reads the locally cached `gh` auth state to report token scopes; never prints the token
-    value and never invokes Claude or Codex, so no Agent capacity is consumed.
+    value. Only probes Claude/Codex `--version`/`--help` output and local subscription auth
+    status, so no model call or Agent capacity is consumed.
     """
     context: Context = ctx.obj
     try:
