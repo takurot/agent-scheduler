@@ -235,18 +235,26 @@ def _reap_proc(proc: Any, timeout: float) -> bool:
 
 
 def _process_group_alive(pid: int) -> bool:
-    if os.path.isdir("/proc"):
-        return _process_group_has_non_zombie_member(pid)
     try:
         os.killpg(pid, 0)
-        return True
+        killpg_alive = True
     except ProcessLookupError:
         return False
     except OSError:
         return True
 
+    if os.path.isdir("/proc"):
+        has_non_zombie = _process_group_has_non_zombie_member(pid)
+        if has_non_zombie is None:
+            # /proc scan could not be completed (e.g. unreadable, hidepid
+            # mount): fall back to the killpg result rather than assuming
+            # "not alive", to preserve fail-closed behaviour.
+            return killpg_alive
+        return has_non_zombie
+    return killpg_alive
 
-def _process_group_has_non_zombie_member(pgid: int) -> bool:
+
+def _process_group_has_non_zombie_member(pgid: int) -> bool | None:
     """Return True if any process in process group ``pgid`` is not a zombie.
 
     In containers without an init/reaper (no ``--init``, tini, dumb-init), an
@@ -256,8 +264,16 @@ def _process_group_has_non_zombie_member(pgid: int) -> bool:
     though nothing is actually still running, which caused cleanup to be
     misreported as failed (#420). Reading /proc lets us see past that and
     ignore zombie-only groups.
+
+    Returns None if the /proc scan itself could not be completed, so the
+    caller can fail closed instead of concluding "not alive".
     """
-    for entry in os.listdir("/proc"):
+    try:
+        proc_entries = os.listdir("/proc")
+    except OSError:
+        return None
+
+    for entry in proc_entries:
         if not entry.isdigit():
             continue
         try:
@@ -268,8 +284,13 @@ def _process_group_has_non_zombie_member(pgid: int) -> bool:
         # Format: pid (comm) state ppid pgrp ...; comm may itself contain
         # ")" so split on the last occurrence before reading the rest.
         fields = stat.rsplit(")", 1)[-1].split()
-        state, entry_pgrp = fields[0], fields[2]
-        if int(entry_pgrp) == pgid and state != "Z":
+        try:
+            state, entry_pgrp = fields[0], int(fields[2])
+        except (IndexError, ValueError):
+            # Partial/malformed read (e.g. process exited mid-read); skip it
+            # rather than raising out of a cleanup check.
+            continue
+        if entry_pgrp == pgid and state != "Z":
             return True
     return False
 

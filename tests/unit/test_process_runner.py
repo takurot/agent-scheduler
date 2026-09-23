@@ -10,6 +10,7 @@ from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.process import (
     COMMON_ENV_ALLOWLIST,
     _process_group_alive,
+    _process_group_has_non_zombie_member,
     _reap_proc,
     filter_environment,
     redact_sensitive_command_audit,
@@ -233,6 +234,9 @@ time.sleep(10)
         assert val1 == val2
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="zombie state is read from /proc, which is Linux-only"
+)
 def test_process_group_alive_treats_zombie_only_group_as_not_alive() -> None:
     """Regression test for #420: in init-less containers, orphaned grandchildren
     linger as zombies (state 'Z') after exiting because nothing ever waitpid()s
@@ -259,6 +263,26 @@ def test_process_group_alive_treats_zombie_only_group_as_not_alive() -> None:
         assert _process_group_alive(proc.pid) is False
     finally:
         proc.wait()
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="zombie state is read from /proc, which is Linux-only"
+)
+def test_process_group_alive_falls_back_to_killpg_when_proc_scan_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If /proc cannot be scanned (e.g. unreadable, restrictive mount), the alive
+    check must fail closed by trusting the os.killpg(pid, 0) result rather than
+    concluding "not alive" just because the scan came up empty (#420 review)."""
+
+    def _raise(_path: str) -> list[str]:
+        raise OSError("simulated unreadable /proc")
+
+    monkeypatch.setattr(os, "listdir", _raise)
+
+    pgid = os.getpgrp()
+    assert _process_group_has_non_zombie_member(pgid) is None
+    assert _process_group_alive(pgid) is True
 
 
 def test_run_process_group_cleans_up_on_keyboard_interrupt(
