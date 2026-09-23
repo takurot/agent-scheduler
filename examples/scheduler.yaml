@@ -111,6 +111,9 @@ billing:
 # by RepoDigest. The proxy container name is the proxy_url hostname; it must be the
 # only container attached to the internal network before dispatch and must also have
 # an outbound network. Its pinned image owns the provider-domain allowlist policy.
+# Build examples/docker/Dockerfile.proxy and pin the resulting RepoDigest. Its reference
+# policy permits api.anthropic.com, chatgpt.com, and auth0.openai.com for subscription
+# execution while deliberately excluding the metered OpenAI API endpoint.
 # Provider auth directories must be absolute, mode 0700, contain only regular files
 # mode 0600, and contain no Scheduler GitHub/SSH credentials.
 isolation:

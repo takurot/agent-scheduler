@@ -346,7 +346,7 @@ flowchart TD
     end
 
     subgraph Internet["External Network"]
-        Providers["Subscription API Endpoints<br/>(api.anthropic.com / api.openai.com)"]
+        Providers["Subscription Endpoints<br/>(api.anthropic.com / chatgpt.com)"]
         BlockedNet["Blocked: Direct IPs, Host LAN, Cloud Metadata APIs"]
     end
 
@@ -370,7 +370,7 @@ flowchart TD
 2. **Network Egress Isolation (Squid Allowlist Proxy)**:
    - Worker containers attach exclusively to an isolated Docker internal network (`Internal: true`) that has no external gateway.
    - The **only peer** permitted on this internal network is the operator-configured Squid proxy container.
-   - The proxy enforces an immutable, digest-pinned domain allowlist permitting only verified provider subscription endpoints (e.g., `api.anthropic.com`, `api.openai.com`). Direct IP connections, arbitrary ports, local LAN resources, cloud metadata endpoints (`169.254.169.254`), and unauthorized external domains are unconditionally blocked.
+   - The proxy enforces an immutable, digest-pinned domain allowlist permitting only verified provider subscription endpoints (`api.anthropic.com`, `chatgpt.com`, and `auth0.openai.com`). The Codex CLI sends ChatGPT subscription requests to `chatgpt.com/backend-api/codex`; the metered OpenAI API endpoint is deliberately not allowed. Direct IP connections, arbitrary ports, local LAN resources, cloud metadata endpoints (`169.254.169.254`), and unauthorized external domains are unconditionally blocked.
 
 3. **Filesystem & Private Git Database Isolation**:
    - **Zero Host Leakage**: Host `HOME`, `~/.ssh`, host `gh` tokens, sibling worktrees, Docker/runtime sockets, and `.ai/scheduler.json` are never mounted.
@@ -422,9 +422,15 @@ docker network create --internal subsched-provider-internal
 ```
 
 #### Step 2: Prepare the Squid Allowlist Proxy
-Run a Squid proxy attached to both the internal network and an outbound network (e.g., standard bridge):
+Build [`examples/docker/Dockerfile.proxy`](examples/docker/Dockerfile.proxy), push it if needed,
+and configure its immutable RepoDigest. Its bundled `squid.conf` permits HTTPS tunneling to the
+subscription endpoints above without TLS interception and denies everything else. Run the proxy
+attached to both the internal network and an outbound network (e.g., standard bridge):
 ```bash
-# Example: Run allowlist proxy container
+# Build the reference, then push it to your registry and obtain its RepoDigest.
+docker build -t registry.example/subsched-proxy:v1 -f examples/docker/Dockerfile.proxy .
+
+# Run the digest-pinned allowlist proxy container.
 docker run -d \
   --name subsched-provider-proxy \
   --network subsched-provider-internal \
@@ -433,6 +439,11 @@ docker run -d \
 # Connect proxy to outbound bridge for external internet access
 docker network connect bridge subsched-provider-proxy
 ```
+
+Before native dispatch, run the proxy connectivity check in
+[`examples/docker/README.md`](examples/docker/README.md#proxy-policy-and-connectivity-check) from
+the intended worker image. A Cloudflare `403` or an unconnectable `000` result is not accepted as
+successful isolation setup and must remain fail-closed.
 
 #### Step 3: Prepare Dedicated Provider Authentication Directories
 Create isolated directories with restricted permissions (`0700` directory, `0600` files):
