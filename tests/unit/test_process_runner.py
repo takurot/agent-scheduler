@@ -9,6 +9,7 @@ import pytest
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.process import (
     COMMON_ENV_ALLOWLIST,
+    _process_group_alive,
     _reap_proc,
     filter_environment,
     redact_sensitive_command_audit,
@@ -230,6 +231,34 @@ time.sleep(10)
         time.sleep(0.1)
         val2 = child_marker.read_text(encoding="utf-8")
         assert val1 == val2
+
+
+def test_process_group_alive_treats_zombie_only_group_as_not_alive() -> None:
+    """Regression test for #420: in init-less containers, orphaned grandchildren
+    linger as zombies (state 'Z') after exiting because nothing ever waitpid()s
+    them, which keeps their PGID resolvable to os.killpg(pid, 0) forever. A
+    process group where every remaining member is a zombie must be reported as
+    not alive, since none of them can still be doing work."""
+    import subprocess as subprocess_module
+    import time
+
+    proc = subprocess_module.Popen(
+        [sys.executable, "-c", "pass"], start_new_session=True
+    )
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with open(f"/proc/{proc.pid}/stat", encoding="utf-8") as f:
+                state = f.read().rsplit(")", 1)[-1].split()[0]
+            if state == "Z":
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("child process never reached zombie state")
+
+        assert _process_group_alive(proc.pid) is False
+    finally:
+        proc.wait()
 
 
 def test_run_process_group_cleans_up_on_keyboard_interrupt(
