@@ -168,6 +168,44 @@ def test_process_pr_review_approve_updates_review_cycles(tmp_path: Path) -> None
     assert final.status is TaskState.READY_FOR_REVIEW
 
 
+def test_handle_result_needs_human_during_pr_review_escalates_immediately(
+    tmp_path: Path,
+) -> None:
+    """#310: A reviewer reporting NEEDS_HUMAN during PR_REVIEW must transition straight
+    to TaskState.NEEDS_HUMAN with its reason_code persisted, without spending a
+    REQUEST_CHANGES revision cycle or requiring a review report file."""
+    now = datetime(2026, 8, 12, 22, tzinfo=UTC)
+    _init_repo(tmp_path)
+
+    scheduler = _scheduler(tmp_path)
+    task = Task(
+        task_id="github-1",
+        issue_number=1,
+        title="test",
+        labels=(),
+        status=TaskState.IN_PROGRESS,
+        dispatch_status=TaskState.PR_REVIEW,
+        worktree=str(tmp_path),
+        review_cycles=0,
+    )
+    scheduler.queue = scheduler.queue.append((task,))
+
+    result = AgentResult(
+        AgentResultKind.NEEDS_HUMAN,
+        reason_code="instruction_conflict",
+        output="issue acceptance criteria contradict existing design",
+    )
+    scheduler._handle_result(task, "claude", result, now)
+
+    final = scheduler.queue.get(1)
+    assert final is not None
+    assert final.status is TaskState.NEEDS_HUMAN
+    assert final.review_cycles == 0
+    assert final.needs_human_reason_code == "instruction_conflict"
+    assert final.needs_human_reason is not None
+    assert "issue acceptance criteria contradict existing design" in final.needs_human_reason
+
+
 def test_process_pr_review_fails_closed_when_head_moved(tmp_path: Path) -> None:
     now = datetime(2026, 8, 12, 22, tzinfo=UTC)
     _init_repo(tmp_path)
