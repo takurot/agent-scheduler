@@ -76,6 +76,17 @@ The reference policy permits HTTPS CONNECT only to `api.anthropic.com`, `chatgpt
 and `auth0.openai.com`. `chatgpt.com` carries Codex requests authenticated by a ChatGPT
 subscription; the metered OpenAI API endpoint is intentionally absent. The proxy tunnels TLS
 without interception, which preserves the Codex client's TLS handshake and request headers.
+It disables reverse-DNS matching for IP-literal requests and rejects provider names that resolve
+to loopback, private, or link-local addresses before applying the domain allowlist.
+
+The opt-in integration suite builds and exercises the real reference image with controlled DNS
+answers. It covers an IP literal with an allowed reverse name, allowed names resolving to
+prohibited addresses, and a permitted provider name resolving to a public test target:
+
+```bash
+SUBSCHED_DOCKER_PROXY_TEST=1 uv run pytest -q \
+  tests/integration/test_reference_proxy_policy.py
+```
 
 After attaching the proxy to the internal and outbound networks as described in the main
 README, test from the same worker image and network used by Scheduler. An unauthenticated

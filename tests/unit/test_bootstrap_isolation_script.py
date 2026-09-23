@@ -117,8 +117,11 @@ def test_reference_proxy_image_is_fail_closed() -> None:
     policy = squid_config.read_text(encoding="utf-8")
     assert "acl SSL_ports port 443" in policy
     assert "acl CONNECT method CONNECT" in policy
+    assert "acl prohibited_destination_ips dst" in policy
+    assert "provider_subscription_domains dstdomain -n" in policy
     assert "http_access deny !SSL_ports" in policy
     assert "http_access deny !CONNECT" in policy
+    assert "http_access deny prohibited_destination_ips" in policy
     assert "http_access allow CONNECT provider_subscription_domains" in policy
     assert policy.rstrip().endswith("http_access deny all")
 

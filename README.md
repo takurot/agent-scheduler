@@ -370,7 +370,7 @@ flowchart TD
 2. **Network Egress Isolation (Squid Allowlist Proxy)**:
    - Worker containers attach exclusively to an isolated Docker internal network (`Internal: true`) that has no external gateway.
    - The **only peer** permitted on this internal network is the operator-configured Squid proxy container.
-   - The proxy enforces an immutable, digest-pinned domain allowlist permitting only verified provider subscription endpoints (`api.anthropic.com`, `chatgpt.com`, and `auth0.openai.com`). The Codex CLI sends ChatGPT subscription requests to `chatgpt.com/backend-api/codex`; the metered OpenAI API endpoint is deliberately not allowed. Direct IP connections, arbitrary ports, local LAN resources, cloud metadata endpoints (`169.254.169.254`), and unauthorized external domains are unconditionally blocked.
+   - The proxy enforces an immutable, digest-pinned domain allowlist permitting only verified provider subscription endpoints (`api.anthropic.com`, `chatgpt.com`, and `auth0.openai.com`). The Codex CLI sends ChatGPT subscription requests to `chatgpt.com/backend-api/codex`; the metered OpenAI API endpoint is deliberately not allowed. Direct IP connections (including IPs with allowed reverse-DNS names), arbitrary ports, provider names resolving to loopback/private/link-local addresses, local LAN resources, cloud metadata endpoints (`169.254.169.254`), and unauthorized external domains are unconditionally blocked.
 
 3. **Filesystem & Private Git Database Isolation**:
    - **Zero Host Leakage**: Host `HOME`, `~/.ssh`, host `gh` tokens, sibling worktrees, Docker/runtime sockets, and `.ai/scheduler.json` are never mounted.
