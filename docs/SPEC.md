@@ -489,8 +489,25 @@ PASS FAIL
  ▼     ▼
 PR_READY RETRY
  │
- ▼
-READY_FOR_REVIEW
+ ├─────────────────────────────────────────┐ (pr_review_enabled: true)
+ │ (pr_review_enabled: false)              ▼
+ │                                     PR_REVIEW
+ │                                        / \
+ │                                   APPROVE REQUEST_CHANGES
+ │                                      │     │ (review_cycles < max)
+ │                                      │     ▼
+ │                                      │   REVISING
+ │                                      │     │
+ │                                      │     ▼
+ │                                      │   VERIFYING
+ │                                      │     │ (PASS)
+ │                                      │     ▼
+ │                                      ├───PR_REVIEW
+ │                                      │     │ (review_cycles >= max)
+ │                                      │     ▼
+ │                                      │   NEEDS_HUMAN
+ ▼                                      ▼
+READY_FOR_REVIEW ───────────────────────┘
 ```
 
 追加状態：
@@ -503,6 +520,10 @@ NEEDS_HUMAN
 FAILED
 CANCELLED
 COMPLETE
+PLANNING
+PLAN_REVIEW
+PR_REVIEW
+REVISING
 ```
 
 `CANCELLED`は通常のdiscoveryではterminalな履歴として保持する。ただしoperatorが明示的に
@@ -535,6 +556,29 @@ PLAN_REVIEW stage では、レビュー担当エージェントは厳密な JSON
 `PLANNING`または`PLAN_REVIEW`中にcapacity eventが発生した場合は、通常の実装stageと同様に
 `WAITING_CAPACITY`を経由してqueue先頭の`READY`へ戻し、同じworktreeを保ったまま利用可能な
 別Agentへ再dispatchする。capacity eventはplan review failureとして`NEEDS_HUMAN`へ昇格させない。
+
+`execution.pr_review_enabled: true`（デフォルトは `false`）を有効化した場合、`VERIFYING` が成功して `PR_READY` に達した後に自動コードレビューおよびリビジョンループを実行する：
+
+```text
+PR_READY
+    ↓
+PR_REVIEW         -- 独立したレビュアーエージェントが差分をレビューし、
+   / \                {"verdict": "APPROVE" | "REQUEST_CHANGES", ...} を出力
+APPROVE REQUEST_CHANGES
+ │         │
+ ▼         ▼
+READY_FOR_REVIEW  REVISING (review_cycles += 1, execution.max_review_cycles
+                   │        に達すると NEEDS_HUMAN にフェイルクローズ)
+                   ▼
+                  VERIFYING
+                   │ (PASS)
+                   ▼
+                  PR_REVIEW
+```
+
+`PR_REVIEW` ステージでは、レビュアーエージェントはワークツリーを読み取り専用（`.ai/reviews/` のみ書き込み可）で開き、`origin/<base_branch>...HEAD` の差分を検証して `.ai/reviews/<issue>-r<round>.md` にレポートを出力する。
+レビュー結果が `APPROVE` の場合は PR を作成して `READY_FOR_REVIEW` へ遷移する。`REQUEST_CHANGES` の場合は `REVISING` へ遷移し、作業担当エージェントが指摘事項を修正した上で再度 `VERIFYING` の品質ゲートを実行する。`execution.max_review_cycles`（既定値: 3）に達しても承認されない場合は `NEEDS_HUMAN` へフェイルクローズする。
+
 
 
 ---
@@ -1249,7 +1293,7 @@ execution:
 
   max_task_runtime: 6h
   max_agent_switches: 6
-  max_same_agent_retries: 2
+  max_agent_failures: 2
 ```
 
 を持つ。
@@ -2338,6 +2382,9 @@ execution:
   max_tasks_per_run: 50
   agent_timeout_seconds: 300
   pause_running_policy: continue
+  # optional: automated PR review and revision rounds before completing the task
+  pr_review_enabled: false
+  max_review_cycles: 3
 
 
 queue:
@@ -2357,6 +2404,16 @@ verification:
   commands:
     - pytest
     - ruff check .
+
+
+# optional (defaults shown below apply when workflow: is omitted entirely)
+workflow:
+  mode: standard
+  stages:
+    planning: true
+    plan_review: true
+  limits:
+    max_plan_revisions: 2
 ```
 
 現runtimeで受理する値は、`routing.strategy=capacity-aware`、
