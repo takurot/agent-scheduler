@@ -26,6 +26,7 @@ import typer
 
 from subsched.agents.native import NativeWorker
 from subsched.config import ConfigError, load_config
+from subsched.dispatch_runs import DispatchRunStore
 from subsched.gitenv import git_safe_env
 from subsched.github.issues import GitHubCliError, GitHubIssueSource
 from subsched.handoff import parse_semantic_handoff
@@ -76,12 +77,14 @@ per isolated git worktree. Standard workflow for an assistant driving subsched o
    durable queue.
 3. subsched_trigger_dispatch -- launch `subsched run` as a background worker subprocess. Live
    execution requires explicit allow_native=True and subscription_billing_verified=True;
-   omitted, it performs a dry-run only.
-4. subsched_get_status / subsched_inspect_task -- monitor queue state, capacities, and
+   omitted, it performs a dry-run only. Save the returned run_id.
+4. subsched_get_dispatch_run -- check the accepted/starting/running/succeeded/failed/stale
+   lifecycle for that run_id without reading provider output.
+5. subsched_get_status / subsched_inspect_task -- monitor queue state, capacities, and
    individual task progress (handoffs, recent commits).
-5. subsched_resolve_needs_human -- after diagnosing and fixing the root cause in a
+6. subsched_resolve_needs_human -- after diagnosing and fixing the root cause in a
    NEEDS_HUMAN task's worktree, reset it back to READY.
-6. subsched_reset_task -- restore a deliberately CANCELLED task to READY while preserving
+7. subsched_reset_task -- restore a deliberately CANCELLED task to READY while preserving
    its worktree and handoff.
 
 Safety invariants: native worker execution and billing confirmation default to False and must
@@ -334,22 +337,35 @@ def trigger_dispatch(
 
     store = JsonStateStore(repository)
     store.init_directories()
-    log_path = store.runtime_dir / "mcp_dispatch.log"
-    with log_path.open("ab") as log_file:
+    runs = DispatchRunStore(store.runtime_dir)
+    run_id = runs.create()
+    try:
         process = subprocess.Popen(
-            argv,
+            [sys.executable, "-m", "subsched.dispatch_runs", str(repository), run_id, *argv],
             cwd=repository,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
+    except (OSError, subprocess.SubprocessError):
+        runs.update(run_id, status="failed", reason="spawn_failed")
+        return {"run_id": run_id, "status": "failed", "reason": "spawn_failed"}
     return {
-        "status": "dispatched",
+        "run_id": run_id,
+        "status": "accepted",
         "pid": process.pid,
         "allow_native": allow_native,
-        "log_path": str(log_path),
     }
+
+
+def get_dispatch_run(run_id: str, repository_path: str | None = None) -> dict[str, Any]:
+    """Read the detached run lifecycle without exposing child output or touching state."""
+    store = _store_for(repository_path)
+    try:
+        return DispatchRunStore(store.runtime_dir).inspect(run_id)
+    except (OSError, ValueError) as error:
+        raise McpToolError(f"dispatch run is unavailable: {type(error).__name__}") from error
 
 
 def init_repo(
@@ -723,6 +739,19 @@ def build_server(options: ServerOptions) -> Any:
         return trigger_dispatch(
             _default(repository_path), issues, allow_native, subscription_billing_verified
         )
+
+    @server.tool(
+        name="subsched_get_dispatch_run",
+        description=(
+            "Read the accepted, running, succeeded, failed, or stale status "
+            "of a detached dispatch."
+        ),
+    )
+    def _get_dispatch_run(
+        run_id: str = Field(description="Run ID returned by subsched_trigger_dispatch."),
+        repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
+    ) -> dict[str, Any]:
+        return get_dispatch_run(run_id, _default(repository_path))
 
     @server.tool(
         name="subsched_init_repo",

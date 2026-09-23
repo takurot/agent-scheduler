@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import json
 import secrets
 import time
 from collections import Counter
@@ -23,6 +24,7 @@ from subsched.config import (
     parse_duration,
     validate_repo,
 )
+from subsched.dispatch_runs import DispatchRunStore
 from subsched.github.checks import fetch_pr_checks
 from subsched.github.issues import (
     GitHubCliError,
@@ -748,6 +750,25 @@ def init(
             "Warning: could not auto-detect the GitHub repository; edit github.repo in "
             "subsched.yaml before running `subsched config validate` or `subsched run`."
         )
+
+
+@app.command("dispatch-status")
+def dispatch_status(
+    ctx: typer.Context,
+    run_id: Annotated[str, typer.Argument(help="Run ID from subsched_trigger_dispatch")],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Inspect a detached MCP dispatch without reading provider output."""
+    context: Context = ctx.obj
+    try:
+        record = DispatchRunStore(context.store.runtime_dir).inspect(run_id)
+    except (OSError, ValueError) as error:
+        typer.echo(f"dispatch run unavailable: {type(error).__name__}", err=True)
+        raise typer.Exit(1) from error
+    if as_json:
+        typer.echo(json.dumps(record, sort_keys=True))
+    else:
+        typer.echo(f"{run_id}: {record['status']}")
 
 
 @app.command()
