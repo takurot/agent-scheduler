@@ -3360,19 +3360,20 @@ CLIとの並行実行時にも競合やデータ破損を完全に防止する�
 
 ## 6. 公開仕様
 
-### Tools (12個)
+### Tools (13個)
 1. `subsched_get_status`: キュー状態内訳、タスク一覧、プロバイダークールダウン状態の取得。
 2. `subsched_inspect_task`: 指定Issueの詳細情報、パース済みセマンティックハンドオフ、直近コミットの取得。
-3. `subsched_queue_issues`: GitHubからのIssue自動検出およびキュー登録（`dry_run` 対応）。
-4. `subsched_trigger_dispatch`: バックグラウンドプロセスでの `subsched run` 起動。
-5. `subsched_get_dispatch_run`: `run_id`で非同期起動の状態と安全な失敗理由を取得。
-6. `subsched_init_repo`: リポジトリのスタック検出および `subsched.yaml` / `AGENTS.md` / `CLAUDE.md` のスキャフォールド。
-7. `subsched_resolve_needs_human`: `NEEDS_HUMAN` 状態のタスクを `READY` に遷移。
-8. `subsched_cancel_task`: ワークツリーおよびハンドオフファイルを温存したままタスクを `CANCELLED` に遷移。
-9. `subsched_reset_task`: `CANCELLED` taskだけをworktreeとhandoffを温存したまま`READY`へ復帰。
-10. `subsched_control`: スケジューラーの新規ディスパッチの一時停止 (`pause`) / 再開 (`resume`)。
-11. `subsched_get_metrics`: 生産性、信頼性、キャパシティ指標の集計取得。
-12. `subsched_reconcile`（#277）: `READY_FOR_REVIEW` タスクを実際のPR状態と突き合わせ、mergeされたPRを`COMPLETE`へ、mergeされずcloseされたPRを`NEEDS_HUMAN`へ遷移させる（`dry_run` 対応、`gh`エラー時はfail-closed）。ワークツリーのpruneはCLI (`subsched reconcile --prune-worktrees`) 専用で、このツールからは行わない。
+3. `subsched_explain`（#384）: 指定Issueが実行可能か、なぜ保留・除外・ブロックされているかを状態変更なしで診断（eligible/excluded label、未完了依存、選択providerと鮮度、cooldown reset、run予算、必要なoperator actionを理由コードと根拠付きで提示）。
+4. `subsched_queue_issues`: GitHubからのIssue自動検出およびキュー登録（`dry_run` 対応）。
+5. `subsched_trigger_dispatch`: バックグラウンドプロセスでの `subsched run` 起動。
+6. `subsched_get_dispatch_run`: `run_id`で非同期起動の状態と安全な失敗理由を取得。
+7. `subsched_init_repo`: リポジトリのスタック検出および `subsched.yaml` / `AGENTS.md` / `CLAUDE.md` のスキャフォールド。
+8. `subsched_resolve_needs_human`: `NEEDS_HUMAN` 状態のタスクを `READY` に遷移。
+9. `subsched_cancel_task`: ワークツリーおよびハンドオフファイルを温存したままタスクを `CANCELLED` に遷移。
+10. `subsched_reset_task`: `CANCELLED` taskだけをworktreeとhandoffを温存したまま`READY`へ復帰。
+11. `subsched_control`: スケジューラーの新規ディスパッチの一時停止 (`pause`) / 再開 (`resume`)。
+12. `subsched_get_metrics`: 生産性、信頼性、キャパシティ指標の集計取得。
+13. `subsched_reconcile`（#277）: `READY_FOR_REVIEW` タスクを実際のPR状態と突き合わせ、mergeされたPRを`COMPLETE`へ、mergeされずcloseされたPRを`NEEDS_HUMAN`へ遷移させる（`dry_run` 対応、`gh`エラー時はfail-closed）。ワークツリーのpruneはCLI (`subsched reconcile --prune-worktrees`) 専用で、このツールからは行わない。
 
 ### Resources (4個)
 1. `subsched://queue`: タスク一覧および一時停止状態のリアルタイムJSONスナップショット。

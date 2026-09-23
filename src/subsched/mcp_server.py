@@ -25,14 +25,15 @@ from typing import Any, Literal
 import typer
 
 from subsched.agents.native import NativeWorker
-from subsched.config import ConfigError, load_config
+from subsched.config import ConfigError, SchedulerConfig, load_config
 from subsched.dispatch_runs import DispatchRunStore
+from subsched.explain import explain_issue
 from subsched.gitenv import git_safe_env
 from subsched.github.issues import GitHubCliError, GitHubIssueSource
 from subsched.handoff import parse_semantic_handoff
 from subsched.init import InitError, build_scaffold_plan, write_scaffold_plan
 from subsched.metrics import calculate_metrics
-from subsched.models import Task, TaskState, resolve_stage
+from subsched.models import Issue, Task, TaskState, resolve_stage
 from subsched.router import Router
 from subsched.scheduler import Scheduler
 from subsched.selection import discover_selected_issues, excluded_issue_labels, resolve_intent
@@ -82,9 +83,10 @@ per isolated git worktree. Standard workflow for an assistant driving subsched o
    lifecycle for that run_id without reading provider output.
 5. subsched_get_status / subsched_inspect_task -- monitor queue state, capacities, and
    individual task progress (handoffs, recent commits).
-6. subsched_resolve_needs_human -- after diagnosing and fixing the root cause in a
+6. subsched_explain -- diagnose why an issue is or is not dispatchable without mutating state.
+7. subsched_resolve_needs_human -- after diagnosing and fixing the root cause in a
    NEEDS_HUMAN task's worktree, reset it back to READY.
-7. subsched_reset_task -- restore a deliberately CANCELLED task to READY while preserving
+8. subsched_reset_task -- restore a deliberately CANCELLED task to READY while preserving
    its worktree and handoff.
 
 Safety invariants: native worker execution and billing confirmation default to False and must
@@ -210,6 +212,32 @@ def inspect_task(issue_number: int, repository_path: str | None = None) -> dict[
             except (OSError, subprocess.TimeoutExpired):
                 pass
     return result
+
+
+def explain_task(issue_number: int, repository_path: str | None = None) -> dict[str, Any]:
+    """Explain why an issue is or is not dispatchable without mutating state."""
+    target_dir = resolve_repository(repository_path)
+    config_path = target_dir / "subsched.yaml"
+    cfg = load_config(config_path) if config_path.is_file() else SchedulerConfig()
+    store = _store_for(repository_path)
+    try:
+        tasks = store.load_tasks()
+        capacities = store.load_capacities()
+    except StateCorruptionError as error:
+        raise McpToolError(f"scheduler state error: {error}") from error
+
+    matching_task = next((task for task in tasks if task.issue_number == issue_number), None)
+    if matching_task:
+        issue = Issue(
+            number=matching_task.issue_number,
+            title=matching_task.title,
+            labels=matching_task.labels,
+            body=matching_task.description or "",
+        )
+    else:
+        issue = Issue(number=issue_number, title=f"Issue #{issue_number}")
+
+    return explain_issue(issue, tasks, cfg, capacities)
 
 
 def queue_issues(
@@ -667,6 +695,20 @@ def build_server(options: ServerOptions) -> Any:
         repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
     ) -> dict[str, Any]:
         return inspect_task(issue_number, _default(repository_path))
+
+    @server.tool(
+        name="subsched_explain",
+        description=(
+            "Explain why an issue is or is not dispatchable without modifying scheduler state "
+            "or making paid provider probes. Reports eligibility, dependency status, routing, "
+            "and required operator actions."
+        ),
+    )
+    def _explain_task(
+        issue_number: int = Field(description="GitHub issue number to diagnose."),
+        repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
+    ) -> dict[str, Any]:
+        return explain_task(issue_number, _default(repository_path))
 
     @server.tool(
         name="subsched_queue_issues",

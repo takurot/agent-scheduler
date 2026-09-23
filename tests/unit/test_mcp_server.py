@@ -861,6 +861,7 @@ def test_build_server_registers_all_tools_resources_and_prompts(tmp_path: Path) 
     assert set(tools) == {
         "subsched_get_status",
         "subsched_inspect_task",
+        "subsched_explain",
         "subsched_queue_issues",
         "subsched_trigger_dispatch",
         "subsched_get_dispatch_run",
