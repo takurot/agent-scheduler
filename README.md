@@ -38,8 +38,14 @@ override it. See [SPEC §72.2](docs/SPEC.md#722-native-container-isolation-issue
 
 The Scheduler, host kernel/Docker engine, pinned worker/proxy images, and operator-owned
 proxy allowlist remain trusted. Native runs also require
-`--subscription-billing-verified`; pass it only after independently confirming that each
-enabled CLI uses subscription billing and that metered/API fallback is disabled.
+`--subscription-billing-verified` as explicit operator authorization. The flag is not
+accepted as authentication evidence: preflight runs each enabled CLI's non-inference auth
+status command against its dedicated `isolation.auth` directory, requires Codex ChatGPT
+login and Claude first-party subscription/OAuth login, and rejects unauthenticated,
+API-key, third-party, malformed, or unknown states. Claude settings that configure an API
+key helper, API credential, custom base URL, Bedrock, Vertex, or Foundry are also rejected.
+The same checks run for `--allow-native --dry-run`; an ordinary dry run without native
+opt-in remains a provider-independent queue preview.
 
 Repository instruction files are user-owned input. `subsched` tells each worker to read an existing
 `AGENTS.md` and `CLAUDE.md`, but never creates, edits, or removes either file. Task scope and
@@ -476,6 +482,9 @@ subsched doctor
 - Internal network configuration (`Internal: true`) and proxy container attachment
 - Absence of unauthorized containers on the internal network
 - Provider auth directory permissions (`0700`) and file modes (`0600`)
+- Each enabled provider's non-inference authentication status from that dedicated auth
+  directory (Codex ChatGPT login; Claude first-party subscription/OAuth login), with
+  metered, third-party, unauthenticated, malformed, and unknown states rejected
 - Verification toolchain availability (#364): confirms all executables in `verification.commands` (e.g. `cargo`, `pytest`, `npm`) exist in the worker container image
 
 > [!TIP]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -86,6 +87,7 @@ def _safe_run(
     *,
     run_cmd: RunCommand,
     timeout: float = 10.0,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     # Never expose environment secrets or model prompts
     return run_cmd(
@@ -94,7 +96,127 @@ def _safe_run(
         text=True,
         timeout=timeout,
         check=False,
-        env={},
+        env=dict(env) if env is not None else {},
+    )
+
+
+_CLAUDE_SUBSCRIPTION_TYPES = frozenset({"pro", "max", "team", "business", "enterprise"})
+_CLAUDE_METERED_ENV_KEYS = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_VERTEX",
+    }
+)
+
+
+def _claude_settings_are_subscription_only(auth_dir: Path) -> bool:
+    """Reject settings that can redirect an authenticated Claude CLI to metered usage."""
+    for settings_path in (auth_dir / "settings.json", auth_dir / ".claude" / "settings.json"):
+        if not settings_path.exists():
+            continue
+        if settings_path.is_symlink() or not settings_path.is_file():
+            return False
+        try:
+            if settings_path.stat().st_size > 1_048_576:
+                return False
+            payload = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(payload, dict) or "apiKeyHelper" in payload:
+            return False
+        configured_env = payload.get("env", {})
+        if not isinstance(configured_env, dict):
+            return False
+        if _CLAUDE_METERED_ENV_KEYS.intersection(configured_env):
+            return False
+    return True
+
+
+def _claude_subscription_status(stdout: str) -> bool:
+    if len(stdout.encode("utf-8")) > 65_536:
+        return False
+    try:
+        payload = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("loggedIn") is not True or payload.get("apiProvider") != "firstParty":
+        return False
+    auth_method = payload.get("authMethod")
+    if auth_method == "oauth_token":
+        return True
+    return (
+        auth_method == "claude.ai"
+        and payload.get("subscriptionType") in _CLAUDE_SUBSCRIPTION_TYPES
+    )
+
+
+def probe_subscription_authentication(
+    name: str,
+    executable: Path,
+    *,
+    auth_dir: Path,
+    run_cmd: RunCommand,
+) -> PreflightCheckResult:
+    """Verify an enabled CLI's local subscription login without invoking a model."""
+    failure = f"{name} subscription authentication could not be verified"
+    if name not in {"claude", "codex"}:
+        return PreflightCheckResult(name=f"{name}-auth", found=False, error=failure)
+    try:
+        resolved_executable = executable.resolve(strict=True)
+        resolved_auth = auth_dir.resolve(strict=True)
+    except OSError:
+        return PreflightCheckResult(name=f"{name}-auth", found=False, error=failure)
+    if auth_dir.is_symlink() or not resolved_auth.is_dir():
+        return PreflightCheckResult(name=f"{name}-auth", found=False, error=failure)
+
+    env = {"HOME": str(resolved_auth), "NO_COLOR": "1"}
+    if name == "codex":
+        env["CODEX_HOME"] = str(resolved_auth)
+        argv = [str(resolved_executable), "login", "status"]
+    else:
+        env["CLAUDE_CONFIG_DIR"] = str(resolved_auth)
+        if not _claude_settings_are_subscription_only(resolved_auth):
+            return PreflightCheckResult(name="claude-auth", found=True, error=failure)
+        oauth_token = resolved_auth / "oauth-token"
+        if oauth_token.exists():
+            try:
+                if (
+                    oauth_token.is_symlink()
+                    or not oauth_token.is_file()
+                    or oauth_token.stat().st_size > 16_384
+                ):
+                    return PreflightCheckResult(name="claude-auth", found=True, error=failure)
+                token = oauth_token.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError):
+                return PreflightCheckResult(name="claude-auth", found=True, error=failure)
+            if not token:
+                return PreflightCheckResult(name="claude-auth", found=True, error=failure)
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+        argv = [str(resolved_executable), "auth", "status", "--json"]
+
+    try:
+        proc = _safe_run(argv, run_cmd=run_cmd, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return PreflightCheckResult(name=f"{name}-auth", found=True, error=failure)
+    authenticated = proc.returncode == 0 and (
+        proc.stdout.strip() == "Logged in using ChatGPT"
+        if name == "codex"
+        else _claude_subscription_status(proc.stdout)
+    )
+    if not authenticated:
+        return PreflightCheckResult(name=f"{name}-auth", found=True, error=failure)
+    return PreflightCheckResult(
+        name=f"{name}-auth",
+        found=True,
+        executable_path=resolved_executable,
+        compatible=True,
+        details="subscription authentication verified",
     )
 
 
@@ -329,6 +451,37 @@ def validate_native_preflight(
                 ),
             )
         )
+
+    # The operator flag is consent, not evidence. Verify the exact dedicated auth
+    # directory that will be mounted into the isolated worker, using status commands
+    # that do not invoke a model or consume provider capacity.
+    if isolation_config is not None and isolation_failure is None:
+        auth_by_agent = dict(isolation_config.auth)
+        for agent in enabled:
+            agent_check = next((check for check in checks if check.name == agent), None)
+            auth_dir = auth_by_agent.get(agent)
+            if (
+                agent_check is None
+                or not agent_check.compatible
+                or agent_check.executable_path is None
+            ):
+                continue
+            if auth_dir is None:
+                auth_result = PreflightCheckResult(
+                    name=f"{agent}-auth",
+                    found=False,
+                    error=f"{agent} subscription authentication could not be verified",
+                )
+            else:
+                auth_result = probe_subscription_authentication(
+                    agent,
+                    agent_check.executable_path,
+                    auth_dir=auth_dir,
+                    run_cmd=runner,
+                )
+            checks.append(auth_result)
+            if not auth_result.compatible:
+                failures.append(auth_result.error or f"{agent} authentication check failed")
 
     # #364: when container isolation is active and verified, check that the container
     # image contains all executables required by verification.commands (e.g. cargo, pytest).
