@@ -3368,7 +3368,7 @@ CLIとの並行実行時にも競合やデータ破損を完全に防止する�
 5. `subsched_trigger_dispatch`: バックグラウンドプロセスでの `subsched run` 起動。
 6. `subsched_get_dispatch_run`: `run_id`で非同期起動の状態と安全な失敗理由を取得。
 7. `subsched_init_repo`: リポジトリのスタック検出および `subsched.yaml` / `AGENTS.md` / `CLAUDE.md` のスキャフォールド。
-8. `subsched_resolve_needs_human`: `NEEDS_HUMAN` 状態のタスクを `READY` に遷移。
+8. `subsched_resolve_needs_human`（#385）: `NEEDS_HUMAN` 状態のタスクを `READY` に遷移（`dry_run` 対応、解決メモを秘密文字列redactの上auditログ・Taskへ永続化）。
 9. `subsched_cancel_task`: ワークツリーおよびハンドオフファイルを温存したままタスクを `CANCELLED` に遷移。
 10. `subsched_reset_task`: `CANCELLED` taskだけをworktreeとhandoffを温存したまま`READY`へ復帰。
 11. `subsched_control`: スケジューラーの新規ディスパッチの一時停止 (`pause`) / 再開 (`resume`)。

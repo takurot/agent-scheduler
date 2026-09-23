@@ -416,6 +416,7 @@ class Task:
     # CI success is an observation, while PR merge is completion evidence.
     ci_result: str | None = None
     completion_kind: str | None = None
+    resolution_note: str | None = None
 
     def __post_init__(self) -> None:
         if self.ci_result not in (None, "PASS", "FAIL", "PENDING", "UNKNOWN"):
@@ -467,11 +468,15 @@ class Task:
         now: datetime | None = None,
         reason: str | None = None,
         reason_code: str | None = None,
+        resolution_note: str | None = None,
     ) -> Task:
         if status not in ALLOWED_TRANSITIONS[self.status]:
             raise StateTransitionError(f"invalid transition: {self.status} -> {status}")
         resolved_reason = reason if status is TaskState.NEEDS_HUMAN else None
         resolved_reason_code = reason_code if status is TaskState.NEEDS_HUMAN else None
+        resolved_resolution_note = (
+            resolution_note if resolution_note is not None else self.resolution_note
+        )
         return replace(
             self,
             status=status,
@@ -480,6 +485,7 @@ class Task:
             updated_at=now or datetime.now(UTC),
             needs_human_reason=resolved_reason,
             needs_human_reason_code=resolved_reason_code,
+            resolution_note=resolved_resolution_note,
         )
 
     def with_worktree(self, worktree: str) -> Task:
@@ -517,6 +523,7 @@ class Task:
             "dispatch_effort": self.dispatch_effort,
             "ci_result": self.ci_result,
             "completion_kind": self.completion_kind,
+            "resolution_note": self.resolution_note,
         }
 
     @classmethod
@@ -573,6 +580,7 @@ class Task:
                 dispatch_effort=value.get("dispatch_effort"),
                 ci_result=value.get("ci_result"),
                 completion_kind=value.get("completion_kind"),
+                resolution_note=value.get("resolution_note"),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("invalid task state") from error

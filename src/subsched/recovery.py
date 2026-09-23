@@ -4,12 +4,18 @@ import json
 import logging
 import os
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
 from subsched.handoff import reconstruct_or_quarantine_handoff
 from subsched.models import Task, TaskState
-from subsched.storage import atomic_write_secure_bytes, get_process_start_time
+from subsched.storage import (
+    SCHEMA_VERSION,
+    JsonStateStore,
+    atomic_write_secure_bytes,
+    get_process_start_time,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,3 +177,145 @@ def reconcile_task_recovery(worktree_dir: Path, task: Task) -> tuple[Task, str]:
         )
 
     return task, f"{reason_prefix}; process record cleared; task unchanged"
+
+
+class ResolveError(RuntimeError):
+    """Raised when a task cannot be resolved from NEEDS_HUMAN."""
+
+
+class RestoreError(RuntimeError):
+    """Raised when scheduler state cannot be safely restored."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResolveResult:
+    issue_number: int
+    previous_status: TaskState
+    new_status: TaskState
+    resolution_note: str
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RestoreResult:
+    source_file: str
+    restored_tasks_count: int
+    revision: int
+
+
+def resolve_needs_human_task(
+    store: JsonStateStore,
+    issue_number: int,
+    note: str,
+    *,
+    dry_run: bool = False,
+    now: datetime | None = None,
+) -> ResolveResult:
+    """Resolve a NEEDS_HUMAN task to READY with sanitized audit logging."""
+    from subsched.structured_logger import redact_sensitive_text
+
+    current = now or datetime.now(UTC)
+    sanitized_note = redact_sensitive_text(note.strip())
+    if not sanitized_note:
+        raise ResolveError("resolution note must not be empty")
+
+    with store.lock():
+        tasks = store.load_tasks()
+        matches = [t for t in tasks if t.issue_number == issue_number]
+        if not matches:
+            raise ResolveError(f"issue #{issue_number} is not in scheduler state")
+        task = matches[0]
+        if task.status is not TaskState.NEEDS_HUMAN:
+            raise ResolveError(
+                f"issue #{issue_number} is not in NEEDS_HUMAN (status: {task.status.value})"
+            )
+
+        sanitized_old_reason = redact_sensitive_text(task.needs_human_reason or "")
+        if not dry_run:
+            replacement = task.transition(
+                TaskState.READY,
+                now=current,
+                resolution_note=sanitized_note,
+            )
+            updated = tuple(
+                replacement if t.issue_number == issue_number else t for t in tasks
+            )
+            store.save_tasks(updated, paused=store.is_paused())
+
+            audit_dir = store.path.parent / "audit"
+            audit_dir.mkdir(parents=True, exist_ok=True)
+            audit_file = audit_dir / "resolutions.jsonl"
+            audit_entry = {
+                "issue_number": issue_number,
+                "previous_reason": sanitized_old_reason,
+                "resolution_note": sanitized_note,
+                "timestamp": current.isoformat(),
+            }
+            with audit_file.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(audit_entry, ensure_ascii=False) + "\n")
+
+        return ResolveResult(
+            issue_number=issue_number,
+            previous_status=task.status,
+            new_status=TaskState.READY,
+            resolution_note=sanitized_note,
+            updated_at=current,
+        )
+
+
+def restore_state_from_snapshot(
+    store: JsonStateStore,
+    snapshot_path: Path,
+    *,
+    dry_run: bool = False,
+) -> RestoreResult:
+    """Restore scheduler state from a validated backup or quarantine snapshot."""
+    if snapshot_path.is_symlink():
+        raise RestoreError(f"snapshot path must not be a symlink: {snapshot_path}")
+    if not snapshot_path.is_file():
+        raise RestoreError(f"snapshot file does not exist: {snapshot_path}")
+
+    try:
+        content = snapshot_path.read_text(encoding="utf-8")
+        payload = json.loads(content)
+    except Exception as error:
+        raise RestoreError(f"corrupted snapshot file: {error}") from error
+
+    if not isinstance(payload, dict):
+        raise RestoreError("snapshot payload must be a JSON object")
+
+    schema_version = payload.get("schema_version")
+    if schema_version != SCHEMA_VERSION:
+        raise RestoreError(
+            f"unknown schema version in snapshot: {schema_version} (expected {SCHEMA_VERSION})"
+        )
+
+    tasks_raw = payload.get("tasks", [])
+    try:
+        tasks = tuple(Task.from_dict(item) for item in tasks_raw)
+    except Exception as error:
+        raise RestoreError(f"invalid tasks in snapshot: {error}") from error
+
+    # Check for live processes in worktrees
+    for t in tasks:
+        if t.worktree:
+            worktree_dir = Path(t.worktree)
+            record = load_process_record(worktree_dir, t.issue_number)
+            if record is not None and check_process_liveness(record) == ProcessStatus.LIVE:
+                raise RestoreError(
+                    f"cannot restore: live process PID {record.pid} is still "
+                    f"running for issue #{t.issue_number}"
+                )
+
+    if not dry_run:
+        capacities = store._capacities_from_payload(payload)
+        paused = bool(payload.get("paused", False))
+        with store.lock():
+            store.save_state(tasks, paused=paused, capacities=capacities)
+
+    return RestoreResult(
+        source_file=str(snapshot_path),
+        restored_tasks_count=len(tasks),
+        revision=int(payload.get("revision", 0)),
+    )
+
