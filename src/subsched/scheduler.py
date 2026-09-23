@@ -29,7 +29,6 @@ from subsched.models import (
     parse_dependencies,
     resolve_stage,
 )
-from subsched.plan_review import PlanVerdictError, parse_verdict, plan_path
 from subsched.queue import TaskQueue
 from subsched.recovery import (
     ProcessRecord,
@@ -47,6 +46,7 @@ from subsched.review import (
 )
 from subsched.router import FRESHNESS, Router
 from subsched.selection import excluded_issue_labels
+from subsched.stage_handlers import PlanningStageHandler
 from subsched.storage import JsonStateStore, StateCorruptionError, get_process_start_time
 from subsched.structured_logger import StructuredLogger, sanitize_agent_summary
 from subsched.tasks.worktree import WorktreeAdapter, WorktreeError
@@ -245,6 +245,7 @@ class Scheduler:
         self.max_plan_revisions = self.workflow.limits.max_plan_revisions
         self.pr_review_enabled = pr_review_enabled
         self.max_review_cycles = max_review_cycles
+        self._planning_stage_handler = PlanningStageHandler(self)
         from subsched.lease import LeaseManager
 
         self.lease_manager = LeaseManager(max_concurrency=concurrency)
@@ -547,155 +548,7 @@ class Scheduler:
         re-enters PLANNING (incrementing `Task.plan_revisions`) up to that limit, after
         which the task fails closed to NEEDS_HUMAN rather than looping forever.
         """
-        current_task = task
-        while True:
-            # A REQUEST_CHANGES verdict already transitions the task PLAN_REVIEW ->
-            # PLANNING at the bottom of this loop (to durably persist the incremented
-            # plan_revisions counter before the next attempt starts); only transition
-            # here on the loop's first iteration, when current_task is still DISPATCHED.
-            stage = "planning"
-            model = self._resolve_model(agent, stage)
-            effort = self._resolve_effort(agent, stage)
-            if current_task.status is TaskState.PLANNING:
-                planning = current_task
-            else:
-                planning = current_task.transition(TaskState.PLANNING, current_agent=agent, now=now)
-            planning = replace(
-                planning,
-                dispatch_stage=stage,
-                dispatch_model=model,
-                dispatch_effort=effort,
-            )
-            self.queue = self.queue.replace(planning)
-            self._persist()
-            self._log(
-                "dispatch",
-                issue_number=planning.issue_number,
-                agent=agent,
-                task_id=planning.task_id,
-                data={
-                    "attempt": planning.attempt,
-                    "stage": stage,
-                    "agent": agent,
-                    "model": model or "provider-default",
-                    "effort": effort or "provider-default",
-                },
-            )
-            result = self._run_stage_worker(planning, agent, lease_nonce)
-            if result.kind is not AgentResultKind.PASS:
-                self._handle_result(planning, agent, result, now)
-                return "terminal", None
-
-            plan_file_exists = (
-                planning.worktree is not None
-                and (Path(planning.worktree) / plan_path(planning.issue_number)).is_file()
-            )
-            if not plan_file_exists:
-                self._escalate_stage(
-                    planning,
-                    agent,
-                    now,
-                    "planning stage completed without producing a plan file",
-                )
-                return "terminal", None
-
-            if not self.workflow.stages.plan_review:
-                # #280: plan_review is opt-out -- an existing plan file is enough to
-                # auto-approve and proceed straight to implementation.
-                approved = planning.transition(TaskState.PLAN_REVIEW, current_agent=agent, now=now)
-                approved = approved.transition(TaskState.IN_PROGRESS, current_agent=agent, now=now)
-                approved = replace(approved, plan_approved=True)
-                self.queue = self.queue.replace(approved)
-                self._persist()
-                return "approved", approved
-
-            stage = "plan_review"
-            model = self._resolve_model(agent, stage)
-            effort = self._resolve_effort(agent, stage)
-            review = planning.transition(TaskState.PLAN_REVIEW, current_agent=agent, now=now)
-            review = replace(
-                review,
-                dispatch_stage=stage,
-                dispatch_model=model,
-                dispatch_effort=effort,
-            )
-            self.queue = self.queue.replace(review)
-            self._persist()
-            self._log(
-                "dispatch",
-                issue_number=review.issue_number,
-                agent=agent,
-                task_id=review.task_id,
-                data={
-                    "attempt": review.attempt,
-                    "stage": stage,
-                    "agent": agent,
-                    "model": model or "provider-default",
-                    "effort": effort or "provider-default",
-                },
-            )
-            review_result = self._run_stage_worker(review, agent, lease_nonce)
-            if review_result.kind is not AgentResultKind.PASS:
-                self._handle_result(review, agent, review_result, now)
-                return "terminal", None
-
-            verdict = review_result.plan_verdict
-            if verdict is None:
-                try:
-                    verdict = parse_verdict(review_result.output)
-                except PlanVerdictError as error:
-                    self._escalate_stage(
-                        review, agent, now, f"malformed plan review verdict: {error}"
-                    )
-                    return "terminal", None
-
-            if verdict.verdict == "APPROVE":
-                approved = review.transition(TaskState.IN_PROGRESS, current_agent=agent, now=now)
-                approved = replace(approved, plan_approved=True)
-                self.queue = self.queue.replace(approved)
-                self._persist()
-                self._log(
-                    "task_transition",
-                    issue_number=approved.issue_number,
-                    agent=agent,
-                    task_id=approved.task_id,
-                    data={
-                        "from_state": review.status.value,
-                        "to_state": approved.status.value,
-                        "verdict": verdict.verdict,
-                    },
-                )
-                return "approved", approved
-
-            # REQUEST_CHANGES
-            new_revisions = review.plan_revisions + 1
-            if new_revisions >= self.max_plan_revisions:
-                escalated = replace(review, plan_revisions=new_revisions)
-                self._escalate_stage(
-                    escalated,
-                    agent,
-                    now,
-                    f"exceeded workflow.limits.max_plan_revisions ({self.max_plan_revisions})",
-                )
-                return "terminal", None
-
-            back_to_planning = review.transition(TaskState.PLANNING, current_agent=agent, now=now)
-            back_to_planning = replace(back_to_planning, plan_revisions=new_revisions)
-            self.queue = self.queue.replace(back_to_planning)
-            self._persist()
-            self._log(
-                "task_transition",
-                issue_number=back_to_planning.issue_number,
-                agent=agent,
-                task_id=back_to_planning.task_id,
-                data={
-                    "from_state": review.status.value,
-                    "to_state": back_to_planning.status.value,
-                    "verdict": verdict.verdict,
-                    "plan_revisions": new_revisions,
-                },
-            )
-            current_task = back_to_planning
+        return self._planning_stage_handler.run(task, agent, now, lease_nonce=lease_nonce)
 
     def discover(
         self,
