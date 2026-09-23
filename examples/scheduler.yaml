@@ -79,6 +79,9 @@ execution:
   # counts against it. A new run (CLI invocation / restart) resets the budget.
   max_tasks_per_run: 50
   pause_running_policy: continue
+  # Optional: automated PR review and revision rounds before completing the task
+  pr_review_enabled: false
+  max_review_cycles: 3
 
 queue:
   priority:
