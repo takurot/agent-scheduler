@@ -7,6 +7,9 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT = _REPO_ROOT / "scripts" / "bootstrap-isolation.sh"
 _README = _REPO_ROOT / "README.md"
+_SPEC = _REPO_ROOT / "docs" / "SPEC.md"
+_SCHEDULER_EXAMPLE = _REPO_ROOT / "examples" / "scheduler.yaml"
+_DOCKER_EXAMPLES = _REPO_ROOT / "examples" / "docker"
 
 
 def _script_text() -> str:
@@ -97,3 +100,53 @@ def test_reference_worker_dockerfiles_exist() -> None:
     assert "rustfmt" in rust_content
     assert "procps" in rust_content
 
+
+def test_reference_proxy_image_is_fail_closed() -> None:
+    """#418: the proxy example is runnable and owns an immutable deny-by-default policy."""
+    dockerfile = _DOCKER_EXAMPLES / "Dockerfile.proxy"
+    squid_config = _DOCKER_EXAMPLES / "squid.conf"
+
+    assert dockerfile.is_file(), "examples/docker/Dockerfile.proxy must exist"
+    assert squid_config.is_file(), "examples/docker/squid.conf must exist"
+
+    dockerfile_text = dockerfile.read_text(encoding="utf-8")
+    assert "COPY examples/docker/squid.conf /etc/squid/squid.conf" in dockerfile_text
+    assert 'ENTRYPOINT ["squid", "--foreground"' in dockerfile_text
+    assert "USER proxy" in dockerfile_text
+
+    policy = squid_config.read_text(encoding="utf-8")
+    assert "acl SSL_ports port 443" in policy
+    assert "acl CONNECT method CONNECT" in policy
+    assert "acl prohibited_destination_ips dst" in policy
+    assert "provider_subscription_domains dstdomain -n" in policy
+    assert "http_access deny !SSL_ports" in policy
+    assert "http_access deny !CONNECT" in policy
+    assert "http_access deny prohibited_destination_ips" in policy
+    assert "http_access allow CONNECT provider_subscription_domains" in policy
+    assert policy.rstrip().endswith("http_access deny all")
+
+
+def test_reference_proxy_allows_subscription_endpoints_not_openai_api() -> None:
+    """#418: Codex ChatGPT auth must work without enabling metered API fallback."""
+    policy = (_DOCKER_EXAMPLES / "squid.conf").read_text(encoding="utf-8")
+
+    assert "api.anthropic.com" in policy
+    assert "chatgpt.com" in policy
+    assert "auth0.openai.com" in policy
+    assert "api.openai.com" not in policy
+
+
+def test_proxy_reference_is_synchronized_across_examples_and_docs() -> None:
+    """#418: operator-facing examples identify the reference policy and Codex endpoint."""
+    readme_isolation = _README.read_text(encoding="utf-8").split(
+        "## Container Isolation Sandbox Architecture", 1
+    )[1].split("## Multi-Stage Autonomous Workflow", 1)[0]
+    spec_isolation = _SPEC.read_text(encoding="utf-8").split(
+        "## 72.2 Native container isolation", 1
+    )[1].split("# 73. Success Criteria", 1)[0]
+    scheduler_example = _SCHEDULER_EXAMPLE.read_text(encoding="utf-8")
+
+    for content in (readme_isolation, spec_isolation, scheduler_example):
+        assert "examples/docker/Dockerfile.proxy" in content
+        assert "chatgpt.com" in content
+        assert "api.openai.com" not in content

@@ -3052,7 +3052,15 @@ Enforce default-deny egress with a Docker internal network. Before every dispatc
 network must contain exactly the configured proxy container. The running proxy image
 and worker image must match configured RepoDigests; the proxy must also have an outbound
 network. An operator-owned, immutable proxy image permits only verified provider
-subscription endpoints. `execution.concurrency` is limited to one for this initial
+subscription endpoints. The reference policy in `examples/docker/Dockerfile.proxy` permits
+HTTPS CONNECT to `api.anthropic.com`, `chatgpt.com`, and `auth0.openai.com`; Codex ChatGPT
+subscription traffic uses `chatgpt.com/backend-api/codex`. It deliberately excludes the metered
+OpenAI API endpoint and denies non-443, IP-literal, and unmatched destinations. Domain matching
+must not authorize an IP literal through reverse DNS, and a permitted name resolving to a
+loopback, private, or link-local address must be denied before the domain allow rule. The proxy
+tunnels TLS without interception. Operators must test the intended Linux worker image through the proxy;
+an unreachable endpoint or Cloudflare `403` leaves native dispatch blocked rather than widening
+the allowlist or enabling API fallback. `execution.concurrency` is limited to one for this initial
 shared-proxy backend so workers cannot share the credential-bearing internal network.
 A proxy environment variable alone is insufficient: direct IP connections, alternate
 DNS, local networks, metadata services, and proxy bypass must remain blocked. Endpoint

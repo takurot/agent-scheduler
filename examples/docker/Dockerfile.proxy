@@ -1,0 +1,20 @@
+# Reference Squid allowlist proxy for subscription-only worker egress (#418).
+#
+# Build, inspect, and pin the resulting image by RepoDigest before configuring it:
+#   docker build -t subsched-proxy:latest -f examples/docker/Dockerfile.proxy .
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends squid ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d -o proxy -g proxy /var/log/squid /var/spool/squid
+
+COPY examples/docker/squid.conf /etc/squid/squid.conf
+
+RUN squid -k parse
+
+EXPOSE 3128
+USER proxy
+
+ENTRYPOINT ["squid", "--foreground", "-f", "/etc/squid/squid.conf"]
