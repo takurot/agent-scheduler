@@ -325,6 +325,13 @@ def build_review_prompt(task: Task, round_number: int, base_branch: str = "main"
                 "repository's quality standards (tests, error handling, security boundaries,",
                 "adherence to CLAUDE.md/AGENTS.md).",
                 "",
+                "If you find a genuine contradiction between the issue's requirements and",
+                "the existing design, a missing external prerequisite, or a decision that",
+                "requires operator approval, do NOT write the review report file and do NOT",
+                "issue a REQUEST_CHANGES verdict for it -- report needs_human instead (see",
+                "below) so the task escalates immediately instead of spending a revision",
+                "cycle on something a revision cannot resolve.",
+                "",
                 f"Write your review report to exactly this path: {report_path}",
                 "The file must start with the line '# Review' and contain exactly these",
                 "three sections, in any order, each with a single blank line after the",
@@ -343,6 +350,13 @@ def build_review_prompt(task: Task, round_number: int, base_branch: str = "main"
                 "",
                 "When you have finished, provide your final response matching the result",
                 'schema: {"result": "pass", "summary": "<brief summary>"}',
+                "or if human intervention or operator decision is required that a revision",
+                "cannot resolve:",
+                (
+                    '{"result": "needs_human", '
+                    '"reason_code": "operator_decision_required" | "instruction_conflict" | '
+                    '"external_prerequisite", "summary": "<actionable summary>"}'
+                ),
                 "or if you could not complete the review:",
                 '{"result": "failure", "summary": "<reason>"}',
             ]

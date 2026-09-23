@@ -26,6 +26,22 @@ def test_review_prompt_uses_configured_base_branch() -> None:
     assert "origin/main" not in prompt
 
 
+def test_review_prompt_contains_needs_human_schema() -> None:
+    """#310: build_review_prompt must instruct the reviewer on the needs_human schema
+    so it can escalate requirement contradictions or design decisions instead of
+    burning a REQUEST_CHANGES revision cycle."""
+    task = Task.from_issue(Issue(number=310, title="Support needs_human in review"))
+
+    prompt = build_review_prompt(task, round_number=1, base_branch="main")
+
+    assert (
+        '{"result": "needs_human", '
+        '"reason_code": "operator_decision_required" | "instruction_conflict" | '
+        '"external_prerequisite", "summary": "<actionable summary>"}'
+    ) in prompt
+    assert "do not write the review report file" in prompt.lower()
+
+
 def test_bootstrap_task_files_preserves_repository_instructions_byte_for_byte(
     tmp_path: Path,
 ) -> None:
