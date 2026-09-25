@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from subsched.metrics import calculate_metrics
 from subsched.models import Task, TaskState
@@ -9,6 +12,7 @@ from subsched.notifications import (
     NotificationEvent,
     NotificationOutbox,
     NotificationSinkError,
+    local_file_sink,
     write_run_summary,
 )
 
@@ -106,3 +110,16 @@ def test_outbox_delivery_failure_does_not_raise(tmp_path: Path) -> None:
 
     # must not raise -- destination failure never bubbles up to task/queue state
     outbox.deliver_pending(failing_sink, max_attempts=5)
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="O_NOFOLLOW is unavailable")
+def test_local_file_sink_refuses_symlink_target(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.jsonl"
+    path = tmp_path / "delivered.jsonl"
+    path.symlink_to(outside)
+
+    sink = local_file_sink(path)
+
+    with pytest.raises(OSError):
+        sink(NotificationEvent(run_id="r1", event_type="run_complete"))
+    assert not outside.exists()

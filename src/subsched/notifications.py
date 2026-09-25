@@ -169,7 +169,9 @@ def local_file_sink(path: Path) -> NotificationSink:
             },
             ensure_ascii=False,
         )
-        descriptor = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        descriptor = os.open(
+            path, os.O_CREAT | os.O_APPEND | os.O_WRONLY | os.O_NOFOLLOW, 0o600
+        )
         with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
             handle.write(line + "\n")
 
