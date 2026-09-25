@@ -24,12 +24,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js (LTS) for agent CLIs
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code and OpenAI Codex CLI tools globally
-RUN npm install -g @anthropic-ai/claude-code @openai/codex \
+# Install Claude Code and OpenAI Codex CLI tools globally, pinned to the
+# versions verified in .assumptions/claude-code.md and .assumptions/codex-cli.md
+RUN npm install -g @anthropic-ai/claude-code@2.1.229 @openai/codex@0.147.0 \
     && npm cache clean --force
 
 # Install uv package manager

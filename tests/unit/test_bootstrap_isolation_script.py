@@ -150,3 +150,31 @@ def test_proxy_reference_is_synchronized_across_examples_and_docs() -> None:
         assert "examples/docker/Dockerfile.proxy" in content
         assert "chatgpt.com" in content
         assert "api.openai.com" not in content
+
+
+def test_worker_dockerfiles_pin_agent_cli_versions() -> None:
+    """#422: CLI versions must be pinned so rebuilds are reproducible."""
+    for name in ("Dockerfile.worker-python", "Dockerfile.worker-rust"):
+        content = (_DOCKER_EXAMPLES / name).read_text(encoding="utf-8")
+        assert "npm install -g @anthropic-ai/claude-code@" in content, name
+        assert "npm install -g @anthropic-ai/claude-code@ " not in content, name
+        assert "@openai/codex@" in content, name
+        # Unpinned installs (bare package name followed by a space or end of line) are rejected.
+        assert "claude-code @openai/codex\n" not in content, name
+        assert "claude-code @openai/codex \\" not in content, name
+
+
+def test_worker_dockerfiles_pin_nodejs_to_a_non_eol_lts() -> None:
+    """#422: Node.js 20 reaches EOL 2026-04; pin to a currently maintained LTS instead."""
+    for name in ("Dockerfile.worker-python", "Dockerfile.worker-rust"):
+        content = (_DOCKER_EXAMPLES / name).read_text(encoding="utf-8")
+        assert "setup_20.x" not in content, name
+        assert "setup_22.x" in content, name
+
+
+def test_readme_documents_cli_version_update_procedure() -> None:
+    """#422: operators need a documented procedure for bumping pinned CLI/Node versions."""
+    readme = (_DOCKER_EXAMPLES / "README.md").read_text(encoding="utf-8")
+    assert "@anthropic-ai/claude-code@" in readme
+    assert "@openai/codex@" in readme
+    assert "setup_22.x" in readme
