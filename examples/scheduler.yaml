@@ -126,6 +126,11 @@ isolation:
   auth:
     claude: /absolute/path/to/dedicated/claude-auth
     codex: /absolute/path/to/dedicated/codex-auth
+  # Optional worker container resource limits (defaults shown):
+  cpus: 4
+  memory: 8g
+  pids_limit: 512
+  tmpfs_size: 1g
 
 # Optional (defaults shown below apply when `workflow:` is omitted entirely).
 # mode: multi-stage opts in to a PLANNING -> PLAN_REVIEW gate before IN_PROGRESS: a

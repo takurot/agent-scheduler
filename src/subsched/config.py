@@ -275,6 +275,10 @@ class NativeIsolationConfig:
     proxy_url: str | None = None
     proxy_image: str | None = None
     auth: tuple[tuple[str, Path], ...] = ()
+    cpus: float = 4
+    memory: str = "8g"
+    pids_limit: int = 512
+    tmpfs_size: str = "1g"
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,7 +347,19 @@ SECTION_KEYS: dict[str, frozenset[str]] = {
         }
     ),
     "isolation": frozenset(
-        {"backend", "runtime", "image", "network", "proxy_url", "proxy_image", "auth"}
+        {
+            "backend",
+            "runtime",
+            "image",
+            "network",
+            "proxy_url",
+            "proxy_image",
+            "auth",
+            "cpus",
+            "memory",
+            "pids_limit",
+            "tmpfs_size",
+        }
     ),
     "queue": frozenset({"priority"}),
     "handoff": frozenset({"continuous"}),
@@ -734,6 +750,22 @@ def _parse_workflow_config(raw: Mapping[str, Any]) -> WorkflowConfig:
 
 _PINNED_IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[0-9a-f]{64}")
 _CONTAINER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_DOCKER_SIZE_RE = re.compile(r"([0-9]+(\.[0-9]+)?)[bkmgBKMG]?")
+
+
+def _validate_cpus(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ConfigError(f"{name} must be a positive number")
+    return float(value)
+
+
+def _validate_docker_size(value: Any, name: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigError(f"{name} must be a positive size (e.g. '8g', '512m')")
+    match = _DOCKER_SIZE_RE.fullmatch(value)
+    if match is None or float(match.group(1)) <= 0:
+        raise ConfigError(f"{name} must be a positive size (e.g. '8g', '512m')")
+    return value
 
 
 def _parse_isolation_config(raw: Mapping[str, Any]) -> NativeIsolationConfig:
@@ -756,10 +788,16 @@ def _parse_isolation_config(raw: Mapping[str, Any]) -> NativeIsolationConfig:
         raise ConfigError(f"unknown isolation.auth keys: {join_keys(unknown_agents)}")
 
     if backend == "disabled":
-        if any(
-            value is not None
-            for value in (image_raw, network_raw, proxy_raw, proxy_image_raw)
-        ) or auth_raw:
+        if (
+            any(
+                value is not None
+                for value in (image_raw, network_raw, proxy_raw, proxy_image_raw)
+            )
+            or auth_raw
+            or any(
+                key in raw for key in ("cpus", "memory", "pids_limit", "tmpfs_size")
+            )
+        ):
             raise ConfigError("isolation backend settings require backend: container")
         return NativeIsolationConfig(backend=backend, runtime=runtime)
 
@@ -801,6 +839,12 @@ def _parse_isolation_config(raw: Mapping[str, Any]) -> NativeIsolationConfig:
         if not path.is_absolute():
             raise ConfigError(f"isolation.auth.{agent} must be an absolute path")
         auth.append((str(agent), path))
+
+    cpus = _validate_cpus(raw.get("cpus", 4), "isolation.cpus")
+    memory = _validate_docker_size(raw.get("memory", "8g"), "isolation.memory")
+    pids_limit = _strict_pos_int(raw.get("pids_limit", 512), "isolation.pids_limit")
+    tmpfs_size = _validate_docker_size(raw.get("tmpfs_size", "1g"), "isolation.tmpfs_size")
+
     return NativeIsolationConfig(
         backend=backend,
         runtime=runtime,
@@ -809,6 +853,10 @@ def _parse_isolation_config(raw: Mapping[str, Any]) -> NativeIsolationConfig:
         proxy_url=proxy_raw.rstrip("/"),
         proxy_image=proxy_image_raw,
         auth=tuple(auth),
+        cpus=cpus,
+        memory=memory,
+        pids_limit=pids_limit,
+        tmpfs_size=tmpfs_size,
     )
 
 

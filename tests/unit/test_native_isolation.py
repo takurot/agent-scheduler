@@ -56,6 +56,88 @@ def test_container_isolation_config_is_typed_and_digest_pinned(tmp_path: Path) -
     assert dict(config.isolation.auth)["codex"] == tmp_path / "auth" / "codex"
 
 
+def test_container_isolation_config_defaults_resource_limits(tmp_path: Path) -> None:
+    config_path = tmp_path / "subsched.yaml"
+    config_path.write_text(_isolation_yaml(tmp_path / "auth"), encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.isolation.cpus == 4
+    assert config.isolation.memory == "8g"
+    assert config.isolation.pids_limit == 512
+    assert config.isolation.tmpfs_size == "1g"
+
+
+def test_container_isolation_config_accepts_custom_resource_limits(tmp_path: Path) -> None:
+    config_path = tmp_path / "subsched.yaml"
+    config_path.write_text(
+        _isolation_yaml(tmp_path / "auth")
+        + "  cpus: 8\n"
+        + "  memory: 16g\n"
+        + "  pids_limit: 1024\n"
+        + "  tmpfs_size: 2g\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.isolation.cpus == 8
+    assert config.isolation.memory == "16g"
+    assert config.isolation.pids_limit == 1024
+    assert config.isolation.tmpfs_size == "2g"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("cpus", -1),
+        ("cpus", 0),
+        ("cpus", "not-a-number"),
+        ("memory", "8gigabytes"),
+        ("memory", "-8g"),
+        ("memory", "0"),
+        ("memory", "0g"),
+        ("memory", "0.0"),
+        ("pids_limit", -1),
+        ("pids_limit", 0),
+        ("pids_limit", 1.5),
+        ("tmpfs_size", "1tb-oops"),
+        ("tmpfs_size", "0"),
+        ("tmpfs_size", "0g"),
+        ("tmpfs_size", "0.0"),
+    ],
+)
+def test_container_isolation_config_rejects_invalid_resource_limits(
+    tmp_path: Path, key: str, value: object
+) -> None:
+    config_path = tmp_path / "subsched.yaml"
+    config_path.write_text(
+        _isolation_yaml(tmp_path / "auth") + f"  {key}: {value!r}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match=key):
+        load_config(config_path)
+
+
+def test_isolation_backend_disabled_rejects_resource_limit_settings(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "subsched.yaml"
+    config_path.write_text(
+        "github:\n  repo: acme/widgets\n"
+        "agents:\n"
+        "  claude:\n    enabled: true\n    priority: 100\n"
+        "  codex:\n    enabled: true\n    priority: 90\n"
+        "isolation:\n"
+        "  cpus: 8\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="backend: container"):
+        load_config(config_path)
+
+
 @pytest.mark.parametrize(
     ("replacement", "message"),
     [
@@ -367,6 +449,36 @@ def test_container_request_has_only_explicit_isolated_mounts_and_environment(
     )
 
 
+def test_container_request_reflects_configured_resource_limits(tmp_path: Path) -> None:
+    from subsched.agents.base import ProcessExecutionRequest
+    from subsched.agents.isolation import wrap_native_request
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    auth = _secure_auth_dir(tmp_path / "auth")
+    original = ProcessExecutionRequest(
+        argv=("codex", "exec", "-"),
+        cwd=worktree,
+        env={"HOME": "/host/home", "PATH": "/host/bin"},
+        stdin_payload=b"prompt",
+    )
+    config = dataclasses.replace(
+        _runtime_config(auth), cpus=8, memory="16g", pids_limit=1024, tmpfs_size="2g"
+    )
+
+    wrapped = wrap_native_request(
+        original,
+        agent="codex",
+        config=config,
+        runtime_executable=Path("/usr/bin/docker"),
+    )
+
+    argv = wrapped.argv
+    assert argv[argv.index("--pids-limit") + 1] == "1024"
+    assert argv[argv.index("--memory") + 1] == "16g"
+    assert argv[argv.index("--cpus") + 1] == "8"
+    tmpfs_args = [argv[i + 1] for i, arg in enumerate(argv[:-1]) if arg == "--tmpfs"]
+    assert any(arg.startswith("/tmp:") and "size=2g" in arg for arg in tmpfs_args)
 
 
 def test_container_request_mounts_review_reports_dir_writable_under_readonly_worktree(

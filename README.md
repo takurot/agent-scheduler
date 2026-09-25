@@ -376,7 +376,7 @@ flowchart TD
 1. **Hardened Docker Container Boundary**:
    - **Read-Only Root Filesystem**: Worker containers are dispatched with `--read-only` rootfs.
    - **Dropped Capabilities**: All Linux capabilities are dropped (`--cap-drop ALL`), and privilege escalation is prohibited (`--security-opt no-new-privileges=true`).
-   - **Strict Resource Limits**: CPU (`--cpus 4`), memory (`--memory 8g`), and process limits (`--pids-limit 512`) prevent runaway processes and resource exhaustion.
+   - **Strict Resource Limits**: CPU (`--cpus`, default `4`), memory (`--memory`, default `8g`), and process limits (`--pids-limit`, default `512`) prevent runaway processes and resource exhaustion; all are configurable via `isolation.cpus`, `isolation.memory`, and `isolation.pids_limit` (see below).
    - **Ephemeral In-Memory Storage**: `/tmp` and `/isolated-home` are mounted as in-memory `tmpfs` mounts with `exec,nosuid,nodev` to allow test script and compiler execution while preventing suid escalation.
    - **Deterministic Lifecycle & Cleanup**: Containers run with unguessable names (`subsched-worker-<task_id>-<token>`). On process exit, timeout, or cancellation, the Scheduler force-removes the container and mechanically verifies its absence before accepting any state.
 
@@ -487,6 +487,11 @@ isolation:
   auth:
     claude: /Users/username/.config/subsched-auth/claude
     codex: /Users/username/.config/subsched-auth/codex
+  # Optional resource limits for the worker container (defaults shown):
+  cpus: 4
+  memory: 8g
+  pids_limit: 512
+  tmpfs_size: 1g
 ```
 
 #### Step 5: Verify Setup with `subsched doctor`
@@ -706,6 +711,11 @@ isolation:
   auth:
     claude: /absolute/path/to/dedicated/claude-auth
     codex: /absolute/path/to/dedicated/codex-auth
+  # Optional worker container resource limits (defaults shown):
+  cpus: 4
+  memory: 8g
+  pids_limit: 512
+  tmpfs_size: 1g
 
 # Optional (defaults shown below apply when `workflow:` is omitted entirely).
 # mode: multi-stage opts in to a PLANNING -> PLAN_REVIEW gate before IN_PROGRESS: a
@@ -764,6 +774,8 @@ different model) if it does not.
 `execution.pr_review_enabled` (default: `false`) activates the automated PR review and revision loop (`PR_REVIEW` → `REVISING`). When enabled, after the `VERIFYING` quality gate passes, the Scheduler dispatches a read-only reviewer agent that inspects the diff against `origin/<base_branch>` and emits a structured JSON verdict. `execution.max_review_cycles` (default: `3`) limits how many `REQUEST_CHANGES` → `REVISING` → `VERIFYING` → `PR_REVIEW` round-trips are allowed before failing closed to `NEEDS_HUMAN`.
 
 `isolation.backend: container` enables the mechanically verified Docker container sandbox for native agent execution (see the [Container Isolation Sandbox Architecture](#container-isolation-sandbox-architecture) section above). `isolation.image` and `isolation.proxy_image` must be absolute image references pinned by digest (`@sha256:...`). `execution.concurrency` must be `1` when container isolation is active. `subsched doctor` verifies all container isolation prerequisites without reading credential values.
+
+`isolation.cpus` (default `4`), `isolation.memory` (default `8g`), `isolation.pids_limit` (default `512`), and `isolation.tmpfs_size` (default `1g`) configure the worker container's resource limits (Docker `--cpus`, `--memory`, `--pids-limit`, and `/tmp` tmpfs size, respectively). They are only accepted when `isolation.backend: container`; omitting them preserves the defaults above. `cpus` must be a positive number, `pids_limit` a positive integer, and `memory`/`tmpfs_size` a positive Docker size string (e.g. `8g`, `512m`) -- invalid values fail configuration loading.
 
 ---
 
