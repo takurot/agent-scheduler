@@ -193,6 +193,13 @@ subsched resume
 
 # Cancel a specific task while preserving worktree state
 subsched cancel 101
+
+# Diagnose durable-state, log, quarantine, and worktree disk usage
+subsched maintenance --dry-run
+subsched maintenance --dry-run --json
+
+# Archive only candidates that still pass every safety check
+subsched maintenance --apply
 ```
 
 Every `subsched run` invocation also writes a local per-run summary (Markdown and
@@ -201,6 +208,15 @@ metrics as `subsched metrics` plus any NEEDS_HUMAN issue numbers -- so an overni
 run's outcome can be reviewed the next morning without re-reading the JSONL log. See
 [`notifications`](#configuration-subschedyaml) for the optional (default-disabled)
 local notification outbox.
+
+`maintenance` is non-mutating unless `--apply` is explicit. A worktree is an archive
+candidate only when its task is `COMPLETE` (with confirmed merge evidence for a
+PR-backed task), its expected branch/path is intact, no active process record exists,
+and `git status --porcelain -uall` reports neither tracked nor untracked changes. Apply
+reloads Scheduler state and repeats these checks under the Scheduler lock. It writes a
+Git bundle, Scheduler artifacts, a manifest, and `RESTORE.md` under
+`.ai/archive/issue-<number>/` before calling `git worktree remove`. The durable Task is
+not deleted, so dependency history and rediscovery suppression remain intact.
 
 ### Model Context Protocol (MCP) Server
 
@@ -830,6 +846,7 @@ See this repository's own [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) 
 | `subsched run` | Discover issues, initialize queue, and dispatch tasks (`--allow-native`, `--subscription-billing-verified`, `--watch`, `--dry-run`) |
 | `subsched status` | Display queue breakdown, cooldowns, and scheduler state (`-v` / `--verbose` for per-task detail) |
 | `subsched metrics` | Output Productivity, Reliability, and Capacity metrics (`--json`, `--report <file.md>`). "Attempted" counts only tasks that were actually dispatched (queued/waiting/never-run tasks are excluded; rates are `null`/`N/A` when nothing was attempted), and `agent_failure_switch_rate` excludes capacity-driven switches |
+| `subsched maintenance` | Diagnose state/log/quarantine/worktree/archive usage and explain per-worktree retention reasons. Non-mutating by default and with `--dry-run`; `--apply` archives only revalidated clean completed worktrees (`--json`) |
 | `subsched reconcile` | Reconcile `READY_FOR_REVIEW` tasks against actual PR state on GitHub (each tracked PR is fetched individually via `gh pr view`, at most 100 per run, without holding the scheduler lock during the `gh` calls; a task whose status or PR changed meanwhile is left untouched; any fetch failure leaves state untouched): a merged PR advances to `COMPLETE`, an unmerged closed PR escalates to `NEEDS_HUMAN`, an open PR is left unchanged. Optional `--prune-worktrees` removes a merged worktree only when it has no tracked changes or untracked files outside Scheduler-owned `.ai/` state (`--repo`, `--dry-run`, `--prune-worktrees`) |
 | `subsched pause` | Pause task execution cleanly after current step |
 | `subsched resume` | Resume scheduler execution from paused state |

@@ -43,6 +43,7 @@ from subsched.github.reconcile import (
     prune_worktree_if_clean,
 )
 from subsched.init import InitError, build_scaffold_plan, write_scaffold_plan
+from subsched.maintenance import MaintenanceError, apply_archive_plan, build_maintenance_report
 from subsched.models import Capacity, Issue, TaskState
 from subsched.preflight import validate_native_preflight
 from subsched.router import AgentConfig, Router
@@ -1085,6 +1086,67 @@ def reconcile(
             typer.echo(f"  worktree issue-{task.issue_number}: {prune_result.kind.value}{suffix}")
             if prune_result.kind is WorktreePruneKind.FAILED:
                 raise typer.Exit(1)
+
+
+@app.command()
+def maintenance(
+    ctx: typer.Context,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Preview usage and archive candidates without changes"),
+    ] = False,
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Archive eligible worktrees after revalidation"),
+    ] = False,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Output the maintenance report as JSON")
+    ] = False,
+) -> None:
+    """Diagnose state/log/worktree usage and safely archive completed worktrees."""
+    if dry_run and apply:
+        raise typer.BadParameter("--dry-run and --apply cannot be combined")
+
+    context: Context = ctx.obj
+    try:
+        report = build_maintenance_report(context.repository, context.store)
+        results = apply_archive_plan(context.repository, context.store, report) if apply else ()
+    except (MaintenanceError, SchedulerLockError, StateCorruptionError, OSError) as error:
+        typer.echo(f"Maintenance error: {error}", err=True)
+        raise typer.Exit(1) from error
+
+    effective_dry_run = not apply
+    apply_failed = any(not result.archived for result in results)
+    if json_output:
+        payload = report.to_dict()
+        payload["dry_run"] = effective_dry_run
+        payload["results"] = [result.to_dict() for result in results]
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+        if apply_failed:
+            raise typer.Exit(1)
+        return
+
+    typer.echo("Maintenance usage:")
+    for name, usage in report.usage.items():
+        typer.echo(
+            f"  {name}: bytes={usage.bytes} files={usage.files} symlinks={usage.symlinks}"
+        )
+    typer.echo("Worktree archive plan:")
+    if not report.worktrees:
+        typer.echo("  no task worktrees found")
+    for item in report.worktrees:
+        disposition = "CANDIDATE" if item.eligible else "RETAIN"
+        reason = "; ".join(item.reasons) if item.reasons else "all safety checks passed"
+        typer.echo(f"  issue-{item.issue_number}: {disposition} - {reason}")
+    if effective_dry_run:
+        typer.echo("Dry run: no files or scheduler state were modified")
+        return
+    for result in results:
+        disposition = "ARCHIVED" if result.archived else "RETAINED"
+        suffix = f" - {result.reason}" if result.reason else ""
+        typer.echo(f"  issue-{result.issue_number}: {disposition}{suffix}")
+    if apply_failed:
+        raise typer.Exit(1)
 
 
 @app.command()

@@ -271,6 +271,7 @@ Schedulerが管理するコンテナ隔離ワークツリー（`subsched/issue-N
 | persisted schema、directory layout、migration | SPEC、recovery test、runbook |
 | Scheduler worker contract、handoff、checkpoint | SPEC、worker prompt、RUNBOOK、fixture |
 | 設定schema | SPEC、`examples/scheduler.yaml`、config test |
+| maintenance診断・archive・復元手順 | README、SPEC、RUNBOOK、CLI test |
 | 開発・検証手順 | このWORKFLOW |
 
 SPECから逸脱する実装を先にmergeしない。別のstate layoutや延期されたUXを採用する場合、

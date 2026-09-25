@@ -2485,6 +2485,54 @@ BUSY
 task: #108
 ```
 
+## 55.1 Maintenance diagnosis and worktree archives (#387)
+
+Long-running repositories use an explicit, conservative maintenance workflow:
+
+```bash
+subsched maintenance --dry-run
+subsched maintenance --dry-run --json
+subsched maintenance --apply
+```
+
+Without `--apply`, the command is read-only (including when neither action flag is
+given). It reports byte/file/symlink counts for Scheduler state and artifacts,
+structured/runtime logs, quarantine, task worktrees, and existing archives. Every
+known or orphaned `issue-N` worktree is listed with either `CANDIDATE` or one or more
+retention reasons. This diagnosis never treats historical Task count as a reason to
+delete data and does not change `execution.max_tasks_per_run` behavior.
+
+A task worktree is eligible only when all of the following are revalidated:
+
+- the durable Task is `COMPLETE`; a PR-backed Task also has
+  `completion_kind: merged` evidence;
+- its recorded path is exactly `.ai/worktrees/issue-N`, neither the root nor worktree
+  is a symlink, and it is on `refs/heads/subsched/issue-N`;
+- `.ai/runtime/N.process.json` is absent (no active dispatch record);
+- `git status --porcelain=v1 -z -uall` contains no tracked change and no untracked
+  file;
+- `.ai/archive/issue-N` does not already exist.
+
+`CANCELLED`, `NEEDS_HUMAN`, active, unmerged, missing, identity-conflicted, dirty,
+untracked, symlinked, and orphaned worktrees are retained. Unknown Git results also
+retain the worktree (fail closed).
+
+`--apply` is a separate explicit operation and cannot be combined with `--dry-run`.
+It acquires the Scheduler lock, reloads current state, and repeats every eligibility
+check immediately before each archive. The archive is first staged privately, with a
+Git bundle, selected Scheduler recovery artifacts, a versioned manifest, and
+`RESTORE.md`, then atomically published at `.ai/archive/issue-N/`. Only after publication
+does the command call `git worktree remove` without `--force`. A concurrent change makes
+Git refuse removal; broad `rm`, `git clean`, and automatic branch deletion are never
+used. Symlinked recovery artifacts are rejected and are never followed while copying.
+
+Archival does not remove or rewrite the durable Task record, dependency list, PR merge
+evidence, task/handoff history outside the worktree, branch, quarantine, or logs. This
+preserves discovery suppression, dependency history, and the evidence needed for an
+operator restore. If worktree removal fails after archive publication, both are retained
+and the command reports failure for operator review rather than overwriting either on a
+later run.
+
 ---
 
 # 56. Pause / Resume

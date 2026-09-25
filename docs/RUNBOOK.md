@@ -166,6 +166,50 @@ uv run subsched reconcile --prune-worktrees
 malformed output leaves `.ai/scheduler.json` untouched and exits non-zero. It is never
 invoked implicitly by `subsched run` or the discovery loop.
 
+### Diagnosing Disk Usage and Archiving Completed Worktrees
+
+Start with a read-only report. `--json` is suitable for operator tooling and contains
+the same candidates and retention reasons as the text output:
+
+```bash
+uv run subsched maintenance --dry-run
+uv run subsched maintenance --dry-run --json
+```
+
+The report inventories Scheduler state/artifacts, runtime logs, quarantine, worktrees,
+and prior archives. `CANCELLED`, `NEEDS_HUMAN`, active, unmerged, dirty, untracked,
+symlinked, identity-conflicted, and orphaned worktrees are retained. An unreadable or
+unknown Git result is also a retention reason. Do not delete history to work around a
+run dispatch budget; `execution.max_tasks_per_run` counts distinct issues first
+dispatched by the current run, not persisted history.
+
+After reviewing every candidate, apply the current plan explicitly:
+
+```bash
+uv run subsched maintenance --apply
+```
+
+Apply reloads state and repeats all checks while holding the Scheduler lock. For each
+still-eligible task it creates `.ai/archive/issue-<number>/` containing
+`repository.bundle`, `manifest.json`, `RESTORE.md`, and available Scheduler recovery
+artifacts, then invokes `git worktree remove` without force. It does not delete the Task
+record, dependency information, branch, global handoff/task history, logs, or quarantine.
+If removal fails, the archive and worktree are both retained; inspect them manually and
+do not remove either until the cause is understood.
+
+To restore, first read the archive's `manifest.json` and `RESTORE.md`. When the recorded
+task branch still exists and no destination is present, the documented flow is:
+
+```bash
+git worktree add .ai/worktrees/issue-101 subsched/issue-101
+cp -R .ai/archive/issue-101/artifacts/. .ai/worktrees/issue-101/.ai/
+```
+
+If the branch is missing, inspect `repository.bundle` and fetch it to a new,
+operator-chosen branch; never overwrite an existing branch or worktree. Confirm the
+restored worktree path, branch, status, task/handoff files, and Scheduler state before
+resuming any operation.
+
 ---
 
 ## 4. Capacity Failover & Wait Scheduling
