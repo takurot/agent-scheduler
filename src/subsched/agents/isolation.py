@@ -506,6 +506,10 @@ def verify_native_isolation(
     return None
 
 
+def _format_cpus(cpus: float) -> str:
+    return str(int(cpus)) if cpus.is_integer() else str(cpus)
+
+
 def _mount_value(source: Path, destination: str, *, readonly: bool = False) -> str:
     if any(character in str(source) for character in (",", "\n", "\r")):
         raise ValueError("native isolation mount path contains an unsafe character")
@@ -676,14 +680,14 @@ def wrap_native_request(
         "--security-opt",
         "no-new-privileges=true",
         "--pids-limit",
-        "512",
+        str(config.pids_limit),
         "--memory",
-        "8g",
+        config.memory,
         "--cpus",
-        "4",
+        _format_cpus(config.cpus),
         "--read-only",
         "--tmpfs",
-        f"/tmp:rw,exec,nosuid,nodev,size=1g,mode=1777,uid={uid},gid={gid}",
+        f"/tmp:rw,exec,nosuid,nodev,size={config.tmpfs_size},mode=1777,uid={uid},gid={gid}",
         "--tmpfs",
         f"/isolated-home:rw,exec,nosuid,nodev,size=256m,mode=700,uid={uid},gid={gid}",
         "--mount",
@@ -788,14 +792,14 @@ def wrap_verification_request(
         "--security-opt",
         "no-new-privileges=true",
         "--pids-limit",
-        "512",
+        str(config.pids_limit),
         "--memory",
-        "8g",
+        config.memory,
         "--cpus",
-        "4",
+        _format_cpus(config.cpus),
         "--read-only",
         "--tmpfs",
-        f"/tmp:rw,exec,nosuid,nodev,size=1g,mode=1777,uid={uid},gid={gid}",
+        f"/tmp:rw,exec,nosuid,nodev,size={config.tmpfs_size},mode=1777,uid={uid},gid={gid}",
         "--tmpfs",
         f"/isolated-home:rw,exec,nosuid,nodev,size=256m,mode=700,uid={uid},gid={gid}",
         "--mount",
