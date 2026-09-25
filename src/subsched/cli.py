@@ -635,6 +635,42 @@ def run(
         },
     )
 
+    # #386: run summary + optional notification outbox are best-effort observability
+    # -- a failure here must never change the run's reported task counts/exit code.
+    try:
+        from subsched.metrics import calculate_metrics
+        from subsched.notifications import (
+            NotificationEvent,
+            NotificationOutbox,
+            local_file_sink,
+            write_run_summary,
+        )
+
+        needs_human_issues = sorted(
+            task.issue_number for task in scheduler.tasks if task.status == TaskState.NEEDS_HUMAN
+        )
+        write_run_summary(
+            context.store.runtime_dir / "run_summaries",
+            run_id=run_id,
+            metrics=calculate_metrics(scheduler.tasks),
+            needs_human_issues=needs_human_issues,
+        )
+        if cfg.notifications.enabled:
+            outbox = NotificationOutbox(context.store.runtime_dir / "notifications_outbox.json")
+            outbox.enqueue(NotificationEvent(run_id=run_id, event_type="run_complete"))
+            for issue_number in needs_human_issues:
+                outbox.enqueue(
+                    NotificationEvent(
+                        run_id=run_id, event_type="needs_human", issue_number=issue_number
+                    )
+                )
+            outbox.deliver_pending(
+                local_file_sink(context.store.runtime_dir / "notifications_delivered.jsonl"),
+                max_attempts=cfg.notifications.max_delivery_attempts,
+            )
+    except Exception as error:
+        typer.echo(f"Run summary/notification generation failed (non-fatal): {error}", err=True)
+
 
 @config_app.command("validate")
 def config_validate(
