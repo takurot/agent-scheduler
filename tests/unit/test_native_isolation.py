@@ -95,10 +95,16 @@ def test_container_isolation_config_accepts_custom_resource_limits(tmp_path: Pat
         ("cpus", "not-a-number"),
         ("memory", "8gigabytes"),
         ("memory", "-8g"),
+        ("memory", "0"),
+        ("memory", "0g"),
+        ("memory", "0.0"),
         ("pids_limit", -1),
         ("pids_limit", 0),
         ("pids_limit", 1.5),
         ("tmpfs_size", "1tb-oops"),
+        ("tmpfs_size", "0"),
+        ("tmpfs_size", "0g"),
+        ("tmpfs_size", "0.0"),
     ],
 )
 def test_container_isolation_config_rejects_invalid_resource_limits(

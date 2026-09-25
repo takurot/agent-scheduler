@@ -750,7 +750,7 @@ def _parse_workflow_config(raw: Mapping[str, Any]) -> WorkflowConfig:
 
 _PINNED_IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:+-]*@sha256:[0-9a-f]{64}")
 _CONTAINER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
-_DOCKER_SIZE_RE = re.compile(r"[0-9]+(\.[0-9]+)?[bkmgBKMG]?")
+_DOCKER_SIZE_RE = re.compile(r"([0-9]+(\.[0-9]+)?)[bkmgBKMG]?")
 
 
 def _validate_cpus(value: Any, name: str) -> float:
@@ -760,7 +760,10 @@ def _validate_cpus(value: Any, name: str) -> float:
 
 
 def _validate_docker_size(value: Any, name: str) -> str:
-    if not isinstance(value, str) or not _DOCKER_SIZE_RE.fullmatch(value):
+    if not isinstance(value, str):
+        raise ConfigError(f"{name} must be a positive size (e.g. '8g', '512m')")
+    match = _DOCKER_SIZE_RE.fullmatch(value)
+    if match is None or float(match.group(1)) <= 0:
         raise ConfigError(f"{name} must be a positive size (e.g. '8g', '512m')")
     return value
 
