@@ -195,6 +195,13 @@ subsched resume
 subsched cancel 101
 ```
 
+Every `subsched run` invocation also writes a local per-run summary (Markdown and
+JSON) under `.ai/runtime/run_summaries/run-<run_id>.{md,json}`, covering the same
+metrics as `subsched metrics` plus any NEEDS_HUMAN issue numbers -- so an overnight
+run's outcome can be reviewed the next morning without re-reading the JSONL log. See
+[`notifications`](#configuration-subschedyaml) for the optional (default-disabled)
+local notification outbox.
+
 ### Model Context Protocol (MCP) Server
 
 Run `subsched` as an MCP server over stdio to integrate directly with AI assistants and IDEs (Claude Desktop, Cursor, Antigravity):
@@ -713,6 +720,19 @@ workflow:
     plan_review: true
   limits:
     max_plan_revisions: 2
+
+# Optional (defaults shown below apply when `notifications:` is omitted entirely).
+notifications:
+  # A local Markdown/JSON run summary (.ai/runtime/run_summaries/run-<run_id>.{md,json})
+  # is always written at the end of `subsched run`, regardless of this setting.
+  # `enabled: true` additionally records run_complete/needs_human events in a local,
+  # deduplicated notification outbox and delivers them to a local file
+  # (.ai/runtime/notifications_delivered.jsonl). No remote webhook/endpoint delivery
+  # exists yet; that is a future, explicit opt-in stage.
+  enabled: false
+  # Bounded retry count before a failed delivery is marked dead instead of retried
+  # forever; delivery failures never affect task state or the queue.
+  max_delivery_attempts: 5
 ```
 
 `subsched run` applies the loaded `workflow` settings, including stage toggles and revision

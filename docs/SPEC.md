@@ -3476,3 +3476,30 @@ CLIとの並行実行時にも競合やデータ破損を完全に防止する�
 ### Prompts (2個)
 1. `triage_task`: `NEEDS_HUMAN` 状態のIssueの調査・修正を案内するプロンプト。
 2. `bootstrap_repo`: 新規リポジトリでの環境評価および初期化を案内するプロンプト。
+
+---
+
+# 78. Run Summary and Local Notification Outbox (#386)
+
+第一段階として、`subsched run` は終了時（通常完了、dry-run、SIGINT中断）に常にrun IDに紐づくローカルMarkdown/JSON
+summary（`.ai/runtime/run_summaries/run-<run_id>.md` / `.json`）を書き込む。内容は
+`subsched metrics` と同じProductivity/Reliability/Capacity指標に加え、
+`NEEDS_HUMAN`状態のIssue番号一覧のみで、raw issue本文やprovider出力、credentialは
+含まない（`redact_sensitive_text`で二重に redaction する）。
+
+`notifications.enabled`（既定`false`）を有効にすると、同じ`run_end`のタイミングで
+`run_complete`イベントと`NEEDS_HUMAN`ごとの`needs_human`イベントを、ローカルな
+`NotificationOutbox`（`.ai/runtime/notifications_outbox.json`）へ記録する。
+outboxは`(run_id, event_type, issue_number)`をキーとして重複を抑止するため、同じ
+runの再処理でも同一イベントは二度以上enqueue/deliverされない。outboxのread/modify/writeと
+ローカル配送先の確認・追記はfile lockで直列化し、delivery attemptはsink呼び出し前に永続化する。
+永続recordはstatus、非負attempt数、event type、issue番号、timezone付き日時、dedup keyの整合性を
+全件検証し、不正なstateは配送も上書きもせずfail closedに拒否する。ローカル配送先はevent keyの
+SHA-256 digestを記録して、sink成功後のoutbox保存失敗・再起動でも同じeventを再追記しない。
+配送先は現時点では
+ローカルファイル（`.ai/runtime/notifications_delivered.jsonl`）のみで、リモートの
+webhook/endpointへの配送は本Issueのスコープ外（次段階でopt-in webhook、endpoint
+allowlist、secret redactionを追加検討する）。配送は
+`notifications.max_delivery_attempts`（既定5）まで再試行し、それでも失敗した
+イベントは`dead`として扱い無限リトライしない。通知生成・配送の失敗は例外として
+`subsched run`の外へ伝播せず、Taskの状態・queueには一切影響しない。

@@ -171,6 +171,64 @@ def _watch_needed(scheduler: Scheduler, *, ci_monitoring: bool) -> bool:
     )
 
 
+def _finalize_run_observability(
+    *,
+    context: Context,
+    cfg: SchedulerConfig,
+    scheduler: Scheduler,
+    structured_logger: StructuredLogger,
+    run_id: str,
+    run_end_data: dict[str, object],
+) -> None:
+    """Emit run_end and best-effort local summary/notifications on every completed
+    invocation path. Observability failures never alter the CLI exit code or task state.
+    """
+    structured_logger.log("run_end", data={"run_id": run_id, **run_end_data})
+    try:
+        from subsched.metrics import calculate_metrics
+        from subsched.notifications import (
+            NotificationEvent,
+            NotificationOutbox,
+            local_file_sink,
+            write_run_summary,
+        )
+
+        needs_human_issues = sorted(
+            task.issue_number
+            for task in scheduler.tasks
+            if task.status == TaskState.NEEDS_HUMAN
+        )
+        write_run_summary(
+            context.store.runtime_dir / "run_summaries",
+            run_id=run_id,
+            metrics=calculate_metrics(scheduler.tasks),
+            needs_human_issues=needs_human_issues,
+        )
+        if cfg.notifications.enabled:
+            outbox = NotificationOutbox(
+                context.store.runtime_dir / "notifications_outbox.json"
+            )
+            outbox.enqueue(NotificationEvent(run_id=run_id, event_type="run_complete"))
+            for issue_number in needs_human_issues:
+                outbox.enqueue(
+                    NotificationEvent(
+                        run_id=run_id,
+                        event_type="needs_human",
+                        issue_number=issue_number,
+                    )
+                )
+            outbox.deliver_pending(
+                local_file_sink(
+                    context.store.runtime_dir / "notifications_delivered.jsonl"
+                ),
+                max_attempts=cfg.notifications.max_delivery_attempts,
+            )
+    except Exception as error:
+        typer.echo(
+            f"Run summary/notification generation failed (non-fatal): {error}", err=True
+        )
+
+
 def _run_watch_loop(
     scheduler: Scheduler,
     *,
@@ -555,7 +613,14 @@ def run(
         typer.echo(f"  #{note_issue}: {note_message}")
 
     if dry_run:
-        structured_logger.log("run_end", data={"run_id": run_id, "additions": additions_count})
+        _finalize_run_observability(
+            context=context,
+            cfg=cfg,
+            scheduler=scheduler,
+            structured_logger=structured_logger,
+            run_id=run_id,
+            run_end_data={"additions": additions_count, "dry_run": True},
+        )
         return
 
     # #189: only instantiate and probe sensors for enabled agents
@@ -603,8 +668,13 @@ def run(
             timeout_seconds=watch_timeout_seconds,
         )
     except KeyboardInterrupt:
-        structured_logger.log(
-            "run_end", data={"run_id": run_id, "interrupted": True}
+        _finalize_run_observability(
+            context=context,
+            cfg=cfg,
+            scheduler=scheduler,
+            structured_logger=structured_logger,
+            run_id=run_id,
+            run_end_data={"interrupted": True},
         )
         typer.echo("\nInterrupted; in-progress task state was saved safely.", err=True)
         raise typer.Exit(130) from None
@@ -624,10 +694,13 @@ def run(
     for name in sorted(counts):
         typer.echo(f"{name:<22} {counts[name]}")
 
-    structured_logger.log(
-        "run_end",
-        data={
-            "run_id": run_id,
+    _finalize_run_observability(
+        context=context,
+        cfg=cfg,
+        scheduler=scheduler,
+        structured_logger=structured_logger,
+        run_id=run_id,
+        run_end_data={
             "waiting_for_capacity": scheduler.is_waiting_for_capacity,
             "watch": watch,
             "watch_timed_out": watch_timed_out,

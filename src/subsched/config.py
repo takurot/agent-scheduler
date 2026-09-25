@@ -237,6 +237,15 @@ class VerificationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class NotificationsConfig:
+    # #386: default disabled -- a per-run local Markdown/JSON summary is always
+    # written, but enqueuing notification-outbox events (for a future opt-in
+    # remote delivery stage) is off by default.
+    enabled: bool = False
+    max_delivery_attempts: int = 5
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowStagesConfig:
     planning: bool = True
     plan_review: bool = True
@@ -285,6 +294,7 @@ class SchedulerConfig:
     verification: VerificationConfig = VerificationConfig()
     workflow: WorkflowConfig = WorkflowConfig()
     isolation: NativeIsolationConfig = NativeIsolationConfig()
+    notifications: NotificationsConfig = NotificationsConfig()
 
 
 ROOT_KEYS = frozenset(
@@ -299,6 +309,7 @@ ROOT_KEYS = frozenset(
         "verification",
         "workflow",
         "isolation",
+        "notifications",
     }
 )
 
@@ -338,6 +349,7 @@ SECTION_KEYS: dict[str, frozenset[str]] = {
     "handoff": frozenset({"continuous"}),
     "verification": frozenset({"commands", "timeout_seconds"}),
     "workflow": frozenset({"mode", "stages", "limits"}),
+    "notifications": frozenset({"enabled", "max_delivery_attempts"}),
 }
 
 
@@ -660,6 +672,14 @@ def _parse_handoff_config(raw: Mapping[str, Any]) -> HandoffConfig:
     return HandoffConfig(continuous=continuous)
 
 
+def _parse_notifications_config(raw: Mapping[str, Any]) -> NotificationsConfig:
+    enabled = _strict_bool(raw.get("enabled", False), "notifications.enabled")
+    max_delivery_attempts = _strict_pos_int(
+        raw.get("max_delivery_attempts", 5), "notifications.max_delivery_attempts"
+    )
+    return NotificationsConfig(enabled=enabled, max_delivery_attempts=max_delivery_attempts)
+
+
 def _parse_verification_config(raw: Mapping[str, Any]) -> VerificationConfig:
     commands_raw = raw.get("commands", ("pytest", "ruff check ."))
     if not isinstance(commands_raw, (list, tuple)):
@@ -830,6 +850,7 @@ def load_config(path: Path) -> SchedulerConfig:
     isolation = _parse_isolation_config(raw.get("isolation", {}))
     if isolation.backend == "container" and execution.concurrency != 1:
         raise ConfigError("container isolation currently requires execution.concurrency: 1")
+    notifications = _parse_notifications_config(raw.get("notifications", {}))
 
     return SchedulerConfig(
         github=github,
@@ -842,6 +863,7 @@ def load_config(path: Path) -> SchedulerConfig:
         verification=verification,
         workflow=workflow,
         isolation=isolation,
+        notifications=notifications,
     )
 
 

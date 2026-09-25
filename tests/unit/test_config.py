@@ -943,3 +943,34 @@ def test_parse_agents_config_effort_error_branches(tmp_path: Path) -> None:
                 "github:\n  repo: o/r\nagents:\n  codex:\n    effort:\n      planning: xhigh\n"
             )
         )
+
+
+def test_notifications_config_defaults_disabled(tmp_path: Path) -> None:
+    path = tmp_path / "cfg.yaml"
+    path.write_text("github:\n  repo: o/r\n", encoding="utf-8")
+
+    config = load_config(path)
+
+    assert config.notifications.enabled is False
+    assert config.notifications.max_delivery_attempts == 5
+
+
+def test_notifications_config_parses_explicit_values(tmp_path: Path) -> None:
+    path = tmp_path / "cfg.yaml"
+    path.write_text(
+        "github:\n  repo: o/r\nnotifications:\n  enabled: true\n  max_delivery_attempts: 3\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.notifications.enabled is True
+    assert config.notifications.max_delivery_attempts == 3
+
+
+def test_notifications_config_rejects_unknown_keys(tmp_path: Path) -> None:
+    path = tmp_path / "cfg.yaml"
+    path.write_text("github:\n  repo: o/r\nnotifications:\n  extra: 1\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=r"unknown notifications keys"):
+        load_config(path)

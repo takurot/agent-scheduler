@@ -140,3 +140,14 @@ workflow:
     plan_review: true
   limits:
     max_plan_revisions: 2
+
+# Optional (#386, defaults shown below apply when `notifications:` is omitted
+# entirely). A local Markdown/JSON run summary (.ai/runtime/run_summaries/run-<run_id>.*)
+# is always written at the end of `subsched run`, independent of this section. Setting
+# `enabled: true` additionally records run_complete/needs_human events in a local,
+# deduplicated notification outbox and delivers them to a local file
+# (.ai/runtime/notifications_delivered.jsonl); no remote webhook/endpoint delivery exists
+# yet -- that is a future, explicit opt-in stage.
+notifications:
+  enabled: false
+  max_delivery_attempts: 5
