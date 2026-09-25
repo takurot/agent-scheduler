@@ -17,6 +17,23 @@ This directory provides reference Dockerfiles for common project languages:
 - [`Dockerfile.worker-rust`](Dockerfile.worker-rust): Debian bookworm base with Node.js, Claude Code/Codex CLIs, `procps`, and full Rust toolchain (`cargo`, `rustc`, `rustfmt`, `clippy`).
 - [`Dockerfile.worker-python`](Dockerfile.worker-python): Debian bookworm base with Node.js, Claude Code/Codex CLIs, `procps`, Python 3, and `uv`.
 
+## Updating pinned CLI and Node.js versions
+
+`Dockerfile.worker-python` and `Dockerfile.worker-rust` pin `@anthropic-ai/claude-code@`,
+`@openai/codex@`, and the NodeSource `setup_22.x` Node.js LTS line so that rebuilding an image
+installs the exact same tool versions every time. To bump a pinned version:
+
+1. Verify the new CLI version against `.assumptions/claude-code.md` or
+   `.assumptions/codex-cli.md` (or record a new controlled observation there) before pinning it.
+2. Update the `npm install -g @anthropic-ai/claude-code@<version> @openai/codex@<version>` line in
+   both `Dockerfile.worker-python` and `Dockerfile.worker-rust`.
+3. When the pinned Node.js line approaches its end-of-life date, switch the NodeSource setup
+   script (e.g. `setup_22.x` -> `setup_24.x`) to the next active or maintenance LTS line in both
+   Dockerfiles; never pin to a Node.js release that has already reached EOL.
+4. Rebuild both images and re-run the verification sanity check (`RUN` line at the end of each
+   Dockerfile) to confirm the pinned versions install cleanly, then re-obtain and reconfigure the
+   immutable `sha256` digest as described below.
+
 ## Building and Pinning Images
 
 ### 1. Build the image
