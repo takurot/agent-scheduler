@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -81,4 +82,6 @@ def test_dashboard_cli_rejects_non_positive_interval(
     )
 
     assert result.exit_code != 0
-    assert "--interval" in result.output
+    clean_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "--interval" in clean_output
+    assert "must be greater than 0" in clean_output
