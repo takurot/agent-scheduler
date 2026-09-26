@@ -21,7 +21,8 @@ _TASK_DETAIL_RE = re.compile(r"^/api/tasks/([^/]+)$")
 
 SECURITY_HEADERS: dict[str, str] = {
     "Content-Security-Policy": (
-        "default-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none';"
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; "
+        "frame-ancestors 'none';"
     ),
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
@@ -83,11 +84,16 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_html(self, status: HTTPStatus, body: bytes) -> None:
+    def _send_html(
+        self, status: HTTPStatus, body: bytes, *, script_nonce: str | None = None
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self._send_security_headers()
+        for name, value in SECURITY_HEADERS.items():
+            if name == "Content-Security-Policy" and script_nonce is not None:
+                value = f"script-src 'self' 'nonce-{script_nonce}'; " + value
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -99,6 +105,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
     def _check_token(self, query: dict[str, list[str]]) -> bool:
         supplied = query.get("token", [""])[0]
+        if not supplied.isascii():
+            return False
         return secrets.compare_digest(supplied, self.server.dashboard_token)
 
     def _load_snapshot(self) -> SchedulerStateSnapshot | None:
@@ -132,10 +140,13 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.OK, detail)
 
     def _serve_index(self) -> None:
-        html = _load_index_html().replace(
-            "__DASHBOARD_INTERVAL_PLACEHOLDER__", repr(self.server.dashboard_interval)
+        nonce = secrets.token_urlsafe(16)
+        html = (
+            _load_index_html()
+            .replace("__DASHBOARD_INTERVAL_PLACEHOLDER__", repr(self.server.dashboard_interval))
+            .replace("__DASHBOARD_NONCE_PLACEHOLDER__", nonce)
         )
-        self._send_html(HTTPStatus.OK, html.encode("utf-8"))
+        self._send_html(HTTPStatus.OK, html.encode("utf-8"), script_nonce=nonce)
 
     def do_GET(self) -> None:
         if not self._check_host():

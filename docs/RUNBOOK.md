@@ -148,6 +148,13 @@ of failing -- run `subsched init` or follow the recovery steps in
 [Troubleshooting & Disaster Recovery](#5-troubleshooting--disaster-recovery) as
 appropriate.
 
+`--host` only accepts `127.0.0.1` and `localhost` as *client-facing* hostnames: the
+server's own `Host` header validation rejects every request whose `Host` header isn't
+one of those two (with or without the port), by design (DNS rebinding protection).
+Passing a non-loopback `--host` (e.g. `0.0.0.0`) still binds the socket there, but
+every request will then be rejected with 400, so it is not a supported way to expose
+the dashboard beyond localhost.
+
 ### Pause, Resume & Task Cancellation
 ```bash
 # Emergency pause

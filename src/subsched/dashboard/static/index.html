@@ -38,10 +38,10 @@
   <div id="detail-body"></div>
 </div>
 
-<script>
+<script nonce="__DASHBOARD_NONCE_PLACEHOLDER__">
 window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
 </script>
-<script>
+<script nonce="__DASHBOARD_NONCE_PLACEHOLDER__">
 (function () {
   var token = new URLSearchParams(location.search).get("token") || "";
   var lastRevision = null;
@@ -79,10 +79,21 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
       return null;
     }
     showBanner(null);
-    document.getElementById("status-summary").innerHTML =
-      "Paused: " + data.paused + "<br>Queue size: " + data.queue_size + "<br>Revision: " + data.revision;
+    setLines(document.getElementById("status-summary"), [
+      "Paused: " + data.paused,
+      "Queue size: " + data.queue_size,
+      "Revision: " + data.revision,
+    ]);
     renderKanban(data.active_tasks || []);
     return data.revision;
+  }
+
+  function setLines(el, lines) {
+    el.textContent = "";
+    lines.forEach(function (line, index) {
+      if (index > 0) { el.appendChild(document.createElement("br")); }
+      el.appendChild(document.createTextNode(line));
+    });
   }
 
   function renderKanban(tasks) {
@@ -113,20 +124,24 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
   function renderCapacity(data) {
     if (data.error) { return; }
     var el = document.getElementById("capacity-summary");
-    el.innerHTML = (data.capacities || [])
-      .map(function (c) {
-        return c.agent + ": " + c.state + (c.used_percentage != null ? " (" + c.used_percentage + "%)" : "");
-      })
-      .join("<br>") || "no capacity data";
+    var lines = (data.capacities || []).map(function (c) {
+      return c.agent + ": " + c.state + (c.used_percentage != null ? " (" + c.used_percentage + "%)" : "");
+    });
+    if (lines.length === 0) {
+      el.textContent = "no capacity data";
+    } else {
+      setLines(el, lines);
+    }
   }
 
   function renderMetrics(data) {
     if (data.error) { return; }
     var m = data.metrics || {};
     var el = document.getElementById("metrics-summary");
-    el.innerHTML =
-      "Attempted: " + (m.productivity ? m.productivity.issues_attempted : "-") +
-      "<br>Implemented: " + (m.productivity ? m.productivity.issues_implemented : "-");
+    setLines(el, [
+      "Attempted: " + (m.productivity ? m.productivity.issues_attempted : "-"),
+      "Implemented: " + (m.productivity ? m.productivity.issues_implemented : "-"),
+    ]);
   }
 
   function loadDetail(issue) {
@@ -134,9 +149,13 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
       var card = document.getElementById("detail-card");
       var body = document.getElementById("detail-body");
       card.style.display = "block";
-      body.innerHTML =
-        "<h3>#" + data.issue_number + " " + data.title + "</h3>" +
-        "<pre>" + (data.handoff || "(no handoff)") + "</pre>";
+      body.textContent = "";
+      var heading = document.createElement("h3");
+      heading.textContent = "#" + data.issue_number + " " + data.title;
+      var pre = document.createElement("pre");
+      pre.textContent = data.handoff || "(no handoff)";
+      body.appendChild(heading);
+      body.appendChild(pre);
     });
   }
 

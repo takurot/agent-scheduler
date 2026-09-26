@@ -101,6 +101,12 @@ def test_wrong_token_is_forbidden(dashboard) -> None:
     assert status == 403
 
 
+def test_non_ascii_token_is_forbidden_not_a_crash(dashboard) -> None:
+    server, _token = dashboard
+    status, _, _ = _get(server, "/api/status", "%C3%A9")
+    assert status == 403
+
+
 def test_forged_host_header_is_rejected(dashboard) -> None:
     server, token = dashboard
     status, _, _ = _get(server, "/api/status", token, host_header="evil.example:80")

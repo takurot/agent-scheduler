@@ -1433,6 +1433,8 @@ def dashboard(
     `http.server.ThreadingHTTPServer`, read-only, bound to `--host` (default
     `127.0.0.1`) with an ephemeral per-run auth token.
     """
+    if interval <= 0:
+        raise typer.BadParameter("must be greater than 0", param_hint="--interval")
     context: Context = ctx.obj
     server = build_dashboard_server(context.repository, host=host, port=port, interval=interval)
     resolved_port = server.server_address[1]

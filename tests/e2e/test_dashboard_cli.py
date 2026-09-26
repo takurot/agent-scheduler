@@ -58,3 +58,27 @@ def test_dashboard_cli_opens_browser_by_default(
     assert result.exit_code == 0, result.output
     assert len(opened_urls) == 1
     assert opened_urls[0].startswith("http://127.0.0.1:")
+
+
+@pytest.mark.parametrize("interval", ["0", "-1"])
+def test_dashboard_cli_rejects_non_positive_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interval: str
+) -> None:
+    _patch_non_blocking_server(monkeypatch)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "--repository",
+            str(tmp_path),
+            "dashboard",
+            "--port",
+            "0",
+            "--no-browser",
+            "--interval",
+            interval,
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "--interval" in result.output
