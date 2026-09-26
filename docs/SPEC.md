@@ -3551,3 +3551,58 @@ allowlist、secret redactionを追加検討する）。配送は
 `notifications.max_delivery_attempts`（既定5）まで再試行し、それでも失敗した
 イベントは`dead`として扱い無限リトライしない。通知生成・配送の失敗は例外として
 `subsched run`の外へ伝播せず、Taskの状態・queueには一切影響しない。
+
+---
+
+# 79. Local Web Dashboard (`subsched dashboard`, #443)
+
+`subsched dashboard` は外部依存を追加せず、Python標準ライブラリの
+`http.server.ThreadingHTTPServer`のみで実装されたローカル・read-onlyのWebダッシュ
+ボードを提供する（`src/subsched/dashboard/`）。フロントエンドはビルド不要の単一
+SPA（`src/subsched/dashboard/static/index.html`、Vanilla JS + インラインCSS）で、
+`importlib.resources.files("subsched.dashboard")`経由でパッケージから読み込まれる。
+
+## アーキテクチャ
+
+- `api.py`: `JsonStateStore.load_snapshot()`から得た`SchedulerStateSnapshot`と
+  `calculate_metrics()`（`metrics.py`）を、HTTPに依存しない純粋関数でJSON化可能な
+  `dict`へ変換する（`build_status`/`build_tasks`/`build_task_detail`/
+  `build_capacity`/`build_metrics`）。文字列を含むすべてのフィールドは
+  `structured_logger.redact_sensitive_text()`で再帰的にredactされる。
+- `server.py`: `DashboardRequestHandler(BaseHTTPRequestHandler)`によるルーティング、
+  Host検証、トークン検証、セキュリティヘッダーの付与のみを担当する。状態の読み取り
+  は`JsonStateStore`を直接参照し、`SchedulerLock`は一切取得しない（ダッシュボードは
+  スケジューラ本体の実行を妨げない）。
+- CLI（`cli.py`の`dashboard`コマンド）は`server.build_dashboard_server()`でポート
+  解決・トークン生成・サーバ構築を行い、`serve_forever()`をフォアグラウンドで実行
+  する。ポート解決とサーバ構築を`serve_forever()`から分離してあるため、テストは
+  ブロッキングせずに直接呼び出せる。
+
+## セキュリティ
+
+- **Host検証**: リクエストの`Host`ヘッダが`127.0.0.1`/`localhost`（実際にbindされ
+  たポート付き・なし両方を許容）以外の場合、`400 Bad Request`を返す。
+- **エフェメラルトークン**: 起動ごとに`secrets.token_urlsafe(16)`で生成し、
+  `secrets.compare_digest`でクエリパラメータ`?token=...`と照合する。一致しない
+  リクエスト（`/`を含む全エンドポイント）は`403 Forbidden`を返す。
+- **Read-Only**: `GET`以外の全メソッド（`POST`/`PUT`/`DELETE`/`PATCH`）は常に
+  `405 Method Not Allowed`を返す。状態変更エンドポイントは存在しない。
+- **パストラバーサル対策**: `GET /api/tasks/{issue}`の`{issue}`は正規表現
+  `^[1-9]\d*$`のみを受理する。ハンドオフファイル読み込み（`api._read_handoff_safely`）
+  はシンボリックリンクを拒否し、`os.path.commonpath`で解決後のパスが
+  `.ai/handoffs`配下であることを検証する。
+- **セキュリティヘッダー**: 全レスポンス（エラー含む）に`Content-Security-Policy`、
+  `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、
+  `Referrer-Policy: no-referrer`、`Cache-Control: no-store`を付与する。
+- **未初期化・破損状態**: `.ai/`が存在しない場合は`{"error": "uninitialized"}`、
+  `StateCorruptionError`（quarantine後の復旧待ち状態）の場合は
+  `{"error": "state_corrupted"}`を、いずれも`500`ではなく`200`のJSONペイロード
+  として返し、SPA側でクラッシュせず案内バナーを描画できるようにする。
+
+## エンドポイント
+
+`GET /?token=...`、`GET /api/status`、`GET /api/tasks`、
+`GET /api/tasks/{issue}`、`GET /api/capacity`、`GET /api/metrics`のみを提供する。
+いずれも`?token=...`必須。クライアントはSSEではなく軽量ポーリング
+（既定2秒、`--interval`で変更可）で`revision`の変化のみを監視し、変化した場合に
+限り再描画する。

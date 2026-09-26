@@ -200,6 +200,10 @@ subsched maintenance --dry-run --json
 
 # Archive only candidates that still pass every safety check
 subsched maintenance --apply
+
+# Local, read-only web dashboard (status, kanban, capacity, metrics, task detail)
+subsched dashboard
+subsched dashboard --no-browser --port 9000
 ```
 
 Every `subsched run` invocation also writes a local per-run summary (Markdown and
@@ -857,6 +861,7 @@ See this repository's own [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) 
 | `subsched explain <id>` | Explain why an issue is or is not dispatchable without modifying state or making paid probes (`--json`) |
 | `subsched mcp` | Run subsched as an MCP server over stdio (`agent-scheduler[mcp]`) |
 | `subsched dispatch-status RUN_ID --json` | Read the persistent status of one detached MCP dispatch |
+| `subsched dashboard` | Serve a local, read-only web dashboard (status, kanban, capacity, metrics, task detail) over stdlib `http.server`, bound to `127.0.0.1` by default with an ephemeral auth token (`--port`, `--host`, `--no-browser`, `--interval`) |
 
 ---
 
