@@ -124,6 +124,37 @@ uv run subsched metrics --json
 uv run subsched metrics --report run_report.md
 ```
 
+### Local Web Dashboard
+
+```bash
+# Start the dashboard and open it in a browser (default: http://127.0.0.1:8080)
+uv run subsched dashboard
+
+# Start without opening a browser, on a specific port, with a slower poll interval
+uv run subsched dashboard --no-browser --port 9000 --interval 5
+```
+
+The dashboard is read-only (no state-changing endpoints exist) and is implemented
+entirely with the Python standard library (`http.server.ThreadingHTTPServer`) -- no
+extra dependencies are installed. It binds to `127.0.0.1` by default and requires the
+ephemeral `?token=...` printed to the console on startup; requests with a missing or
+incorrect token, or a forged `Host` header, are rejected. If the requested `--port` is
+already in use, the next free port is used automatically. It never acquires the
+scheduler's lock, so it is always safe to run alongside `subsched run`.
+
+If `.ai/` has not been initialized yet, or the scheduler state was quarantined after
+corruption (`StateCorruptionError`), the dashboard shows an in-browser banner instead
+of failing -- run `subsched init` or follow the recovery steps in
+[Troubleshooting & Disaster Recovery](#5-troubleshooting--disaster-recovery) as
+appropriate.
+
+`--host` only accepts `127.0.0.1` and `localhost` as *client-facing* hostnames: the
+server's own `Host` header validation rejects every request whose `Host` header isn't
+one of those two (with or without the port), by design (DNS rebinding protection).
+Passing a non-loopback `--host` (e.g. `0.0.0.0`) still binds the socket there, but
+every request will then be rejected with 400, so it is not a supported way to expose
+the dashboard beyond localhost.
+
 ### Pause, Resume & Task Cancellation
 ```bash
 # Emergency pause

@@ -4,6 +4,7 @@ import functools
 import json
 import secrets
 import time
+import webbrowser
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -24,6 +25,7 @@ from subsched.config import (
     parse_duration,
     validate_repo,
 )
+from subsched.dashboard.server import build_dashboard_server
 from subsched.dispatch_runs import DispatchRunStore
 from subsched.explain import explain_issue
 from subsched.github.checks import fetch_pr_checks
@@ -1411,3 +1413,39 @@ def metrics(
         if not tasks:
             typer.echo("No tasks recorded yet. Run 'subsched run' to discover and execute tasks.\n")
         typer.echo(report_text)
+
+
+@app.command()
+def dashboard(
+    ctx: typer.Context,
+    port: Annotated[int, typer.Option(help="Port to listen on")] = 8080,
+    host: Annotated[str, typer.Option(help="Host to bind")] = "127.0.0.1",
+    no_browser: Annotated[
+        bool, typer.Option("--no-browser", help="Do not open a browser automatically")
+    ] = False,
+    interval: Annotated[
+        float, typer.Option(help="Client-side polling interval in seconds")
+    ] = 2.0,
+) -> None:
+    """Serve a local, read-only web dashboard for scheduler status.
+
+    Zero external dependencies: serves a single-page app over stdlib
+    `http.server.ThreadingHTTPServer`, read-only, bound to `--host` (default
+    `127.0.0.1`) with an ephemeral per-run auth token.
+    """
+    if interval <= 0:
+        raise typer.BadParameter("must be greater than 0", param_hint="--interval")
+    context: Context = ctx.obj
+    server = build_dashboard_server(context.repository, host=host, port=port, interval=interval)
+    resolved_port = server.server_address[1]
+    url = f"http://{host}:{resolved_port}/?token={server.dashboard_token}"
+    typer.echo(f"Dashboard listening at {url}")
+    if not no_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+        server.server_close()

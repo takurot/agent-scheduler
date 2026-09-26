@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>subsched dashboard</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 1.5rem; background: #14161a; color: #e6e6e6; }
+  h1 { font-size: 1.3rem; margin-bottom: 0.25rem; }
+  .banner { background: #7a1f1f; padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem; display: none; }
+  .banner.show { display: block; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+  .card { background: #1f232a; border-radius: 8px; padding: 1rem; }
+  .card h2 { font-size: 0.9rem; text-transform: uppercase; opacity: 0.7; margin: 0 0 0.5rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid #2c313a; }
+  .kanban { display: flex; gap: 0.75rem; overflow-x: auto; }
+  .column { background: #1f232a; border-radius: 8px; padding: 0.75rem; min-width: 180px; }
+  .column h3 { font-size: 0.8rem; margin: 0 0 0.5rem; opacity: 0.8; }
+  .task-chip { background: #2c313a; border-radius: 4px; padding: 0.3rem 0.5rem; margin-bottom: 0.4rem; font-size: 0.8rem; cursor: pointer; }
+  pre { white-space: pre-wrap; word-break: break-word; font-size: 0.8rem; background: #14161a; padding: 0.75rem; border-radius: 6px; }
+</style>
+</head>
+<body>
+<h1>subsched dashboard</h1>
+<div id="banner" class="banner"></div>
+<div class="grid">
+  <div class="card"><h2>Status</h2><div id="status-summary">loading...</div></div>
+  <div class="card"><h2>Capacity</h2><div id="capacity-summary">loading...</div></div>
+  <div class="card"><h2>Metrics</h2><div id="metrics-summary">loading...</div></div>
+</div>
+<div class="card">
+  <h2>Kanban</h2>
+  <div id="kanban" class="kanban"></div>
+</div>
+<div class="card" id="detail-card" style="display:none; margin-top: 1rem;">
+  <h2>Task Detail</h2>
+  <div id="detail-body"></div>
+</div>
+
+<script nonce="__DASHBOARD_NONCE_PLACEHOLDER__">
+window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
+</script>
+<script nonce="__DASHBOARD_NONCE_PLACEHOLDER__">
+(function () {
+  var token = new URLSearchParams(location.search).get("token") || "";
+  var lastRevision = null;
+
+  function withToken(path) {
+    var sep = path.indexOf("?") === -1 ? "?" : "&";
+    return path + sep + "token=" + encodeURIComponent(token);
+  }
+
+  function fetchJson(path) {
+    return fetch(withToken(path)).then(function (res) { return res.json(); });
+  }
+
+  function showBanner(message) {
+    var el = document.getElementById("banner");
+    if (!message) {
+      el.classList.remove("show");
+      el.textContent = "";
+      return;
+    }
+    el.textContent = message;
+    el.classList.add("show");
+  }
+
+  function renderStatus(data) {
+    if (data.error === "uninitialized") {
+      showBanner("Repository is not initialized (.ai/ missing). Run `subsched init` first.");
+      return null;
+    }
+    if (data.error === "state_corrupted") {
+      showBanner(
+        "Scheduler state was quarantined after corruption. Restore a verified backup and " +
+          "run recovery before continuing."
+      );
+      return null;
+    }
+    showBanner(null);
+    setLines(document.getElementById("status-summary"), [
+      "Paused: " + data.paused,
+      "Queue size: " + data.queue_size,
+      "Revision: " + data.revision,
+    ]);
+    renderKanban(data.active_tasks || []);
+    return data.revision;
+  }
+
+  function setLines(el, lines) {
+    el.textContent = "";
+    lines.forEach(function (line, index) {
+      if (index > 0) { el.appendChild(document.createElement("br")); }
+      el.appendChild(document.createTextNode(line));
+    });
+  }
+
+  function renderKanban(tasks) {
+    var byStatus = {};
+    tasks.forEach(function (t) {
+      byStatus[t.status] = byStatus[t.status] || [];
+      byStatus[t.status].push(t);
+    });
+    var container = document.getElementById("kanban");
+    container.innerHTML = "";
+    Object.keys(byStatus).sort().forEach(function (status) {
+      var column = document.createElement("div");
+      column.className = "column";
+      var heading = document.createElement("h3");
+      heading.textContent = status + " (" + byStatus[status].length + ")";
+      column.appendChild(heading);
+      byStatus[status].forEach(function (task) {
+        var chip = document.createElement("div");
+        chip.className = "task-chip";
+        chip.textContent = "#" + task.issue_number + " " + task.title;
+        chip.onclick = function () { loadDetail(task.issue_number); };
+        column.appendChild(chip);
+      });
+      container.appendChild(column);
+    });
+  }
+
+  function renderCapacity(data) {
+    if (data.error) { return; }
+    var el = document.getElementById("capacity-summary");
+    var lines = (data.capacities || []).map(function (c) {
+      return c.agent + ": " + c.state + (c.used_percentage != null ? " (" + c.used_percentage + "%)" : "");
+    });
+    if (lines.length === 0) {
+      el.textContent = "no capacity data";
+    } else {
+      setLines(el, lines);
+    }
+  }
+
+  function renderMetrics(data) {
+    if (data.error) { return; }
+    var m = data.metrics || {};
+    var el = document.getElementById("metrics-summary");
+    setLines(el, [
+      "Attempted: " + (m.productivity ? m.productivity.issues_attempted : "-"),
+      "Implemented: " + (m.productivity ? m.productivity.issues_implemented : "-"),
+    ]);
+  }
+
+  function loadDetail(issue) {
+    fetchJson("/api/tasks/" + encodeURIComponent(issue)).then(function (data) {
+      var card = document.getElementById("detail-card");
+      var body = document.getElementById("detail-body");
+      card.style.display = "block";
+      body.textContent = "";
+      var heading = document.createElement("h3");
+      heading.textContent = "#" + data.issue_number + " " + data.title;
+      var pre = document.createElement("pre");
+      pre.textContent = data.handoff || "(no handoff)";
+      body.appendChild(heading);
+      body.appendChild(pre);
+    });
+  }
+
+  function poll() {
+    fetchJson("/api/status").then(function (data) {
+      var revision = renderStatus(data);
+      if (revision !== null && revision !== lastRevision) {
+        lastRevision = revision;
+        fetchJson("/api/capacity").then(renderCapacity);
+        fetchJson("/api/metrics").then(renderMetrics);
+      }
+    });
+  }
+
+  poll();
+  setInterval(poll, (window.__DASHBOARD_INTERVAL__ || 2) * 1000);
+})();
+</script>
+</body>
+</html>
