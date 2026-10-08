@@ -247,9 +247,9 @@ def test_parse_codex_cli_metadata_fails_closed_when_approval_flag_unknown() -> N
     [
         ("session-limit.jsonl", AgentResultKind.CAPACITY_SESSION, "codex session capacity"),
         ("weekly-limit.jsonl", AgentResultKind.CAPACITY_WEEKLY, "codex weekly capacity"),
-        ("auth-error.jsonl", AgentResultKind.FAILURE, "codex authentication unavailable"),
-        ("billing-error.jsonl", AgentResultKind.FAILURE, "codex billing mode unsafe"),
-        ("approval-error.jsonl", AgentResultKind.FAILURE, "codex approval required"),
+        ("auth-error.jsonl", AgentResultKind.AUTH_ERROR, "codex authentication unavailable"),
+        ("billing-error.jsonl", AgentResultKind.BILLING_ERROR, "codex billing mode unsafe"),
+        ("approval-error.jsonl", AgentResultKind.PERMISSION_DENIED, "codex approval required"),
     ],
 )
 def test_failure_fixtures_are_classified(fixture: str, kind: AgentResultKind, output: str) -> None:
@@ -259,12 +259,34 @@ def test_failure_fixtures_are_classified(fixture: str, kind: AgentResultKind, ou
     assert result.output == output
 
 
-def test_capacity_without_valid_reset_fails_closed() -> None:
+def test_capacity_without_valid_reset_needs_human() -> None:
     result = parse_codex_jsonl(_fixture("capacity-reset-unknown.jsonl"), returncode=1)
 
-    assert result.kind is AgentResultKind.FAILURE
+    assert result.kind is AgentResultKind.NEEDS_HUMAN
+    assert result.reason_code == "external_prerequisite"
     assert result.reset_at is None
-    assert result.output == "codex capacity reset unknown"
+    assert result.output == "codex capacity reset unknown; verify provider capacity before resuming"
+
+
+@pytest.mark.parametrize("event_type", ["error", "turn.failed"])
+@pytest.mark.parametrize("reset", [None, "invalid", "2026-10-08T12:00:00", 123, {}])
+@pytest.mark.parametrize("message", ["Rate limit reached", "Weekly usage limit reached"])
+def test_capacity_with_untrusted_reset_needs_human(
+    event_type: str, message: str, reset: Any
+) -> None:
+    error = {"message": message, "reset_at": reset}
+    payload = json.dumps(
+        {"type": event_type, **error} if event_type == "error" else {
+            "type": event_type, "error": error
+        }
+    )
+
+    result = parse_codex_jsonl(payload, returncode=1)
+
+    assert result.kind is AgentResultKind.NEEDS_HUMAN
+    assert result.reason_code == "external_prerequisite"
+    assert result.reset_at is None
+    assert result.output == "codex capacity reset unknown; verify provider capacity before resuming"
 
 
 @pytest.mark.parametrize(
@@ -923,7 +945,7 @@ def test_codex_jsonl_additional_malformed_and_failure_branches() -> None:
     # failure with approval required
     approval_err = json.dumps({"type": "error", "message": "approval required by user"})
     res_approval = parse_codex_jsonl(approval_err, returncode=0)
-    assert res_approval.kind is AgentResultKind.FAILURE
+    assert res_approval.kind is AgentResultKind.PERMISSION_DENIED
     assert "approval required" in res_approval.output
 
     # failure with generic/unknown error
@@ -1502,3 +1524,27 @@ def test_parse_codex_jsonl_plan_review_markdown_code_fence() -> None:
     assert res.plan_verdict == PlanVerdict(
         verdict="APPROVE", summary="Implementation plan looks solid", findings=()
     )
+
+
+@pytest.mark.parametrize("event_type", ["error", "turn.failed"])
+@pytest.mark.parametrize("reset", [None, "invalid", "2026-10-09T12:00:00Z"])
+@pytest.mark.parametrize(
+    ("message", "kind"),
+    [
+        ("Authentication required after usage limit", AgentResultKind.AUTH_ERROR),
+        ("Billing payment required after usage limit", AgentResultKind.BILLING_ERROR),
+        ("Approval required after rate limit", AgentResultKind.PERMISSION_DENIED),
+        ("Authentication billing approval after usage limit", AgentResultKind.AUTH_ERROR),
+        ("Billing approval after rate limit", AgentResultKind.BILLING_ERROR),
+    ],
+)
+def test_safety_failure_precedes_capacity(
+    event_type: str, reset: Any, message: str, kind: AgentResultKind
+) -> None:
+    error = {"message": message, "reset_at": reset}
+    payload = {"type": event_type, **error} if event_type == "error" else {
+        "type": event_type, "error": error
+    }
+    result = parse_codex_jsonl(json.dumps(payload), returncode=1)
+    assert result.kind is kind
+    assert result.reset_at is None

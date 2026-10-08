@@ -477,10 +477,20 @@ def _parse_final_message(message: str) -> AgentResult:
 
 def _classify_failure(error: dict[str, Any]) -> AgentResult:
     message = str(error["message"]).casefold()
+    if any(term in message for term in ("authentication", "unauthorized", "login")):
+        return AgentResult(AgentResultKind.AUTH_ERROR, output="codex authentication unavailable")
+    if any(term in message for term in ("billing", "payment", "credits")):
+        return AgentResult(AgentResultKind.BILLING_ERROR, output="codex billing mode unsafe")
+    if "approval" in message:
+        return AgentResult(AgentResultKind.PERMISSION_DENIED, output="codex approval required")
     if "rate limit" in message or "usage limit" in message:
         reset_at = _parse_reset_at(error.get("reset_at"))
         if reset_at is None:
-            return AgentResult(AgentResultKind.FAILURE, output="codex capacity reset unknown")
+            return AgentResult(
+                AgentResultKind.NEEDS_HUMAN,
+                reason_code="external_prerequisite",
+                output="codex capacity reset unknown; verify provider capacity before resuming",
+            )
         if "weekly" in message:
             return AgentResult(
                 AgentResultKind.CAPACITY_WEEKLY,
@@ -492,12 +502,6 @@ def _classify_failure(error: dict[str, Any]) -> AgentResult:
             reset_at=reset_at,
             output="codex session capacity",
         )
-    if any(term in message for term in ("authentication", "unauthorized", "login")):
-        return AgentResult(AgentResultKind.FAILURE, output="codex authentication unavailable")
-    if any(term in message for term in ("billing", "payment", "credits")):
-        return AgentResult(AgentResultKind.FAILURE, output="codex billing mode unsafe")
-    if "approval" in message:
-        return AgentResult(AgentResultKind.FAILURE, output="codex approval required")
     return AgentResult(AgentResultKind.FAILURE, output="codex execution failed")
 
 
