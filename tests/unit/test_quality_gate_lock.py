@@ -9,6 +9,7 @@ from pathlib import Path
 
 import jwt
 import pytest
+from packaging.requirements import Requirement
 from packaging.version import Version
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "quality_gate.sh"
@@ -23,6 +24,35 @@ def test_lock_excludes_vulnerable_dependency_versions(package: str, minimum: str
 
     assert versions, f"Expected {package} in the MCP/dev dependency graph"
     assert all(Version(version) >= Version(minimum) for version in versions)
+
+
+@pytest.mark.parametrize(
+    "group,package,vulnerable,minimum",
+    [
+        ("mcp", "pyjwt", "2.13.0", "2.15.1"),
+        ("dev", "pyjwt", "2.13.0", "2.15.1"),
+        ("dev", "urllib3", "2.7.0", "2.8.0"),
+    ],
+)
+def test_manifest_excludes_vulnerable_versions_without_lock(
+    group: str, package: str, vulnerable: str, minimum: str
+) -> None:
+    """Non-lock installs must enforce the same dependency security floors."""
+    with (SCRIPT.parents[1] / "pyproject.toml").open("rb") as manifest_file:
+        manifest = tomllib.load(manifest_file)
+    dependencies = (
+        manifest["project"]["optional-dependencies"][group]
+        if group == "mcp"
+        else manifest["dependency-groups"][group]
+    )
+    requirements = [Requirement(dependency) for dependency in dependencies]
+    matching = [requirement for requirement in requirements if requirement.name.lower() == package]
+
+    assert matching, f"Expected a direct security constraint for {package} in {group}"
+    assert all(vulnerable not in requirement.specifier for requirement in matching)
+    assert all(minimum in requirement.specifier for requirement in matching)
+    if package == "pyjwt":
+        assert all("crypto" in requirement.extras for requirement in matching)
 
 
 def test_pyjwt_preserves_claim_checks_when_options_are_reused() -> None:

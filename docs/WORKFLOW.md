@@ -230,13 +230,18 @@ uv run --frozen pip-audit
 ### Issue #449: frozen dependency security review (2026-10-08)
 
 The lock updates only PyJWT 2.13.0 → 2.15.1 and urllib3 2.7.0 → 2.8.0.
-MCP 2.2.0 and the optional `mcp` extra remain available. No advisory is suppressed;
+MCP 2.2.0 and the optional `mcp` extra remain available. The extra and dev group
+also require `PyJWT[crypto]>=2.15.1,<3`; dev requires `urllib3>=2.8.0,<3`.
+These direct security floors protect installs that do not consume `uv.lock`,
+including `pip install agent-scheduler[mcp]`, from retaining vulnerable versions.
+No advisory is suppressed;
 local, CI, and release gates still require `uv run --frozen pip-audit`.
 
 Dependency paths, verified with `uv tree --invert --package <name>`:
 
-- PyJWT: optional `agent-scheduler[mcp]` and dev group → `mcp` → `pyjwt[crypto]`.
-- urllib3: dev group → `pip-audit` → `requests` → `urllib3`, also through
+- PyJWT: optional `agent-scheduler[mcp]` and dev group → `pyjwt[crypto]`, also
+  through `mcp` → `pyjwt[crypto]`.
+- urllib3: dev group → `urllib3`, also through `pip-audit` → `requests` → `urllib3` and
   `pip-audit` → `cachecontrol` → `requests`.
 
 Advisory ranges and impact were checked against the linked records and the
@@ -258,6 +263,7 @@ Advisory ranges and impact were checked against the linked records and the
 | [PYSEC-2026-4150](https://osv.dev/vulnerability/PYSEC-2026-4150) | BOM-prefixed public-key input bypasses HMAC key rejection | PyJWT 2.14.0 |
 | [PYSEC-2026-4151](https://osv.dev/vulnerability/PYSEC-2026-4151) | Public JWK containers accepted as HMAC secrets | PyJWT 2.14.0 |
 | [PYSEC-2026-4152](https://osv.dev/vulnerability/PYSEC-2026-4152) | Malformed RSA JWK aborts an entire key set | PyJWT 2.14.0 |
+| [CVE-2026-102275 / GHSA-x33g-cr3x-6449](https://github.com/jpadilla/pyjwt/security/advisories/GHSA-x33g-cr3x-6449) | Inconsistent OKP public/private JWKs confuse key identity in affected DPoP integrations | PyJWT 2.15.0 |
 | [PYSEC-2026-4175](https://osv.dev/vulnerability/PYSEC-2026-4175) | HTTPS proxy TLS policy is ignored or overridden | urllib3 2.8.0 |
 | [PYSEC-2026-4176](https://osv.dev/vulnerability/PYSEC-2026-4176) | Chunked Deflate streaming loops without progress | urllib3 2.8.0 |
 | [PYSEC-2026-4177](https://osv.dev/vulnerability/PYSEC-2026-4177) | Streaming buffers an unbounded chunk-size line | urllib3 2.8.0 |
@@ -269,7 +275,7 @@ audit tooling itself makes HTTP requests. The established repository impact is
 the failed dependency gate, with vulnerable packages present in dev/MCP environments.
 Updating the lock removes the affected versions without changing runtime safety gates.
 Both replacement wheels support Python 3.12/3.13 and have compatible active dependency
-metadata; no additional resolver constraint is required for the frozen environment.
+metadata. The explicit manifest floors also cover non-lock MCP/dev installs.
 
 PYSEC-2026-4146 still lists no patched version in the
 [upstream advisory](https://github.com/jpadilla/pyjwt/security/advisories/GHSA-gvp8-978c-rx2q),
