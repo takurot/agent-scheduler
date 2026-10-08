@@ -78,7 +78,6 @@ _ALLOWED_COOLDOWNS = frozenset(
         CapacityState.RATE_LIMITED_TEMPORARY,
         CapacityState.AUTH_ERROR,
         CapacityState.DISABLED_BILLING,
-        CapacityState.UNKNOWN,
     }
 )
 
@@ -1268,7 +1267,6 @@ class Scheduler:
                 if existing_cap is None or existing_cap.state not in {
                     CapacityState.AUTH_ERROR,
                     CapacityState.DISABLED_BILLING,
-                    CapacityState.UNKNOWN,
                 }:
                     self._cooldowns.pop(agent, None)
         self._effective_capacities(supplied, current)
@@ -1651,7 +1649,6 @@ class Scheduler:
             AgentResultKind.AUTH_ERROR,
             AgentResultKind.BILLING_ERROR,
             AgentResultKind.UNKNOWN_BILLING,
-            AgentResultKind.UNKNOWN,
             AgentResultKind.PERMISSION_DENIED,
             AgentResultKind.TIMEOUT,
             AgentResultKind.PROCESS_CLEANUP_FAILED,
@@ -2176,14 +2173,12 @@ class Scheduler:
             AgentResultKind.AUTH_ERROR,
             AgentResultKind.BILLING_ERROR,
             AgentResultKind.UNKNOWN_BILLING,
-            AgentResultKind.UNKNOWN,
         }:
-            target_state = {
-                AgentResultKind.AUTH_ERROR: CapacityState.AUTH_ERROR,
-                AgentResultKind.BILLING_ERROR: CapacityState.DISABLED_BILLING,
-                AgentResultKind.UNKNOWN_BILLING: CapacityState.DISABLED_BILLING,
-                AgentResultKind.UNKNOWN: CapacityState.UNKNOWN,
-            }[result.kind]
+            target_state = (
+                CapacityState.AUTH_ERROR
+                if result.kind is AgentResultKind.AUTH_ERROR
+                else CapacityState.DISABLED_BILLING
+            )
             from subsched.capacity.base import BLOCKER_SEVERITY
 
             existing_cap = self._cooldowns.get(agent)
@@ -2223,11 +2218,9 @@ class Scheduler:
                     },
                 )
             else:
-                error_label = {
-                    CapacityState.AUTH_ERROR: "auth error",
-                    CapacityState.DISABLED_BILLING: "billing error",
-                    CapacityState.UNKNOWN: "provider state unknown",
-                }[target_state]
+                error_label = (
+                    "auth error" if result.kind is AgentResultKind.AUTH_ERROR else "billing error"
+                )
                 reason = f"{error_label} for agent '{agent}': no alternative agent available"
                 final = task.transition(
                     TaskState.NEEDS_HUMAN,
