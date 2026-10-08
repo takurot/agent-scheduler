@@ -360,8 +360,10 @@ directory handles and require a regular UTF-8 file. Invalid paths are rejected
 before commit inspection, without repairing or deleting task state or handoffs.
 Commit inspection reads `refs/heads/subsched/issue-N` in the trusted repository,
 never Git metadata from the task worktree; a missing ref yields no commits.
-Task details, parsed/raw handoffs, and commit messages use the existing secret
-redaction policy before reaching MCP clients.
+Task details (including queue resources and verbose status summaries), parsed/raw
+handoffs, and commit messages use the existing secret redaction policy before
+reaching MCP clients. Platforms without no-follow directory-descriptor reads fail
+closed with `McpToolError` before reading handoffs or inspecting commits.
 
 - **Resources**: `subsched://queue`, `subsched://capacities`, `subsched://tasks/{issue}/handoff`, `subsched://guidelines`.
 - **Prompts**: `triage_task` (diagnose and remediate `NEEDS_HUMAN` issues), `bootstrap_repo` (scaffold repository configuration).

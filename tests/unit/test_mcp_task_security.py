@@ -10,7 +10,13 @@ from typing import Any
 
 import pytest
 
-from subsched.mcp_server import McpToolError, get_task_handoff_resource, inspect_task
+from subsched.mcp_server import (
+    McpToolError,
+    get_queue_resource,
+    get_status,
+    get_task_handoff_resource,
+    inspect_task,
+)
 from subsched.models import Task, TaskState
 from subsched.storage import JsonStateStore
 
@@ -261,3 +267,72 @@ def test_rejects_malformed_persisted_worktree(
     with pytest.raises(McpToolError):
         reader(1, str(repo))
     assert store.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("output", ["queue", "status"])
+def test_queue_and_status_redact_task_fields_without_mutation(
+    tmp_path: Path, output: str,
+) -> None:
+    repo = tmp_path / "repo"
+    store = save_task(repo, repo / ".ai" / "worktrees" / "issue-1")
+    payload = json.loads(store.path.read_text())
+    payload["tasks"][0].update(current_agent=SECRET, needs_human_reason=SECRET)
+    store.path.write_text(json.dumps(payload))
+    before = store.path.read_bytes()
+
+    result = get_queue_resource(str(repo)) if output == "queue" else get_status(str(repo), True)
+
+    assert SECRET not in json.dumps(result)
+    assert result["tasks"][0]["title"] == "[REDACTED]"
+    assert result["tasks"][0]["current_agent"] == "[REDACTED]"
+    assert result["tasks"][0]["needs_human_reason"] == "[REDACTED]"
+    assert result["tasks"][0]["issue_number"] == 1
+    assert store.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("reader", [inspect_task, get_task_handoff_resource])
+@pytest.mark.parametrize("capability", ["O_DIRECTORY", "O_NOFOLLOW", "dir_fd", "runtime"])
+def test_unsupported_safe_read_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    reader: Callable[[int, str], Any], capability: str,
+) -> None:
+    import os
+
+    repo = tmp_path / "repo"
+    worktree = repo / ".ai" / "worktrees" / "issue-1"
+    store = save_task(repo, worktree)
+    handoff = write_handoff(worktree)
+    before = store.path.read_bytes()
+    handoff_before = handoff.read_bytes()
+    real_run = subprocess.run
+    real_open = os.open
+    logs = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "log" in argv:
+            logs.append(argv)
+        return real_run(argv, **kwargs)  # type: ignore[arg-type]
+
+    def open_file(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if "dir_fd" in kwargs:
+            raise NotImplementedError("synthetic unsupported dir_fd")
+        return real_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+
+    def forbid_read(*args: object, **kwargs: object) -> None:
+        pytest.fail("unsupported platform must not read the handoff")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("subsched.mcp_server.subprocess.run", run)
+        patch.setattr("subsched.mcp_server.os.fdopen", forbid_read)
+        if capability in {"O_DIRECTORY", "O_NOFOLLOW"}:
+            patch.delattr(os, capability)
+        elif capability == "dir_fd":
+            patch.setattr("subsched.mcp_server._OPEN_SUPPORTS_DIR_FD", False, raising=False)
+        else:
+            patch.setattr("subsched.mcp_server.os.open", open_file)
+        with pytest.raises(McpToolError, match="safe handoff reads are unsupported"):
+            reader(1, str(repo))
+    assert not logs
+    assert not caplog.records
+    assert store.path.read_bytes() == before
+    assert handoff.read_bytes() == handoff_before

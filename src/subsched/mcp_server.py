@@ -49,6 +49,9 @@ from subsched.storage import (
 )
 from subsched.structured_logger import _redact_data, redact_sensitive_text
 
+# Capture native capability before tests or instrumentation wrap os.open.
+_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+
 GUIDELINES = """# subsched Agent Guidelines
 
 ## TDD Workflow
@@ -146,6 +149,10 @@ def _read_task_handoff(store: JsonStateStore, task: Task) -> str | None:
         or ".." in Path(task.worktree).parts
     ):
         raise McpToolError("task worktree is outside its managed location")
+    if not _OPEN_SUPPORTS_DIR_FD or any(
+        not hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")
+    ):
+        raise McpToolError("safe handoff reads are unsupported on this platform")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
         with ExitStack() as handles:
@@ -169,12 +176,14 @@ def _read_task_handoff(store: JsonStateStore, task: Task) -> str | None:
                 if not stat.S_ISREG(os.fstat(handoff.fileno()).st_mode):
                     raise McpToolError("unsafe task handoff: expected a regular file")
                 return redact_sensitive_text(handoff.read())
+    except NotImplementedError as error:
+        raise McpToolError("safe handoff reads are unsupported on this platform") from error
     except (OSError, UnicodeError) as error:
         raise McpToolError("unsafe task handoff or worktree path") from error
 
 
 def _task_to_summary(task: Task) -> dict[str, Any]:
-    return {
+    result: dict[str, Any] = _redact_data({
         "issue_number": task.issue_number,
         "title": task.title,
         "status": task.status.value,
@@ -182,7 +191,8 @@ def _task_to_summary(task: Task) -> dict[str, Any]:
         "pr": task.pr,
         "needs_human_reason": task.needs_human_reason,
         "needs_human_reason_code": task.needs_human_reason_code,
-    }
+    })
+    return result
 
 
 def get_status(repository_path: str | None = None, verbose: bool = False) -> dict[str, Any]:
@@ -650,7 +660,7 @@ def get_queue_resource(repository_path: str | None = None) -> dict[str, Any]:
         paused = store.is_paused()
     except StateCorruptionError as error:
         raise McpToolError(f"scheduler state error: {error}") from error
-    return {"paused": paused, "tasks": [task.to_dict() for task in tasks]}
+    return {"paused": paused, "tasks": [_redact_data(task.to_dict()) for task in tasks]}
 
 
 def get_capacities_resource(repository_path: str | None = None) -> dict[str, Any]:
