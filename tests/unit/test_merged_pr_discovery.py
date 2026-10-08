@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from subsched.github.pull_requests import (
     MergedPrCheckResult,
     check_merged_pr_for_issue,
 )
-from subsched.models import Issue, TaskState
+from subsched.models import Issue, Task, TaskState
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler, ScriptedWorker
 from subsched.storage import JsonStateStore
@@ -167,3 +168,55 @@ def test_discover_mixed_batch_handles_each_issue_independently(tmp_path: Path) -
     assert by_issue[102].status is TaskState.NEEDS_HUMAN
     assert by_issue[103].status is TaskState.READY
     assert len(scheduler.discovery_notes) == 2
+
+
+@pytest.mark.parametrize("payload", [{}, None, "unknown", 123, True, False])
+def test_merged_pr_check_rejects_unknown_top_level_schema(
+    monkeypatch: pytest.MonkeyPatch, payload: object
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            ["gh"], 0, stdout=json.dumps(payload), stderr=""
+        ),
+    )
+    result = check_merged_pr_for_issue("owner/repo", 129)
+    assert result.kind is MergedPrCheckKind.AMBIGUOUS
+    assert "invalid gh output structure" in result.reason
+
+
+def test_merged_pr_check_empty_list_is_legitimate_no_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            ["gh"], 0, stdout="[]", stderr=""
+        ),
+    )
+    assert check_merged_pr_for_issue("owner/repo", 129).kind is MergedPrCheckKind.NONE
+
+
+@pytest.mark.parametrize("status", [TaskState.PR_REVIEW, TaskState.REVISING])
+@pytest.mark.parametrize("selected", [True, False])
+@pytest.mark.parametrize("has_checker", [True, False])
+def test_review_pending_tasks_remain_dispatchable_without_merged_match(
+    tmp_path: Path, status: TaskState, selected: bool, has_checker: bool
+) -> None:
+    calls: list[int] = []
+
+    def check(number: int) -> MergedPrCheckResult:
+        calls.append(number)
+        return MergedPrCheckResult(MergedPrCheckKind.NONE)
+
+    scheduler = _scheduler(tmp_path, check if has_checker else None)
+    issue = Issue(number=129, title="Normal review")
+    task = replace(Task.from_issue(issue), status=status, pr=131, attempt=2, review_cycles=1)
+    scheduler.store.save_tasks((task,))
+    scheduler = _scheduler(tmp_path, check if has_checker else None)
+    scheduler.discover((issue,) if selected else (), snapshot_complete=False)
+    assert calls == ([129] if has_checker else [])
+    assert scheduler.queue.ready() == (task,)
+    assert scheduler.discovery_notes == ()

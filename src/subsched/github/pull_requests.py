@@ -485,7 +485,15 @@ def check_merged_pr_for_issue(
                 "PR (unparseable gh output); review manually before treating it as READY"
             ),
         )
-    if not isinstance(data, list) or not data:
+    if not isinstance(data, list):
+        return MergedPrCheckResult(
+            kind=MergedPrCheckKind.AMBIGUOUS,
+            reason=(
+                f"could not verify whether issue #{issue_number} already has a merged "
+                "PR (invalid gh output structure); review manually before treating it as READY"
+            ),
+        )
+    if not data:
         return MergedPrCheckResult(kind=MergedPrCheckKind.NONE)
 
     expected_prefix = f"Implements work for #{issue_number}."

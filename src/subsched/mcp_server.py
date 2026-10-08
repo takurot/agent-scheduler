@@ -22,6 +22,7 @@ import subprocess
 import sys
 from contextlib import ExitStack
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -33,6 +34,11 @@ from subsched.dispatch_runs import DispatchRunStore
 from subsched.explain import explain_issue
 from subsched.gitenv import git_safe_env
 from subsched.github.issues import GitHubCliError, GitHubIssueSource
+from subsched.github.pull_requests import (
+    MergedPrCheckKind,
+    MergedPrCheckResult,
+    check_merged_pr_for_issue,
+)
 from subsched.handoff import parse_semantic_handoff
 from subsched.init import InitError, build_scaffold_plan, write_scaffold_plan
 from subsched.metrics import calculate_metrics
@@ -330,6 +336,17 @@ def queue_issues(
     eligible = tuple(
         issue for issue in discovered if not excluded_issue_labels(issue, exclude_labels)
     )
+
+    @cache
+    def merged_pr_checker(number: int) -> MergedPrCheckResult:
+        return check_merged_pr_for_issue(intent.repo, number)
+
+    confirmed = {
+        issue.number: merged_pr_checker(issue.number)
+        for issue in eligible
+        if merged_pr_checker(issue.number).kind is MergedPrCheckKind.CONFIRMED
+    }
+    eligible = tuple(issue for issue in eligible if issue.number not in confirmed)
     details: dict[str, Any] = {
         "discovered": len(eligible),
         "issue_numbers": [issue.number for issue in eligible],
@@ -340,6 +357,20 @@ def queue_issues(
         ],
         "dry_run": dry_run,
     }
+    details["excluded"].extend(
+        {
+            "issue_number": number,
+            "reason": f"merged PR #{check.pr_number} already implements this issue",
+        }
+        for number, check in confirmed.items()
+    )
+    needs_human = [
+        {"issue_number": issue.number, "reason": merged_pr_checker(issue.number).reason}
+        for issue in eligible
+        if merged_pr_checker(issue.number).kind is MergedPrCheckKind.AMBIGUOUS
+    ]
+    if needs_human:
+        details["needs_human"] = needs_human
 
     if dry_run:
         try:
@@ -355,6 +386,7 @@ def queue_issues(
             router=Router(()),
             worker=NativeWorker(),
             worktree_root=store.worktrees_dir,
+            merged_pr_checker=merged_pr_checker,
         )
         before = len(scheduler.tasks)
         scheduler.discover(discovered, exclude_labels=exclude_labels)
@@ -768,7 +800,9 @@ def build_server(options: ServerOptions) -> Any:
             "queue. Selection precedence: explicit issues > explicit label > subsched.yaml "
             "github.mode/include_labels (AND). Configured exclude_labels (OR) and "
             "security-sensitive always apply, even to explicit issues. A valid subsched.yaml "
-            "is required. First use dry_run=True and review issue_numbers and excluded reasons; "
+            "is required. Confirmed merged implementations are excluded; ambiguous merge "
+            "checks create NEEDS_HUMAN tasks (included in queued counts). "
+            "First use dry_run=True and review issue_numbers, excluded and needs_human reasons; "
             "then queue with the same arguments and verify issue_numbers again."
         ),
     )

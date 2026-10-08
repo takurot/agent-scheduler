@@ -418,14 +418,24 @@ not confirmed already implemented by a merged PR
 Issueを新規READY taskとして一切discoveryに追加しない（重複実装を防ぐ）。issue番号への
 明示的な言及（`#N`または`issue N`）はあるがこの規約に厳密一致しない場合（手動で作成した
 PRなど）や`gh`呼び出し自体が
-失敗した場合は`AMBIGUOUS`としてfail closedにする：Issueはdiscoveryされるが`READY`では
-なく`NEEDS_HUMAN`から開始し、理由を`Task.needs_human_reason`に記録する。
+失敗した場合やPR一覧のJSONがlistでない未知schemaの場合は`AMBIGUOUS`としてfail closedにする：
+Issueはdiscoveryされるが`READY`ではなく`NEEDS_HUMAN`から開始し、理由を`Task.needs_human_reason`に記録する。
 GitHub検索が記号を無視して返すtest件数などのbare number一致は、PR bodyに上記の明示的な
 Issue参照がなければ検索ノイズとして除外し、`AMBIGUOUS`へ昇格させない。
 
 この確認は`subsched run --allow-rediscovery`で明示的に無効化できる（既定では無効化しない
 = fail closedがdefault）。`--dry-run`でも同じ確認を行い、結果を discovery note として
 出力する。
+
+MCP `subsched_queue_issues`にも同じcheckerを配線し、dry-runでも確認する（#452）。
+CONFIRMEDは`excluded`に報告して新規taskを作らず、AMBIGUOUSは`needs_human`に理由を
+報告して`NEEDS_HUMAN`を作る。`would_queue`/`queued`はこの保留taskも含む追加件数であり、
+READY件数ではない。dry-runはstateを書き換えない。
+既存のpending task（READY、WAITING_CAPACITY、WAITING_DEPENDENCY、BLOCKED、RETRY、
+NEEDS_REBASE、PR_REVIEW、REVISING）はdiscoveryの選択範囲外でも再確認する。
+CONFIRMED/AMBIGUOUSならworktree・履歴を保存して`NEEDS_HUMAN`に保留し、自動COMPLETEにはしない。
+terminal taskとin-flight taskの既存復旧規則は維持する。CLIの明示的な
+`--allow-rediscovery`はこの再確認も無効化する。MCP queueには迂回オプションを追加しない。
 
 設定例：
 

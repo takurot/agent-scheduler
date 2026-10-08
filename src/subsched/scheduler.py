@@ -574,6 +574,7 @@ class Scheduler:
         # #185: Reconcile persisted non-terminal tasks against current GitHub issue state
         reconciled_tasks: list[Task] = []
         reactivated: list[int] = []
+        notes: list[tuple[int, str]] = []
         for task in self.tasks:
             if task.status is TaskState.CANCELLED and task.issue_number in reactivate_cancelled:
                 issue = issues_by_number.get(task.issue_number)
@@ -597,6 +598,32 @@ class Scheduler:
             if task.status in _IN_FLIGHT_RECOVERY_STATES:
                 reconciled_tasks.append(task)
                 continue
+
+            # Previously queued tasks may predate the discovery guard or have been
+            # queued through an unchecked entrypoint. Check even outside this selection:
+            # a partial snapshot does not prevent the pending task from dispatching.
+            if self.merged_pr_checker is not None and task.status in (
+                TaskState.READY,
+                TaskState.WAITING_CAPACITY,
+                TaskState.WAITING_DEPENDENCY,
+                TaskState.BLOCKED,
+                TaskState.RETRY,
+                TaskState.NEEDS_REBASE,
+                TaskState.PR_REVIEW,
+                TaskState.REVISING,
+            ):
+                check = self.merged_pr_checker(task.issue_number)
+                if check.kind is not MergedPrCheckKind.NONE:
+                    reason = (
+                        f"merged PR #{check.pr_number} already implements this issue; "
+                        "review manually"
+                        if check.kind is MergedPrCheckKind.CONFIRMED
+                        else check.reason
+                    )
+                    task = task.transition(TaskState.NEEDS_HUMAN, reason=reason)
+                    notes.append((task.issue_number, reason))
+                    reconciled_tasks.append(task)
+                    continue
 
             # Case 1: Issue is missing from snapshot
             if task.issue_number not in issues_by_number:
@@ -663,7 +690,6 @@ class Scheduler:
         ]
 
         additions: list[Task] = []
-        notes: list[tuple[int, str]] = []
         for issue in candidates:
             # #146: an open Issue whose implementation PR is already merged must not be
             # rediscovered as READY (duplicate work). A CONFIRMED match (the Scheduler's
