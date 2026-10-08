@@ -1270,6 +1270,14 @@ exit status
 text classification
 ```
 
+Codexの認証・課金・承認エラーはそれぞれ`AUTH_ERROR`、`BILLING_ERROR`、
+`PERMISSION_DENIED`へ分類する（#450）。capacityエラーのresetが欠落・不正・timezone不明なら
+`UNKNOWN`とし、resetを推測しない。`UNKNOWN`はproviderをresetなしの`CapacityState.UNKNOWN`
+として永続的にブロックする。auth/billing/UNKNOWNは利用可能な別Agentへ同一worktreeで
+failoverし、別Agentがなければ`NEEDS_HUMAN`へ遷移する。承認エラーは直ちに`NEEDS_HUMAN`とする。
+これらは`attempt`、`per_agent_failures`、`verification_failures`を増やさない。
+resetなしのblockerはrestartやAVAILABLE probeだけでは解除しない。operatorによる復旧を必要とする。
+
 ---
 
 # 33. Agent Execution Guard

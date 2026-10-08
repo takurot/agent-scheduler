@@ -247,9 +247,9 @@ def test_parse_codex_cli_metadata_fails_closed_when_approval_flag_unknown() -> N
     [
         ("session-limit.jsonl", AgentResultKind.CAPACITY_SESSION, "codex session capacity"),
         ("weekly-limit.jsonl", AgentResultKind.CAPACITY_WEEKLY, "codex weekly capacity"),
-        ("auth-error.jsonl", AgentResultKind.FAILURE, "codex authentication unavailable"),
-        ("billing-error.jsonl", AgentResultKind.FAILURE, "codex billing mode unsafe"),
-        ("approval-error.jsonl", AgentResultKind.FAILURE, "codex approval required"),
+        ("auth-error.jsonl", AgentResultKind.AUTH_ERROR, "codex authentication unavailable"),
+        ("billing-error.jsonl", AgentResultKind.BILLING_ERROR, "codex billing mode unsafe"),
+        ("approval-error.jsonl", AgentResultKind.PERMISSION_DENIED, "codex approval required"),
     ],
 )
 def test_failure_fixtures_are_classified(fixture: str, kind: AgentResultKind, output: str) -> None:
@@ -262,7 +262,19 @@ def test_failure_fixtures_are_classified(fixture: str, kind: AgentResultKind, ou
 def test_capacity_without_valid_reset_fails_closed() -> None:
     result = parse_codex_jsonl(_fixture("capacity-reset-unknown.jsonl"), returncode=1)
 
-    assert result.kind is AgentResultKind.FAILURE
+    assert result.kind is AgentResultKind.UNKNOWN
+    assert result.reset_at is None
+    assert result.output == "codex capacity reset unknown"
+
+
+@pytest.mark.parametrize("reset", [None, "invalid", "2026-10-08T12:00:00", 123, {}])
+@pytest.mark.parametrize("message", ["Rate limit reached", "Weekly usage limit reached"])
+def test_capacity_with_untrusted_reset_is_unknown(message: str, reset: Any) -> None:
+    payload = json.dumps({"type": "turn.failed", "error": {"message": message, "reset_at": reset}})
+
+    result = parse_codex_jsonl(payload, returncode=1)
+
+    assert result.kind is AgentResultKind.UNKNOWN
     assert result.reset_at is None
     assert result.output == "codex capacity reset unknown"
 
@@ -923,7 +935,7 @@ def test_codex_jsonl_additional_malformed_and_failure_branches() -> None:
     # failure with approval required
     approval_err = json.dumps({"type": "error", "message": "approval required by user"})
     res_approval = parse_codex_jsonl(approval_err, returncode=0)
-    assert res_approval.kind is AgentResultKind.FAILURE
+    assert res_approval.kind is AgentResultKind.PERMISSION_DENIED
     assert "approval required" in res_approval.output
 
     # failure with generic/unknown error
