@@ -609,6 +609,8 @@ class Scheduler:
                 TaskState.BLOCKED,
                 TaskState.RETRY,
                 TaskState.NEEDS_REBASE,
+                TaskState.PR_REVIEW,
+                TaskState.REVISING,
             ):
                 check = self.merged_pr_checker(task.issue_number)
                 if check.kind is not MergedPrCheckKind.NONE:
