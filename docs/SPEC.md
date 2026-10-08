@@ -3431,7 +3431,7 @@ subsched mcp [--repository PATH]
 
 - **トランスポート**: 標準入出力 (`stdio`)。
 - **フレームワーク**: 公式 Python MCP SDK (`mcp.server.fastmcp.FastMCP`)。
-- **パッケージング**: オプショナル依存 `mcp = ["mcp>=1.2.0,<2"]`。`pip install agent-scheduler[mcp]` で導入可能。未インストール環境で `subsched mcp` を起動した場合は、適切なインストール手順を表示して終了コード 1 で fail-closed 終了する。
+- **パッケージング**: オプショナル依存 `mcp = ["mcp>=1.2.0,<3", "PyJWT[crypto]>=2.15.1,<3"]`。`pip install agent-scheduler[mcp]` で導入可能。未インストール環境で `subsched mcp` を起動した場合は、適切なインストール手順を表示して終了コード 1 で fail-closed 終了する。
 - **純粋関数設計**: `subsched.mcp_server` の各ツール関数は純粋関数として実装され、`mcp` パッケージ未インストール時でもインポートおよび単体テストが可能。
 
 ## 2. マルチリポジトリ対応

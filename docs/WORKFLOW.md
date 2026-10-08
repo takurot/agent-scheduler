@@ -227,6 +227,72 @@ uv run --frozen pip-audit
 脆弱性を無視してgateを通さない。修正版がない場合は影響、到達可能性、暫定対策をIssue
 またはPRへ記録する。
 
+### Issue #449: frozen dependency security review (2026-10-08)
+
+The lock updates only PyJWT 2.13.0 → 2.15.1 and urllib3 2.7.0 → 2.8.0.
+MCP 2.2.0 and the optional `mcp` extra remain available. The extra and dev group
+also require `PyJWT[crypto]>=2.15.1,<3`; dev requires `urllib3>=2.8.0,<3`.
+These direct security floors protect installs that do not consume `uv.lock`,
+including `pip install agent-scheduler[mcp]`, from retaining vulnerable versions.
+No advisory is suppressed;
+local, CI, and release gates still require `uv run --frozen pip-audit`.
+
+Dependency paths, verified with `uv tree --invert --package <name>`:
+
+- PyJWT: optional `agent-scheduler[mcp]` and dev group → `pyjwt[crypto]`, also
+  through `mcp` → `pyjwt[crypto]`.
+- urllib3: dev group → `urllib3`, also through `pip-audit` → `requests` → `urllib3` and
+  `pip-audit` → `cachecontrol` → `requests`.
+
+Advisory ranges and impact were checked against the linked records and the
+[PyJWT changelog](https://pyjwt.readthedocs.io/en/stable/changelog.html) and
+[urllib3 changelog](https://urllib3.readthedocs.io/en/stable/changelog.html):
+
+| Advisory | Conditional upstream impact | First fixed release / recorded boundary |
+| --- | --- | --- |
+| [PYSEC-2026-4140](https://osv.dev/vulnerability/PYSEC-2026-4140) | Unknown key IDs amplify JWKS requests | PyJWT 2.14.0 |
+| [PYSEC-2026-4141](https://osv.dev/vulnerability/PYSEC-2026-4141) | Nested unverified payload raises an uncaught recursion error | PyJWT 2.15.0 |
+| [PYSEC-2026-4142](https://osv.dev/vulnerability/PYSEC-2026-4142) | Nested token header raises an uncaught recursion error | PyJWT 2.14.0 |
+| [PYSEC-2026-4143](https://osv.dev/vulnerability/PYSEC-2026-4143) | Empty HMAC JWK permits forged tokens | PyJWT 2.14.0 |
+| [PYSEC-2026-4144](https://osv.dev/vulnerability/PYSEC-2026-4144) | JWKS redirects expose headers or poison trusted keys | PyJWT 2.14.0 |
+| [PYSEC-2026-4145](https://osv.dev/vulnerability/PYSEC-2026-4145) | PEM formatting bypasses asymmetric-key rejection for HMAC | PyJWT 2.14.0 |
+| [PYSEC-2026-4146](https://osv.dev/vulnerability/PYSEC-2026-4146) | Reused mutable options disable later claim checks | No named fixed release; last affected 2.13.0; see below |
+| [PYSEC-2026-4147](https://osv.dev/vulnerability/PYSEC-2026-4147) | Alternate signature serialization bypasses raw-token revocation | PyJWT 2.14.0 |
+| [PYSEC-2026-4148](https://osv.dev/vulnerability/PYSEC-2026-4148) | Attacker-controlled certificate input causes regex CPU exhaustion | PyJWT 2.14.0 |
+| [PYSEC-2026-4149](https://osv.dev/vulnerability/PYSEC-2026-4149) | DER public keys accepted as HMAC secrets | PyJWT 2.14.0 |
+| [PYSEC-2026-4150](https://osv.dev/vulnerability/PYSEC-2026-4150) | BOM-prefixed public-key input bypasses HMAC key rejection | PyJWT 2.14.0 |
+| [PYSEC-2026-4151](https://osv.dev/vulnerability/PYSEC-2026-4151) | Public JWK containers accepted as HMAC secrets | PyJWT 2.14.0 |
+| [PYSEC-2026-4152](https://osv.dev/vulnerability/PYSEC-2026-4152) | Malformed RSA JWK aborts an entire key set | PyJWT 2.14.0 |
+| [CVE-2026-102275 / GHSA-x33g-cr3x-6449](https://github.com/jpadilla/pyjwt/security/advisories/GHSA-x33g-cr3x-6449) | Inconsistent OKP public/private JWKs confuse key identity in affected DPoP integrations | PyJWT 2.15.0 |
+| [PYSEC-2026-4175](https://osv.dev/vulnerability/PYSEC-2026-4175) | HTTPS proxy TLS policy is ignored or overridden | urllib3 2.8.0 |
+| [PYSEC-2026-4176](https://osv.dev/vulnerability/PYSEC-2026-4176) | Chunked Deflate streaming loops without progress | urllib3 2.8.0 |
+| [PYSEC-2026-4177](https://osv.dev/vulnerability/PYSEC-2026-4177) | Streaming buffers an unbounded chunk-size line | urllib3 2.8.0 |
+
+No direct jwt/requests/urllib3 imports occur in `src/`. The shipped MCP command
+uses stdio, without configuring the SDK's HTTP JWT authentication. These observations
+do not prove that every transitive SDK or developer-tool path is unreachable;
+audit tooling itself makes HTTP requests. The established repository impact is
+the failed dependency gate, with vulnerable packages present in dev/MCP environments.
+Updating the lock removes the affected versions without changing runtime safety gates.
+Both replacement wheels support Python 3.12/3.13 and have compatible active dependency
+metadata. The explicit manifest floors also cover non-lock MCP/dev installs.
+
+PYSEC-2026-4146 still lists no patched version in the
+[upstream advisory](https://github.com/jpadilla/pyjwt/security/advisories/GHSA-gvp8-978c-rx2q),
+while its recorded affected range ends at 2.13.0. Do not infer remediation solely
+from a clean audit. `test_pyjwt_preserves_claim_checks_when_options_are_reused`
+reproduces the mutation on 2.13.0 and verifies that 2.15.1 preserves the caller's
+options and rejects an expired token after signature verification is re-enabled.
+Keep the updated lock and this behavioral check as the interim control. An upstream
+published patched-version record is the condition for retiring the metadata caveat;
+an audit ignore is never a substitute. PyJWT 2.15.1 also retains the 2.15.0 security
+fix while restoring compatibility with trailing Base64URL padding.
+
+The required CI matrix remains Ubuntu/macOS × Python 3.12/3.13, including frozen
+audit on every job. Offline worker results cannot establish live audit or remote
+matrix success; reviewers must verify the exact implementation commit's full gate
+and all four CI jobs before merge.
+
 ## 7. 品質ゲート
 
 PR前にCIと同じコマンドを実行する。
