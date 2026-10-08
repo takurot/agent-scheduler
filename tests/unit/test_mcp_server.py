@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from subsched.github.issues import GitHubCliError, GitHubIssueSource
+from subsched.github.pull_requests import MergedPrCheckKind, MergedPrCheckResult
 from subsched.mcp_server import (
     GUIDELINES,
     McpToolError,
@@ -39,6 +40,15 @@ from subsched.mcp_server import (
 )
 from subsched.models import Issue, Task, TaskState
 from subsched.storage import JsonStateStore
+
+
+@pytest.fixture(autouse=True)
+def no_merged_prs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep MCP unit tests offline; merge guard integration has its own fixtures."""
+    monkeypatch.setattr(
+        "subsched.mcp_server.check_merged_pr_for_issue",
+        lambda repo, number: MergedPrCheckResult(MergedPrCheckKind.NONE),
+    )
 
 
 def _task(issue_number: int, status: TaskState, **kwargs: object) -> Task:

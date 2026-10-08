@@ -353,6 +353,15 @@ Existing tasks do not count as new additions. Persisting also reconciles selecte
 existing tasks that acquired an excluded label to `NEEDS_HUMAN` under the Scheduler's
 existing recovery rules; dry-run does not mutate them.
 
+MCP queueing applies the CLI's merged-PR guard, including during dry-run. Confirmed
+merged implementations appear in `excluded` and create no new task; ambiguous PR
+references or failed checks appear in `needs_human` and create `NEEDS_HUMAN` tasks.
+These held tasks count in `would_queue`/`queued`, so those counts do not imply READY.
+Later discovery also checks pending persisted tasks, even outside the current issue
+selection, and holds confirmed or ambiguous matches in `NEEDS_HUMAN` while preserving
+worktrees and history. CLI `--allow-rediscovery` explicitly bypasses the guard; MCP
+queueing always checks by default.
+
 MCP task inspection and handoff resources accept only the task's absolute
 `<repository>/.ai/worktrees/issue-N` path. Repository, worktree, `.ai`, handoff
 parent, and file symlinks are rejected with `McpToolError`; handoff reads pin

@@ -427,6 +427,16 @@ Issue参照がなければ検索ノイズとして除外し、`AMBIGUOUS`へ昇�
 = fail closedがdefault）。`--dry-run`でも同じ確認を行い、結果を discovery note として
 出力する。
 
+MCP `subsched_queue_issues`にも同じcheckerを配線し、dry-runでも確認する（#452）。
+CONFIRMEDは`excluded`に報告して新規taskを作らず、AMBIGUOUSは`needs_human`に理由を
+報告して`NEEDS_HUMAN`を作る。`would_queue`/`queued`はこの保留taskも含む追加件数であり、
+READY件数ではない。dry-runはstateを書き換えない。
+既存のpending task（READY、WAITING_CAPACITY、WAITING_DEPENDENCY、BLOCKED、RETRY、
+NEEDS_REBASE）はdiscoveryの選択範囲外でも再確認する。CONFIRMED/AMBIGUOUSなら
+worktree・履歴を保存して`NEEDS_HUMAN`に保留し、自動COMPLETEにはしない。
+terminal taskとin-flight taskの既存復旧規則は維持する。CLIの明示的な
+`--allow-rediscovery`はこの再確認も無効化する。MCP queueには迂回オプションを追加しない。
+
 設定例：
 
 ```yaml
