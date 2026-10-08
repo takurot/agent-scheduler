@@ -16,8 +16,11 @@ never blocks the MCP event loop or triggers a client timeout.
 
 from __future__ import annotations
 
+import os
+import stat
 import subprocess
 import sys
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -44,6 +47,7 @@ from subsched.storage import (
     StateCorruptionError,
     find_repository_root,
 )
+from subsched.structured_logger import _redact_data, redact_sensitive_text
 
 GUIDELINES = """# subsched Agent Guidelines
 
@@ -125,6 +129,50 @@ def _store_for(repository_path: str | None) -> JsonStateStore:
     return JsonStateStore(resolve_repository(repository_path))
 
 
+def _task_store_for(repository_path: str | None) -> JsonStateStore:
+    candidate = Path(repository_path).expanduser() if repository_path else Path.cwd()
+    candidate = candidate.absolute()
+    if any(path.is_symlink() for path in (candidate, *candidate.parents)):
+        raise McpToolError("task repository path must not contain symlinks")
+    return _store_for(repository_path)
+
+
+def _read_task_handoff(store: JsonStateStore, task: Task) -> str | None:
+    """Pin every directory component and read only the expected regular handoff."""
+    expected = store.worktrees_dir.absolute() / f"issue-{task.issue_number}"
+    if (
+        not isinstance(task.worktree, str)
+        or Path(task.worktree) != expected
+        or ".." in Path(task.worktree).parts
+    ):
+        raise McpToolError("task worktree is outside its managed location")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        with ExitStack() as handles:
+            directory = os.open(expected.anchor, flags)
+            handles.callback(os.close, directory)
+            for component in expected.parts[1:]:
+                directory = os.open(component, flags, dir_fd=directory)
+                handles.callback(os.close, directory)
+            try:
+                for component in (".ai", "handoffs"):
+                    directory = os.open(component, flags, dir_fd=directory)
+                    handles.callback(os.close, directory)
+                descriptor = os.open(
+                    f"{task.issue_number}.md",
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=directory,
+                )
+            except FileNotFoundError:
+                return None
+            with os.fdopen(descriptor, encoding="utf-8") as handoff:
+                if not stat.S_ISREG(os.fstat(handoff.fileno()).st_mode):
+                    raise McpToolError("unsafe task handoff: expected a regular file")
+                return redact_sensitive_text(handoff.read())
+    except (OSError, UnicodeError) as error:
+        raise McpToolError("unsafe task handoff or worktree path") from error
+
+
 def _task_to_summary(task: Task) -> dict[str, Any]:
     return {
         "issue_number": task.issue_number,
@@ -163,7 +211,7 @@ def get_status(repository_path: str | None = None, verbose: bool = False) -> dic
 
 def inspect_task(issue_number: int, repository_path: str | None = None) -> dict[str, Any]:
     """Full task details, parsed semantic handoff, and recent worktree commits."""
-    store = _store_for(repository_path)
+    store = _task_store_for(repository_path)
     try:
         tasks = store.load_tasks()
     except StateCorruptionError as error:
@@ -174,17 +222,15 @@ def inspect_task(issue_number: int, repository_path: str | None = None) -> dict[
         raise McpToolError(f"issue #{issue_number} is not in scheduler state")
     task = matches[0]
 
-    result: dict[str, Any] = task.to_dict()
-    result["effective_model"] = task.effective_model
-    result["effective_stage"] = task.dispatch_stage or resolve_stage(task)
+    result: dict[str, Any] = _redact_data(task.to_dict())
+    result["effective_model"] = redact_sensitive_text(task.effective_model)
+    result["effective_stage"] = redact_sensitive_text(task.dispatch_stage or resolve_stage(task))
     result["handoff"] = None
     result["recent_commits"] = ()
 
-    if task.worktree:
-        worktree_dir = Path(task.worktree)
-        handoff_file = worktree_dir / ".ai" / "handoffs" / f"{issue_number}.md"
-        if handoff_file.is_file() and not handoff_file.is_symlink():
-            content = handoff_file.read_text(encoding="utf-8")
+    if task.worktree is not None:
+        content = _read_task_handoff(store, task)
+        if content is not None:
             parsed = parse_semantic_handoff(content)
             if parsed is not None:
                 result["handoff"] = {
@@ -196,22 +242,26 @@ def inspect_task(issue_number: int, repository_path: str | None = None) -> dict[
                     "next_action": parsed.next_action,
                     "timestamp": parsed.timestamp,
                 }
-        if worktree_dir.is_dir():
-            try:
-                log = subprocess.run(
-                    ["git", "-C", str(worktree_dir), "log", "-n", "5", "--oneline"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    check=False,
-                    env=git_safe_env(),
+        # Never discover Git metadata through the persisted task worktree: its
+        # .git may redirect to an unrelated repository, even after registration.
+        try:
+            log = subprocess.run(
+                [
+                    "git", "-C", str(store.state_dir.parent), "log", "-n", "5", "--oneline",
+                    f"refs/heads/subsched/issue-{task.issue_number}", "--",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+                env=git_safe_env(),
+            )
+            if log.returncode == 0:
+                result["recent_commits"] = tuple(
+                    redact_sensitive_text(line) for line in log.stdout.splitlines() if line
                 )
-                if log.returncode == 0:
-                    result["recent_commits"] = tuple(
-                        line for line in log.stdout.splitlines() if line
-                    )
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     return result
 
 
@@ -615,18 +665,18 @@ def get_capacities_resource(repository_path: str | None = None) -> dict[str, Any
 
 def get_task_handoff_resource(issue_number: int, repository_path: str | None = None) -> str:
     """Markdown content of a task's semantic handoff (`subsched://tasks/{issue}/handoff`)."""
-    store = _store_for(repository_path)
+    store = _task_store_for(repository_path)
     try:
         tasks = store.load_tasks()
     except StateCorruptionError as error:
         raise McpToolError(f"scheduler state error: {error}") from error
     matches = [task for task in tasks if task.issue_number == issue_number]
-    if not matches or not matches[0].worktree:
+    if not matches or matches[0].worktree is None:
         raise McpToolError(f"no handoff available for issue #{issue_number}")
-    handoff_file = Path(matches[0].worktree) / ".ai" / "handoffs" / f"{issue_number}.md"
-    if not handoff_file.is_file() or handoff_file.is_symlink():
+    content = _read_task_handoff(store, matches[0])
+    if content is None:
         raise McpToolError(f"no handoff available for issue #{issue_number}")
-    return handoff_file.read_text(encoding="utf-8")
+    return content
 
 
 def get_guidelines_resource() -> str:

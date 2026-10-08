@@ -3452,6 +3452,16 @@ subsched mcp [--repository PATH]
 - 指定された場合: シンボリックリンクを拒絶し、存在を確認した上で `find_repository_root` を介してリポジトリルートを厳格に解決する。
 - 省略された場合: CLIの `--repository` 指定、またはカレントワーキングディレクトリにフォールバックする。
 
+MCP task inspection and handoff resources accept only the task's absolute
+`<repository>/.ai/worktrees/issue-N` path. Repository, worktree, `.ai`, handoff
+parent, and file symlinks are rejected with `McpToolError`; handoff reads pin
+directory handles and require a regular UTF-8 file. Invalid paths are rejected
+before commit inspection, without repairing or deleting task state or handoffs.
+Commit inspection reads `refs/heads/subsched/issue-N` in the trusted repository,
+never Git metadata from the task worktree; a missing ref yields no commits.
+Task details, parsed/raw handoffs, and commit messages use the existing secret
+redaction policy before reaching MCP clients.
+
 ## 3. 非同期ディスパッチとイベントループ保護
 
 長時間のワーカー実行（数分〜数時間）がMCPのstdio通信をブロックしクライアント側でタイムアウト

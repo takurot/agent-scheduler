@@ -114,17 +114,21 @@ def test_inspect_task_not_found(tmp_path: Path) -> None:
 def test_inspect_task_with_handoff_and_commits(tmp_path: Path) -> None:
     store = JsonStateStore(tmp_path)
     store.init_directories()
-    worktree = tmp_path / "wt"
+    worktree = store.worktrees_dir / "issue-42"
     worktree.mkdir()
-    subprocess.run(["git", "init", "-q", "-b", "main", str(worktree)], check=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
     subprocess.run(
-        ["git", "-C", str(worktree), "config", "user.email", "t@example.invalid"],
+        ["git", "-C", str(tmp_path), "config", "user.email", "t@example.invalid"],
         check=True,
     )
-    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "T"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "T"], check=True)
     subprocess.run(
-        ["git", "-C", str(worktree), "commit", "--allow-empty", "-q", "-m", "init"],
+        ["git", "-C", str(tmp_path), "commit", "--allow-empty", "-q", "-m", "init"],
         check=True,
+    )
+
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "branch", "subsched/issue-42"], check=True
     )
 
     handoff_dir = worktree / ".ai" / "handoffs"
@@ -154,7 +158,7 @@ def test_inspect_task_git_log_uses_safe_env(
 ) -> None:
     store = JsonStateStore(tmp_path)
     store.init_directories()
-    worktree = tmp_path / "wt"
+    worktree = store.worktrees_dir / "issue-42"
     worktree.mkdir()
     task = _task(42, TaskState.NEEDS_HUMAN, worktree=str(worktree))
     store.save_tasks((task,))
@@ -178,10 +182,10 @@ def test_inspect_task_git_log_uses_safe_env(
     assert "GIT_DIR" not in env
 
 
-def test_inspect_task_ignores_symlinked_handoff(tmp_path: Path) -> None:
+def test_inspect_task_rejects_symlinked_handoff(tmp_path: Path) -> None:
     store = JsonStateStore(tmp_path)
     store.init_directories()
-    worktree = tmp_path / "wt"
+    worktree = store.worktrees_dir / "issue-7"
     (worktree / ".ai" / "handoffs").mkdir(parents=True)
     real = tmp_path / "real_handoff.md"
     real.write_text("not a real handoff", encoding="utf-8")
@@ -190,9 +194,8 @@ def test_inspect_task_ignores_symlinked_handoff(tmp_path: Path) -> None:
     task = _task(7, TaskState.NEEDS_HUMAN, worktree=str(worktree))
     store.save_tasks((task,))
 
-    result = inspect_task(7, str(tmp_path))
-
-    assert result["handoff"] is None
+    with pytest.raises(McpToolError, match="unsafe task handoff"):
+        inspect_task(7, str(tmp_path))
 
 
 # --- queue_issues ----------------------------------------------------------------
@@ -809,7 +812,7 @@ def test_get_task_handoff_resource_missing(tmp_path: Path) -> None:
 def test_get_task_handoff_resource_reads_content(tmp_path: Path) -> None:
     store = JsonStateStore(tmp_path)
     store.init_directories()
-    worktree = tmp_path / "wt"
+    worktree = store.worktrees_dir / "issue-1"
     (worktree / ".ai" / "handoffs").mkdir(parents=True)
     (worktree / ".ai" / "handoffs" / "1.md").write_text("# handoff body", encoding="utf-8")
     store.save_tasks((_task(1, TaskState.NEEDS_HUMAN, worktree=str(worktree)),))

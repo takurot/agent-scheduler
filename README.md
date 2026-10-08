@@ -353,6 +353,16 @@ Existing tasks do not count as new additions. Persisting also reconciles selecte
 existing tasks that acquired an excluded label to `NEEDS_HUMAN` under the Scheduler's
 existing recovery rules; dry-run does not mutate them.
 
+MCP task inspection and handoff resources accept only the task's absolute
+`<repository>/.ai/worktrees/issue-N` path. Repository, worktree, `.ai`, handoff
+parent, and file symlinks are rejected with `McpToolError`; handoff reads pin
+directory handles and require a regular UTF-8 file. Invalid paths are rejected
+before commit inspection, without repairing or deleting task state or handoffs.
+Commit inspection reads `refs/heads/subsched/issue-N` in the trusted repository,
+never Git metadata from the task worktree; a missing ref yields no commits.
+Task details, parsed/raw handoffs, and commit messages use the existing secret
+redaction policy before reaching MCP clients.
+
 - **Resources**: `subsched://queue`, `subsched://capacities`, `subsched://tasks/{issue}/handoff`, `subsched://guidelines`.
 - **Prompts**: `triage_task` (diagnose and remediate `NEEDS_HUMAN` issues), `bootstrap_repo` (scaffold repository configuration).
 
