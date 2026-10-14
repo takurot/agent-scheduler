@@ -270,6 +270,10 @@ SUPPORTED_CODEX_ITEM_TYPES = frozenset(
         "tool_call",
         "reasoning",
         "web_search",
+        "mcp_tool_call",
+        "collab_tool_call",
+        "todo_list",
+        "error",
     }
 )
 
@@ -333,7 +337,7 @@ def parse_codex_jsonl(
     open_items: dict[str, str] = {}
     for event in events[2:-1]:
         event_type = event.get("type")
-        if event_type not in {"item.started", "item.completed"}:
+        if event_type not in {"item.started", "item.updated", "item.completed"}:
             return _malformed_result()
         item = event.get("item")
         if not isinstance(item, dict):
@@ -351,8 +355,13 @@ def parse_codex_jsonl(
                 if item_id in open_items:
                     return _malformed_result()
                 open_items[item_id] = item_type
+        elif event_type == "item.updated":
+            if item_id is None or open_items.get(item_id) != item_type:
+                return _malformed_result()
         else:
             assert event_type == "item.completed"
+            if item_type == "error" and not isinstance(item.get("message"), str):
+                return _malformed_result()
             if item_id is not None and item_id in open_items:
                 if open_items[item_id] != item_type:
                     return _malformed_result()
