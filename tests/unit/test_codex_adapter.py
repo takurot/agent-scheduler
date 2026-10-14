@@ -1548,3 +1548,107 @@ def test_safety_failure_precedes_capacity(
     result = parse_codex_jsonl(json.dumps(payload), returncode=1)
     assert result.kind is kind
     assert result.reset_at is None
+
+
+_PASS_MESSAGE = json.dumps({"result": "pass", "summary": "done", "reason_code": None})
+
+
+def _stream(*middle: dict[str, object], returncode: int = 0) -> AgentResultKind:
+    events: list[dict[str, object]] = [
+        {"type": "thread.started", "thread_id": "fixture"},
+        {"type": "turn.started"},
+        *middle,
+        {
+            "type": "item.completed",
+            "item": {"id": "msg1", "type": "agent_message", "text": _PASS_MESSAGE},
+        },
+        {"type": "turn.completed", "usage": {}},
+    ]
+    payload = "\n".join(json.dumps(event) for event in events)
+    return parse_codex_jsonl(payload, returncode=returncode).kind
+
+
+def _item(event_type: str, item_id: str, item_type: str, **extra: object) -> dict[str, object]:
+    return {"type": event_type, "item": {"id": item_id, "type": item_type, **extra}}
+
+
+@pytest.mark.parametrize(
+    "item_type",
+    ["command_execution", "mcp_tool_call", "collab_tool_call", "todo_list"],
+)
+def test_item_updated_between_started_and_completed_passes(item_type: str) -> None:
+    """#474: Codex emits item.updated for in-flight items; a valid lifecycle is PASS."""
+    kind = _stream(
+        _item("item.started", "i1", item_type),
+        _item("item.updated", "i1", item_type),
+        _item("item.updated", "i1", item_type),
+        _item("item.completed", "i1", item_type),
+    )
+
+    assert kind is AgentResultKind.PASS
+
+
+@pytest.mark.parametrize("item_type", ["mcp_tool_call", "collab_tool_call", "todo_list"])
+def test_new_item_types_complete_without_update(item_type: str) -> None:
+    assert (
+        _stream(
+            _item("item.started", "i1", item_type),
+            _item("item.completed", "i1", item_type),
+        )
+        is AgentResultKind.PASS
+    )
+
+
+def test_non_fatal_error_item_does_not_fail_a_run_with_valid_final_response() -> None:
+    assert (
+        _stream(_item("item.completed", "e1", "error", message="tool warning"))
+        is AgentResultKind.PASS
+    )
+
+
+def test_error_item_without_message_is_malformed() -> None:
+    assert _stream(_item("item.completed", "e1", "error")) is AgentResultKind.FAILURE
+
+
+@pytest.mark.parametrize(
+    "middle",
+    [
+        pytest.param([_item("item.updated", "i1", "command_execution")], id="update-unknown-id"),
+        pytest.param(
+            [
+                _item("item.started", "i1", "command_execution"),
+                _item("item.completed", "i1", "command_execution"),
+                _item("item.updated", "i1", "command_execution"),
+            ],
+            id="update-after-completed",
+        ),
+        pytest.param(
+            [
+                _item("item.started", "i1", "command_execution"),
+                _item("item.updated", "i1", "mcp_tool_call"),
+                _item("item.completed", "i1", "command_execution"),
+            ],
+            id="update-type-mismatch",
+        ),
+        pytest.param(
+            [
+                {"type": "item.updated", "item": {"type": "command_execution"}},
+            ],
+            id="update-without-id",
+        ),
+        pytest.param(
+            [
+                _item("item.started", "i1", "command_execution"),
+                _item("item.updated", "i1", "command_execution"),
+            ],
+            id="update-never-completed",
+        ),
+        pytest.param([_item("item.started", "i1", "future_item")], id="unknown-item-type"),
+    ],
+)
+def test_invalid_item_lifecycle_remains_fail_closed(middle: list[dict[str, object]]) -> None:
+    assert _stream(*middle) is AgentResultKind.FAILURE
+
+
+def test_unknown_event_type_remains_fail_closed() -> None:
+    assert _stream({"type": "item.mystery", "item": {"id": "i1"}}) is AgentResultKind.FAILURE
