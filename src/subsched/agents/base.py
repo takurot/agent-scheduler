@@ -8,6 +8,12 @@ from typing import Protocol
 from subsched.models import AgentResult
 
 
+class LineSink(Protocol):
+    """Incremental consumer of newline-delimited stdout (#475)."""
+
+    def feed(self, line: bytes) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessExecutionRequest:
     argv: tuple[str, ...]
@@ -25,6 +31,11 @@ class ProcessExecutionRequest:
     heartbeat_interval_seconds: float = 60.0
     # #306: indicates whether this process execution is performing a PLAN_REVIEW
     plan_review: bool = False
+    # #475: when set, stdout is streamed line by line into the sink instead of buffered.
+    # output_limit_bytes then bounds each line, and stdout_stream_limit_bytes bounds the
+    # whole stream, so memory stays bounded while long valid streams can complete.
+    stdout_sink: LineSink | None = None
+    stdout_stream_limit_bytes: int = 67_108_864
 
     def __post_init__(self) -> None:
         if not self.argv:
@@ -39,6 +50,8 @@ class ProcessExecutionRequest:
             raise ValueError("output_limit_bytes must be positive")
         if self.heartbeat_interval_seconds <= 0:
             raise ValueError("heartbeat_interval_seconds must be positive")
+        if self.stdout_stream_limit_bytes <= 0:
+            raise ValueError("stdout_stream_limit_bytes must be positive")
 
 
 @dataclass(frozen=True, slots=True)

@@ -287,6 +287,11 @@ def ensure_codex_output_schema(path: Path) -> Path:
     return path
 
 
+MAX_OPEN_CODEX_ITEMS = 1024
+_TERMINAL_FAILURE_EVENTS = frozenset({"error", "turn.failed"})
+_ITEM_EVENTS = frozenset({"item.started", "item.updated", "item.completed"})
+
+
 def parse_codex_jsonl(
     payload: str,
     *,
@@ -294,108 +299,164 @@ def parse_codex_jsonl(
     plan_review: bool = False,
 ) -> AgentResult:
     """Normalize a complete Codex JSONL event stream to the shared AgentResult contract."""
-    events = _load_events(payload)
-    if events is None:
-        return _malformed_result()
+    stream = CodexJsonlStream()
+    for line in payload.split("\n"):
+        stream.feed(line)
+    return stream.finish(returncode=returncode, plan_review=plan_review)
 
-    failure: dict[str, Any] | None = None
-    terminal_index: int | None = None
-    for index, event in enumerate(events):
+
+class CodexJsonlStream:
+    """Incrementally validate a Codex JSONL stream in bounded memory (#475).
+
+    Only lifecycle state is retained: the first event, the most recent event (held back
+    until the next one shows it is not the terminal event), the open item ids and the
+    last agent message. Any malformed input is sticky and fails closed in ``finish``.
+    """
+
+    def __init__(self) -> None:
+        self._count = 0
+        self._first: dict[str, Any] | None = None
+        self._second_type: str | None = None
+        self._pending: dict[str, Any] | None = None
+        self._terminal: dict[str, Any] | None = None
+        self._failure: dict[str, Any] | None = None
+        self._final_message: str | None = None
+        self._open_items: dict[str, str] = {}
+        self._malformed = False
+
+    def feed(self, line: bytes | str) -> None:
+        if self._malformed:
+            return
+        text = line if isinstance(line, str) else line.decode("utf-8", errors="replace")
+        if not text.strip():
+            return
+        try:
+            event: Any = json.loads(text)
+        except (json.JSONDecodeError, RecursionError):
+            self._malformed = True
+            return
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            self._malformed = True
+            return
+        self._ingest(event)
+
+    def _ingest(self, event: dict[str, Any]) -> None:
+        index = self._count
+        self._count += 1
+        if self._terminal is not None:
+            self._malformed = True
+            return
+        event_type = event["type"]
+        if event_type in _TERMINAL_FAILURE_EVENTS:
+            self._failure = _failure_from_event(event)
+            if self._failure is None:
+                self._malformed = True
+            self._terminal = event
+            return
+        if index == 0:
+            self._first = event
+        elif index == 1:
+            self._second_type = event_type
+        if index >= 3 and self._pending is not None:
+            self._track_item(self._pending)
+        self._pending = event
+
+    def _track_item(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
-        if event_type in {"error", "turn.failed"}:
-            if terminal_index is not None:
-                return _malformed_result()
-            terminal_index = index
-            failure = _failure_from_event(event)
-            if failure is None:
-                return _malformed_result()
-        elif terminal_index is not None:
-            return _malformed_result()
-
-    if terminal_index is not None:
-        if terminal_index != len(events) - 1:
-            return _malformed_result()
-        assert failure is not None
-        if not _valid_failure_lifecycle(events):
-            return _malformed_result()
-        return _classify_failure(failure)
-    if len(events) < 4:
-        return _malformed_result()
-    if events[0].get("type") != "thread.started" or events[1].get("type") != "turn.started":
-        return _malformed_result()
-    if events[-1].get("type") != "turn.completed":
-        return _malformed_result()
-
-    thread_started = events[0]
-    completed = events[-1]
-    if not isinstance(thread_started.get("thread_id"), str):
-        return _malformed_result()
-    if not isinstance(completed.get("usage"), dict):
-        return _malformed_result()
-
-    final_message: str | None = None
-    open_items: dict[str, str] = {}
-    for event in events[2:-1]:
-        event_type = event.get("type")
-        if event_type not in {"item.started", "item.updated", "item.completed"}:
-            return _malformed_result()
         item = event.get("item")
-        if not isinstance(item, dict):
-            return _malformed_result()
+        if event_type not in _ITEM_EVENTS or not isinstance(item, dict):
+            self._malformed = True
+            return
         item_type = item.get("type")
         if not isinstance(item_type, str) or item_type not in SUPPORTED_CODEX_ITEM_TYPES:
-            return _malformed_result()
-
+            self._malformed = True
+            return
         item_id = item.get("id")
         if item_id is not None and not isinstance(item_id, str):
-            return _malformed_result()
+            self._malformed = True
+            return
 
         if event_type == "item.started":
             if item_id is not None:
-                if item_id in open_items:
-                    return _malformed_result()
-                open_items[item_id] = item_type
+                if item_id in self._open_items or len(self._open_items) >= MAX_OPEN_CODEX_ITEMS:
+                    self._malformed = True
+                    return
+                self._open_items[item_id] = item_type
         elif event_type == "item.updated":
-            if item_id is None or open_items.get(item_id) != item_type:
-                return _malformed_result()
+            if item_id is None or self._open_items.get(item_id) != item_type:
+                self._malformed = True
         else:
-            assert event_type == "item.completed"
             if item_type == "error" and not isinstance(item.get("message"), str):
-                return _malformed_result()
-            if item_id is not None and item_id in open_items:
-                if open_items[item_id] != item_type:
-                    return _malformed_result()
-                del open_items[item_id]
+                self._malformed = True
+                return
+            if item_id is not None and item_id in self._open_items:
+                if self._open_items[item_id] != item_type:
+                    self._malformed = True
+                    return
+                del self._open_items[item_id]
             if item_type == "agent_message":
                 text = item.get("text")
                 if not isinstance(text, str):
-                    return _malformed_result()
-                final_message = text
+                    self._malformed = True
+                    return
+                self._final_message = text
 
-    if open_items:
-        return _malformed_result()
-    if returncode != 0:
-        return AgentResult(AgentResultKind.FAILURE, output="codex execution failed")
-    if final_message is None:
-        return _malformed_result()
-    if plan_review:
-        from subsched.plan_review import PlanVerdictError, parse_verdict
+    def finish(self, *, returncode: int, plan_review: bool = False) -> AgentResult:
+        if self._malformed or self._count == 0:
+            return _malformed_result()
+        if self._terminal is not None:
+            if self._failure is None or not self._valid_failure_lifecycle(self._terminal):
+                return _malformed_result()
+            return _classify_failure(self._failure)
+        first, last = self._first, self._pending
+        if self._count < 4 or first is None or last is None:
+            return _malformed_result()
+        if first.get("type") != "thread.started" or self._second_type != "turn.started":
+            return _malformed_result()
+        if last.get("type") != "turn.completed":
+            return _malformed_result()
+        if not isinstance(first.get("thread_id"), str):
+            return _malformed_result()
+        if not isinstance(last.get("usage"), dict):
+            return _malformed_result()
+        if self._open_items:
+            return _malformed_result()
+        if returncode != 0:
+            return AgentResult(AgentResultKind.FAILURE, output="codex execution failed")
+        final_message = self._final_message
+        if final_message is None:
+            return _malformed_result()
+        if plan_review:
+            from subsched.plan_review import PlanVerdictError, parse_verdict
 
-        try:
-            verdict = parse_verdict(final_message)
-        except PlanVerdictError as error:
+            try:
+                verdict = parse_verdict(final_message)
+            except PlanVerdictError as error:
+                return AgentResult(
+                    AgentResultKind.NEEDS_HUMAN,
+                    reason_code="instruction_conflict",
+                    output=f"malformed plan review verdict: {error}",
+                )
             return AgentResult(
-                AgentResultKind.NEEDS_HUMAN,
-                reason_code="instruction_conflict",
-                output=f"malformed plan review verdict: {error}",
+                AgentResultKind.PASS,
+                output="codex completed",
+                plan_verdict=verdict,
             )
-        return AgentResult(
-            AgentResultKind.PASS,
-            output="codex completed",
-            plan_verdict=verdict,
-        )
 
-    return _parse_final_message(final_message)
+        return _parse_final_message(final_message)
+
+    def _valid_failure_lifecycle(self, terminal: dict[str, Any]) -> bool:
+        if terminal.get("type") == "error":
+            return self._count == 1
+        if self._count == 1:
+            return True
+        first = self._first
+        return (
+            self._count == 2
+            and first is not None
+            and first.get("type") == "thread.started"
+            and isinstance(first.get("thread_id"), str)
+        )
 
 
 def _failure_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
@@ -410,37 +471,6 @@ def _failure_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
             return None
         return error
     return None
-
-
-def _valid_failure_lifecycle(events: tuple[dict[str, Any], ...]) -> bool:
-    terminal_type = events[-1].get("type")
-    if terminal_type == "error":
-        return len(events) == 1
-    if terminal_type != "turn.failed":
-        return False
-    if len(events) == 1:
-        return True
-    return (
-        len(events) == 2
-        and events[0].get("type") == "thread.started"
-        and isinstance(events[0].get("thread_id"), str)
-    )
-
-
-def _load_events(payload: str) -> tuple[dict[str, Any], ...] | None:
-    lines = tuple(line for line in payload.splitlines() if line.strip())
-    if not lines:
-        return None
-    events: list[dict[str, Any]] = []
-    try:
-        for line in lines:
-            value: Any = json.loads(line)
-            if not isinstance(value, dict) or not isinstance(value.get("type"), str):
-                return None
-            events.append(value)
-    except json.JSONDecodeError:
-        return None
-    return tuple(events)
 
 
 def _parse_final_message(message: str) -> AgentResult:
@@ -715,6 +745,7 @@ class CodexAgent:
             return AgentResult(AgentResultKind.UNKNOWN_BILLING, output="codex billing unverified")
 
         env = filter_environment(request.env, allowlist=COMMON_ENV_ALLOWLIST)
+        stream = CodexJsonlStream()
         proc_req = ProcessExecutionRequest(
             argv=request.argv,
             cwd=request.cwd,
@@ -725,6 +756,7 @@ class CodexAgent:
             output_limit_bytes=request.output_limit_bytes,
             heartbeat=request.heartbeat,
             heartbeat_interval_seconds=request.heartbeat_interval_seconds,
+            stdout_sink=stream,
         )
         res = run_process_group(proc_req)
         if res.timed_out:
@@ -735,6 +767,4 @@ class CodexAgent:
             return AgentResult(AgentResultKind.TIMEOUT, output="codex execution timed out")
         if res.output_limit_exceeded:
             return AgentResult(AgentResultKind.FAILURE, output="codex output limit exceeded")
-        return parse_codex_jsonl(
-            res.stdout, returncode=res.exit_code, plan_review=request.plan_review
-        )
+        return stream.finish(returncode=res.exit_code, plan_review=request.plan_review)

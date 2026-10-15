@@ -1103,14 +1103,10 @@ def test_codex_lifecycle_and_io_edge_cases() -> None:
     from subsched.agents.codex import (
         _failure_from_event,
         _read_bounded_output,
-        _valid_failure_lifecycle,
     )
 
     # _failure_from_event with unknown type
     assert _failure_from_event({"type": "custom_event"}) is None
-
-    # _valid_failure_lifecycle with terminal_type not error or turn.failed
-    assert _valid_failure_lifecycle(({"type": "turn.started"},)) is False
 
     # _read_bounded_output when read raises OSError
     class FakeStdoutError:
@@ -1652,3 +1648,137 @@ def test_invalid_item_lifecycle_remains_fail_closed(middle: list[dict[str, objec
 
 def test_unknown_event_type_remains_fail_closed() -> None:
     assert _stream({"type": "item.mystery", "item": {"id": "i1"}}) is AgentResultKind.FAILURE
+
+
+def _jsonl(*events: dict[str, object]) -> bytes:
+    return ("\n".join(json.dumps(event) for event in events) + "\n").encode()
+
+
+def test_stream_parser_matches_batch_parser_when_fed_line_by_line() -> None:
+    from subsched.agents.codex import CodexJsonlStream
+
+    payload = _fixture("multi-message-success.jsonl")
+    stream = CodexJsonlStream()
+    for line in payload.encode().split(b"\n"):
+        stream.feed(line)
+
+    assert stream.finish(returncode=0) == parse_codex_jsonl(payload, returncode=0)
+
+
+def test_stream_parser_retains_bounded_state_for_many_completed_items() -> None:
+    """#475: completed items are discarded, so memory does not grow with item count."""
+    from subsched.agents.codex import CodexJsonlStream
+
+    stream = CodexJsonlStream()
+    stream.feed(_jsonl({"type": "thread.started", "thread_id": "t"}))
+    stream.feed(_jsonl({"type": "turn.started"}))
+    for index in range(5000):
+        stream.feed(_jsonl(_item("item.started", f"i{index}", "command_execution")))
+        stream.feed(_jsonl(_item("item.completed", f"i{index}", "command_execution")))
+    stream.feed(_jsonl(_item("item.completed", "m", "agent_message", text=_PASS_MESSAGE)))
+    stream.feed(_jsonl({"type": "turn.completed", "usage": {}}))
+
+    assert stream.finish(returncode=0).kind is AgentResultKind.PASS
+    assert len(stream._open_items) == 0
+
+
+def test_stream_parser_rejects_too_many_concurrently_open_items() -> None:
+    from subsched.agents.codex import MAX_OPEN_CODEX_ITEMS, CodexJsonlStream
+
+    stream = CodexJsonlStream()
+    stream.feed(_jsonl({"type": "thread.started", "thread_id": "t"}))
+    stream.feed(_jsonl({"type": "turn.started"}))
+    for index in range(MAX_OPEN_CODEX_ITEMS + 1):
+        stream.feed(_jsonl(_item("item.started", f"i{index}", "command_execution")))
+    stream.feed(_jsonl(_item("item.completed", "m", "agent_message", text=_PASS_MESSAGE)))
+    stream.feed(_jsonl({"type": "turn.completed", "usage": {}}))
+
+    assert stream.finish(returncode=0).kind is AgentResultKind.FAILURE
+
+
+@pytest.mark.parametrize("line", [b"{not json", b"[1]", b'{"no_type": 1}', b"\xff\xfe"])
+def test_stream_parser_malformed_line_is_sticky_failure(line: bytes) -> None:
+    from subsched.agents.codex import CodexJsonlStream
+
+    stream = CodexJsonlStream()
+    stream.feed(_jsonl({"type": "thread.started", "thread_id": "t"}))
+    stream.feed(line)
+    stream.feed(_jsonl({"type": "turn.started"}))
+    stream.feed(_jsonl(_item("item.completed", "m", "agent_message", text=_PASS_MESSAGE)))
+    stream.feed(_jsonl({"type": "turn.completed", "usage": {}}))
+
+    assert stream.finish(returncode=0).kind is AgentResultKind.FAILURE
+
+
+def test_stream_parser_empty_stream_is_malformed() -> None:
+    from subsched.agents.codex import CodexJsonlStream
+
+    assert CodexJsonlStream().finish(returncode=0).kind is AgentResultKind.FAILURE
+
+
+def _fake_codex_request(tmp_path: Path, script: str, **overrides: Any) -> Any:
+    from subsched.agents.base import ProcessExecutionRequest
+
+    return ProcessExecutionRequest(
+        argv=(sys.executable, "-c", script),
+        cwd=tmp_path,
+        env={"PATH": os.environ.get("PATH", "")},
+        timeout_seconds=30.0,
+        grace_seconds=1.0,
+        **overrides,
+    )
+
+
+_LARGE_STREAM_SCRIPT = """
+import json, sys
+def emit(e):
+    sys.stdout.write(json.dumps(e) + "\\n")
+emit({"type": "thread.started", "thread_id": "t"})
+emit({"type": "turn.started"})
+for i in range(2000):
+    emit({"type": "item.started", "item": {"id": f"c{i}", "type": "command_execution"}})
+    emit({"type": "item.completed", "item": {"id": f"c{i}", "type": "command_execution",
+          "aggregated_output": "z" * 400}})
+emit({"type": "item.completed", "item": {"id": "m", "type": "agent_message",
+      "text": json.dumps({"result": "pass", "summary": "ok", "reason_code": None})}})
+emit({"type": "turn.completed", "usage": {}})
+"""
+
+
+def test_codex_agent_streams_valid_jsonl_larger_than_output_limit(tmp_path: Path) -> None:
+    """#475: > 1 MiB of valid events completes as PASS instead of 'output limit exceeded'."""
+    from subsched.agents.codex import CodexAgent
+
+    agent = CodexAgent(allow_live=True, subscription_billing_verified=True)
+    request = _fake_codex_request(tmp_path, _LARGE_STREAM_SCRIPT, output_limit_bytes=1_048_576)
+
+    result = agent.execute(request)
+
+    assert result.kind is AgentResultKind.PASS
+
+
+def test_codex_agent_oversized_single_event_is_bounded_failure(tmp_path: Path) -> None:
+    from subsched.agents.codex import CodexAgent
+
+    script = "import sys; sys.stdout.write('{\"type\": \"' + 'A' * 5000 + '\"}\\n')"
+    agent = CodexAgent(allow_live=True, subscription_billing_verified=True)
+
+    result = agent.execute(_fake_codex_request(tmp_path, script, output_limit_bytes=1000))
+
+    assert result.kind is AgentResultKind.FAILURE
+    assert "output limit exceeded" in result.output
+
+
+def test_codex_agent_truncated_stream_is_fail_closed(tmp_path: Path) -> None:
+    from subsched.agents.codex import CodexAgent
+
+    script = (
+        "import json,sys\n"
+        "sys.stdout.write(json.dumps({'type':'thread.started','thread_id':'t'})+'\\n')\n"
+        "sys.stdout.write(json.dumps({'type':'turn.started'})+'\\n')\n"
+    )
+    agent = CodexAgent(allow_live=True, subscription_billing_verified=True)
+
+    result = agent.execute(_fake_codex_request(tmp_path, script))
+
+    assert result.kind is AgentResultKind.FAILURE
