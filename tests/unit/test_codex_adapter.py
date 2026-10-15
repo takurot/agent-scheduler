@@ -430,8 +430,10 @@ def test_probe_terminates_process_group_when_stdout_exceeds_limit(
         executable=executable,
         cwd=tmp_path,
         output_schema=schema,
-        timeout_seconds=2,
-        terminate_grace_seconds=1,
+        # #478: generous budgets; the overflow path returns immediately, so a loaded
+        # host that delays /bin/sh startup must not trip the wall-clock timeout.
+        timeout_seconds=30,
+        terminate_grace_seconds=5,
         output_limit_bytes=128,
     )
 
@@ -487,8 +489,10 @@ def test_probe_kills_descendant_that_holds_stdout_after_leader_exits(tmp_path: P
         executable=executable,
         cwd=tmp_path,
         output_schema=schema,
-        timeout_seconds=1,
-        terminate_grace_seconds=0.1,
+        # #478: the descendant keeps stdout open, so cleanup waits one grace period;
+        # keep both budgets generous enough for a loaded host.
+        timeout_seconds=30,
+        terminate_grace_seconds=1,
     )
 
     result = run_codex_probe(
