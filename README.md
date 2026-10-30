@@ -551,6 +551,16 @@ subsched doctor
   metered, third-party, unauthenticated, malformed, and unknown states rejected
 - Verification toolchain availability (#364): confirms all executables in `verification.commands` (e.g. `cargo`, `pytest`, `npm`) exist in the worker container image
 
+Isolation is reported as `VERIFIED` or `UNVERIFIED`, rather than binary `FOUND`.
+Failed runtime/image/network/proxy inspections include `stage`, `reason`, the safe
+configured resource identifier, and a read-only check such as `docker network inspect
+subsched-internal`. Reasons distinguish `timeout`, `permission_denied`,
+`connection_failed`, recognized Docker `missing` responses, `invalid_json`, and
+`runtime_unavailable`; unrecognized failures remain `inspection_failed` and block
+dispatch. Raw Docker output, environment values, and credential contents are never
+included. Isolation inspection does not pull images, create/delete resources, or
+change task state; recovery remains an operator action.
+
 > [!TIP]
 > **Worker Image Requirements & Pre-baking Toolchains**: Because worker containers execute with a read-only rootfs and internal network without general internet access, all compilers, linters, test runners, and `procps` (`ps`, per #337) must be pre-baked into the worker container image (#364). See [`examples/docker/`](examples/docker/) for reference Dockerfiles (`Dockerfile.worker-rust`, `Dockerfile.worker-python`) and build instructions.
 
