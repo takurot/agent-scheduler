@@ -326,6 +326,16 @@ Schedulerが管理するコンテナ隔離ワークツリー（`subsched/issue-N
 
 コンテナ固有の環境制約（`ps`欠落、ファイルシステム権限差異等）によりリポジトリ全体のフル品質ゲート（`bash scripts/quality_gate.sh`）で無関係な既存テストが失敗した場合、スコープ付きテストの合格を確認した上でローカルコミットを作成する（`NEEDS_HUMAN`に不要にエスカレーションしない）。リポジトリ全体の厳格なフル品質ゲートは、タスク終了後の `VERIFYING` ステージでScheduler自身が独立して実行・検証する。対象設定で`isolation.backend: container`が有効な場合、このScheduler検証もworker imageを使うネットワーク遮断コンテナ内で実行し、ホスト上で直接実行しない。
 
+### 7.2 Online dependency audits (issue #495)
+
+Review online requirements during verification planning. Network-none VERIFYING
+cannot fetch current advisory data, and a toolchain probe only checks tool presence.
+The [independent CI contract spike](ONLINE_AUDIT_DESIGN.md) specifies provenance,
+target and freshness checks, but does not enable automatic evidence ingestion or
+replace the mandatory full gate. Reject unsupported plans before dispatch. Keep
+separate evidence for real Docker network denial and a trusted online audit; local
+or synthetic results cannot be reported as both. See the RUNBOOK for preparation.
+
 ## 8. ドキュメントとstate schemaの同期
 
 次の変更は、コードと同じPRで文書を更新する。

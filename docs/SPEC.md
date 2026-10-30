@@ -3190,6 +3190,23 @@ Mocked runtime responses and argv inspection supplement these tests but cannot r
 them. Both the adversarial tests and the full repository quality gate must pass before
 the isolation backend is considered complete or native execution is enabled through it.
 
+### Online audit contract spike (issue #495)
+
+Network-none verification cannot obtain live dependency advisory information.
+The [design and evidence contract](ONLINE_AUDIT_DESIGN.md) selects independent CI
+rather than an unvalidated advisory cache. Full verification requires both offline
+gates and a fresh authenticated online audit bound to repository, exact commit,
+lock and complete package inventory, tool, policy and trusted workflow. Unknown,
+stale, tampered or different-target evidence fails closed. Repository-produced
+artifacts cannot authenticate themselves.
+
+This is a design spike only: no composite gate or authenticated CI importer is
+enabled. Operators must reject unsupported online verification plans before
+dispatch; removing the audit does not establish full PASS. Existing VERIFYING
+isolation and mandatory gate semantics remain unchanged. Live Docker reproduction
+and independently authenticated online success are separate acceptance evidence;
+synthetic fixtures establish neither.
+
 ### Codex sandbox mode under container isolation (issue #314)
 
 Codex's own `--sandbox workspace-write`/`read-only` modes shell out to Bubblewrap

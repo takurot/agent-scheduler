@@ -81,6 +81,29 @@ CI and release jobs run the opt-in tests as skips; their green status alone does
 establish a live Docker boundary result. A failed or missing report requires another
 explicit run after correction.
 
+### Online audit planning (issue #495)
+
+Before dispatch, inspect verification commands and invoked scripts for online
+requirements, including `pip-audit`. Installed tools do not imply advisory access.
+Read the [selected independent-CI contract](ONLINE_AUDIT_DESIGN.md), including its
+actor boundaries, package inventory, authentication and 24-hour freshness policy.
+Prepare a separately trusted immutable audit workflow on an ephemeral CI runner;
+never give repository code host HOME, credentials, runtime sockets or host execution.
+Keep normal test/lint in network-none containers.
+
+Automatic combination of offline results and online evidence is not implemented.
+Stop an unsupported split verification plan before dispatch and explain the missing
+independent audit integration. Do not configure offline-only commands as full PASS,
+remove mandatory audits, widen the proxy, enable host fallback, or retry workers
+for unavailable metadata. Preserve already-created task worktrees and handoffs for
+operator review. A green ordinary CI badge alone does not implement this contract.
+
+For the spike, independently authenticate the CI run/attempt and evidence digest,
+match all target bindings, and reject age >=24 hours, future time, missing provenance,
+advisories or failed/skipped/unknown runs. Follow the design's two-record live
+procedure: network-none Docker reproduction and a separate successful trusted online
+audit. These are still outstanding; synthetic tests are not live evidence.
+
 ### Initializing & Running Scheduler
 ```bash
 # Natural language instruction discovery
