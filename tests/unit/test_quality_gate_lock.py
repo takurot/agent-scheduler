@@ -15,9 +15,22 @@ from packaging.version import Version
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "quality_gate.sh"
 
 
-@pytest.mark.parametrize("package,minimum", [("pyjwt", "2.15.1"), ("urllib3", "2.8.0")])
+@pytest.mark.parametrize(
+    "package,minimum",
+    [
+        ("pyjwt", "2.15.1"),
+        ("urllib3", "2.8.0"),
+        # Issue #491: certifi's PYSEC-2026-4320 appears twice in the pip-audit
+        # output (fixed versions 2026.10.18 and 2026.10.19); both are distinct
+        # rows for the same advisory, so the single highest floor covers it.
+        ("certifi", "2026.10.19"),
+        ("filelock", "4.2.1"),
+        ("msgpack", "1.2.3"),
+        ("opentelemetry-api", "1.45.1"),
+    ],
+)
 def test_lock_excludes_vulnerable_dependency_versions(package: str, minimum: str) -> None:
-    """Issue #449: retain the audited security updates in the frozen environment."""
+    """Issues #449, #491: retain the audited security updates in the frozen environment."""
     with (SCRIPT.parents[1] / "uv.lock").open("rb") as lock_file:
         lock = tomllib.load(lock_file)
     versions = [entry["version"] for entry in lock["package"] if entry["name"] == package]
