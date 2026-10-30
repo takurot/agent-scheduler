@@ -36,6 +36,12 @@ worktrees, Scheduler state, and runtime sockets are not mounted. Unconfigured or
 unverifiable isolation fails closed; `--allow-native` and billing assertions cannot
 override it. See [SPEC §72.2](docs/SPEC.md#722-native-container-isolation-issue-293).
 
+Verification gates use the same worker image with `--network none`, no provider auth,
+and a separate Git snapshot overlaid at `.git`. Both ordinary repositories and linked
+worktrees support normal Git discovery without exposing the host's shared Git metadata.
+The snapshot has committed objects/branches and a HEAD-seeded index; its changes are never
+imported back. Unsafe or missing source metadata fails closed. See SPEC §72.2 for details.
+
 The Scheduler, host kernel/Docker engine, pinned worker/proxy images, and operator-owned
 proxy allowlist remain trusted. Native runs also require
 `--subscription-billing-verified` as explicit operator authorization. The flag is not

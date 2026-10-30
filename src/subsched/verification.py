@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +11,7 @@ from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.isolation import (
     cleanup_native_container,
     native_container_name,
+    prepare_verification_git,
     wrap_verification_request,
 )
 from subsched.agents.process import (
@@ -101,6 +104,7 @@ def run_verification(
             timeout_seconds=timeout_seconds,
             output_limit_bytes=output_limit_bytes,
         )
+        snapshot_root: Path | None = None
         container_name: str | None = None
         container_runtime: Path | None = None
         if isolation_config is not None and isolation_config.backend == "container":
@@ -119,13 +123,18 @@ def run_verification(
             container_runtime = isolation_runtime_executable
             container_name = native_container_name("verification")
             try:
+                snapshot_root = Path(tempfile.mkdtemp(prefix="subsched-verification-")).resolve()
+                git_context = prepare_verification_git(worktree_dir, snapshot_root / "git")
                 req = wrap_verification_request(
                     req,
                     config=isolation_config,
                     runtime_executable=isolation_runtime_executable,
                     container_name=container_name,
+                    git_context=git_context,
                 )
-            except ValueError as error:
+            except (ValueError, OSError) as error:
+                if snapshot_root is not None:
+                    shutil.rmtree(snapshot_root)
                 all_passed = False
                 gate_results.append(
                     GateResult(
@@ -147,6 +156,8 @@ def run_verification(
                     container_name,
                     env=req.env,
                 )
+            if snapshot_root is not None and cleanup_failure is None:
+                shutil.rmtree(snapshot_root)
         cleanup_succeeded = res.cleanup_succeeded and cleanup_failure is None
         # #373: an unconfirmed cleanup invalidates the gate even at exit 0 -- leftover
         # processes are a terminal safety condition, not a green result.

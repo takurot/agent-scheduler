@@ -117,3 +117,22 @@ docker run --rm --network subsched-provider-internal \
   my-registry/subsched-worker-python@sha256:<worker-digest> \
   sh -c 'code="$(curl -sS -o /dev/null -w "%{http_code}" https://chatgpt.com/backend-api/codex)" && test "$code" != 000 && test "$code" != 403'
 ```
+
+## Linked-worktree verification acceptance (issue #499)
+
+Run the real full-gate regressions on a Docker host with a digest-pinned worker image
+that includes this repository's Python/runtime/dependency tools and supports its complete
+networkless quality gate:
+
+```bash
+SUBSCHED_VERIFICATION_DOCKER_TEST=1 \
+SUBSCHED_ISOLATION_WORKER_IMAGE='my-registry/worker@sha256:<digest>' \
+uv run pytest -v tests/integration/test_verification_container.py
+```
+
+Both ordinary and linked repositories run `bash scripts/quality_gate.sh` through
+`run_verification`, with no network or credentials. The tests check Git discovery,
+private metadata writes, and byte preservation of the fixture's host Git metadata,
+linked pointer and sibling worktree. They never import gate Git mutations to the host.
+Unavailable Docker skips by default; explicitly enabled tests fail on missing runtime,
+invalid image pinning, or any gate failure. Skips are not real-container acceptance.
