@@ -913,7 +913,7 @@ See this repository's own [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) 
 | `subsched uncancel <id>` | Restore a `CANCELLED` task to `READY` and preserve its worktree files |
 | `subsched resolve <id> --note <text>` | Resolve a `NEEDS_HUMAN` task to `READY` with sanitized audit logging (`--dry-run`) |
 | `subsched restore-state <file>` | Safely restore scheduler state from a validated backup or quarantine snapshot (`--dry-run`) |
-| `subsched explain <id>` | Explain why an issue is or is not dispatchable without modifying state or making paid probes (`--json`) |
+| `subsched explain <id>` | Explain why an issue is or is not dispatchable, including a paused scheduler or active planning/verification, without modifying state or making paid probes (`--json`) |
 | `subsched mcp` | Run subsched as an MCP server over stdio (`agent-scheduler[mcp]`) |
 | `subsched dispatch-status RUN_ID --json` | Read the persistent status of one detached MCP dispatch |
 | `subsched dashboard` | Serve a local, read-only web dashboard (status, kanban, capacity, metrics, task detail) over stdlib `http.server`, bound to `127.0.0.1` by default with an ephemeral auth token (`--port`, `--host`, `--no-browser`, `--interval`) |

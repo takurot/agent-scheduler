@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from subsched.cli import app
@@ -118,3 +119,47 @@ def test_explain_cli_and_mcp_integration(tmp_path: Path) -> None:
     assert "Issue #42: Diagnosed Issue" in result_text.output
     assert "Dispatchable:       NO" in result_text.output
     assert "Reason Codes:       NEEDS_HUMAN" in result_text.output
+
+
+@pytest.mark.parametrize(
+    ("status", "paused", "reason"),
+    [
+        (TaskState.READY, True, "SCHEDULER_PAUSED"),
+        (TaskState.PLANNING, False, "PLANNING"),
+        (TaskState.VERIFYING, False, "VERIFYING"),
+        (TaskState.DISCOVERED, False, "DISCOVERED"),
+        (TaskState.ELIGIBILITY_CHECK, False, "ELIGIBILITY_CHECK"),
+        (TaskState.DISPATCHED, False, "DISPATCHED"),
+        (TaskState.PLAN_REVIEW, False, "PLAN_REVIEW"),
+        (TaskState.PR_READY, False, "PR_READY"),
+        (TaskState.NEEDS_REBASE, False, "NEEDS_REBASE"),
+        (TaskState.RETRY, False, "RETRY"),
+        (TaskState.FAILED, False, "FAILED"),
+        (TaskState.READY, False, None),
+        (TaskState.PR_REVIEW, False, None),
+        (TaskState.REVISING, False, None),
+        (TaskState.WAITING_CAPACITY, False, None),
+        (TaskState.WAITING_DEPENDENCY, False, None),
+    ],
+)
+def test_cli_and_mcp_explain_snapshot_state_without_mutation(
+    tmp_path: Path, status: TaskState, paused: bool, reason: str | None
+) -> None:
+    (tmp_path / ".git").mkdir()
+    store = JsonStateStore(tmp_path)
+    issue = Issue(number=42, title="Snapshot")
+    task = replace(Task.from_issue(issue), status=status)
+    store.save_state((task,), capacities=(_capacity(observed_at=datetime.now(UTC)),), paused=paused)
+    before = store.load_snapshot()
+
+    cli = runner.invoke(app, ["--repository", str(tmp_path), "explain", "42", "--json"])
+    assert cli.exit_code == 0
+    cli_result = json.loads(cli.output)
+    mcp_result = explain_task(42, str(tmp_path))
+    assert cli_result == mcp_result
+    assert cli_result["dispatchable"] is (reason is None)
+    if reason:
+        assert reason in cli_result["reason_codes"]
+        if paused:
+            assert any("subsched resume" in action for action in cli_result["operator_actions"])
+    assert store.load_snapshot() == before
