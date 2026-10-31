@@ -3666,3 +3666,8 @@ SPA（`src/subsched/dashboard/static/index.html`、Vanilla JS + インラインC
 いずれも`?token=...`必須。クライアントはSSEではなく軽量ポーリング
 （既定2秒、`--interval`で変更可）で`revision`の変化のみを監視し、変化した場合に
 限り再描画する。
+
+選択中のtask detailはrevision変化時に再取得する。taskが消失した場合や取得に失敗した
+場合は古い詳細を消して利用不可と表示し、遅い旧responseで別taskの選択を上書きしない。
+handoffファイルだけの更新はstate revisionを進めないため、次のstate更新またはtaskの
+再選択時に反映する。

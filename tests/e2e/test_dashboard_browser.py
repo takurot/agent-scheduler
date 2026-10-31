@@ -212,3 +212,157 @@ def test_stale_warning_remains_until_secondary_data_recovers(
         expect(page.locator("#banner")).to_be_hidden(timeout=5000)
     finally:
         page.close()
+
+
+def test_selected_detail_updates_when_revision_changes(
+    browser: Browser, dashboard_url: str, tmp_path: Path
+) -> None:
+    store = JsonStateStore(tmp_path)
+    handoff = store.handoffs_dir / "1.md"
+    handoff.write_text("first handoff", encoding="utf-8")
+    page = browser.new_page()
+    try:
+        page.goto(dashboard_url)
+        page.get_by_text("#1 Task 1", exact=True).click(timeout=5000)
+        expect(page.locator("#detail-body")).to_contain_text("first handoff")
+        handoff.write_text("updated handoff", encoding="utf-8")
+        store.set_paused(True)
+        expect(page.locator("#status-summary")).to_contain_text("Paused: true", timeout=5000)
+        expect(page.locator("#detail-body")).to_contain_text("updated handoff", timeout=5000)
+    finally:
+        page.close()
+
+
+@pytest.mark.parametrize("failure", ["missing", "network"])
+def test_selected_detail_becomes_unavailable_on_failure(
+    browser: Browser, dashboard_url: str, tmp_path: Path, failure: str
+) -> None:
+    store = JsonStateStore(tmp_path)
+    (store.handoffs_dir / "1.md").write_text("old handoff", encoding="utf-8")
+    page = browser.new_page()
+    failed = {"enabled": False}
+    try:
+        def handle_detail(route: Route) -> None:
+            if failed["enabled"] and failure == "network":
+                route.abort("failed")
+            else:
+                route.continue_()
+
+        page.route("**/api/tasks/1?*", handle_detail)
+        page.goto(dashboard_url)
+        page.get_by_text("#1 Task 1", exact=True).click(timeout=5000)
+        expect(page.locator("#detail-body")).to_contain_text("old handoff")
+        failed["enabled"] = True
+        if failure == "missing":
+            store.save_tasks(())
+        else:
+            store.set_paused(True)
+        expect(page.locator("#detail-body")).to_contain_text("Task #1 is unavailable", timeout=5000)
+        expect(page.locator("#detail-body")).not_to_contain_text("old handoff")
+        if failure == "network":
+            failed["enabled"] = False
+            expect(page.locator("#detail-body")).to_contain_text("old handoff", timeout=5000)
+    finally:
+        page.close()
+
+
+def test_late_old_detail_cannot_overwrite_new_selection(
+    browser: Browser, dashboard_url: str, tmp_path: Path
+) -> None:
+    store = JsonStateStore(tmp_path)
+    task2 = Task(task_id="github-2", issue_number=2, title="Task 2", labels=(),
+                 status=TaskState.IN_PROGRESS)
+    store.save_tasks((*store.load_tasks(), task2))
+    (store.handoffs_dir / "1.md").write_text("first handoff", encoding="utf-8")
+    (store.handoffs_dir / "2.md").write_text("second handoff", encoding="utf-8")
+    page = browser.new_page()
+    pending: list[Route] = []
+    try:
+        page.route("**/api/tasks/1?*", lambda route: pending.append(route))
+        page.goto(dashboard_url)
+        page.get_by_text("#1 Task 1", exact=True).click(timeout=5000)
+        for _ in range(50):
+            if pending:
+                break
+            page.wait_for_timeout(100)
+        assert pending, "first detail request did not start"
+        page.get_by_text("#2 Task 2", exact=True).click()
+        expect(page.locator("#detail-body")).to_contain_text("second handoff", timeout=5000)
+        pending.pop().continue_()
+        page.wait_for_timeout(500)
+        expect(page.locator("#detail-body")).to_contain_text("#2 Task 2")
+        expect(page.locator("#detail-body")).not_to_contain_text("first handoff")
+    finally:
+        page.close()
+
+
+def test_new_selection_does_not_block_polling_on_old_detail(
+    browser: Browser, dashboard_url: str, tmp_path: Path
+) -> None:
+    store = JsonStateStore(tmp_path)
+    task2 = Task(task_id="github-2", issue_number=2, title="Task 2", labels=(),
+                 status=TaskState.IN_PROGRESS)
+    store.save_tasks((*store.load_tasks(), task2))
+    (store.handoffs_dir / "1.md").write_text("first handoff", encoding="utf-8")
+    (store.handoffs_dir / "2.md").write_text("second handoff", encoding="utf-8")
+    page = browser.new_page()
+    pending: list[Route] = []
+    hold = {"enabled": False}
+    try:
+        def handle_first(route: Route) -> None:
+            if hold["enabled"]:
+                pending.append(route)
+            else:
+                route.continue_()
+
+        page.route("**/api/tasks/1?*", handle_first)
+        page.goto(dashboard_url)
+        page.get_by_text("#1 Task 1", exact=True).click(timeout=5000)
+        expect(page.locator("#detail-body")).to_contain_text("first handoff")
+        hold["enabled"] = True
+        store.set_paused(True)
+        for _ in range(50):
+            if pending:
+                break
+            page.wait_for_timeout(100)
+        assert pending, "refresh request did not start"
+        page.get_by_text("#2 Task 2", exact=True).click()
+        expect(page.locator("#detail-body")).to_contain_text("second handoff", timeout=5000)
+        store.set_paused(False)
+        expect(page.locator("#status-summary")).to_contain_text("Paused: false", timeout=5000)
+        expect(page.locator("#detail-body")).to_contain_text("second handoff")
+    finally:
+        page.close()
+
+
+def test_stalled_detail_request_becomes_unavailable_and_recovers(
+    browser: Browser, dashboard_url: str, tmp_path: Path
+) -> None:
+    store = JsonStateStore(tmp_path)
+    (store.handoffs_dir / "1.md").write_text("first handoff", encoding="utf-8")
+    page = browser.new_page()
+    pending: list[Route] = []
+    hold = {"enabled": False}
+    try:
+        def handle_detail(route: Route) -> None:
+            if hold["enabled"]:
+                pending.append(route)
+            else:
+                route.continue_()
+
+        page.route("**/api/tasks/1?*", handle_detail)
+        page.goto(dashboard_url)
+        page.get_by_text("#1 Task 1", exact=True).click(timeout=5000)
+        expect(page.locator("#detail-body")).to_contain_text("first handoff")
+        hold["enabled"] = True
+        store.set_paused(True)
+        expect(page.locator("#detail-body")).to_contain_text(
+            "Task #1 is unavailable", timeout=15000
+        )
+        expect(page.locator("#banner")).to_contain_text("stale")
+        hold["enabled"] = False
+        if len(pending) > 1:
+            pending[-1].continue_()
+        expect(page.locator("#detail-body")).to_contain_text("first handoff", timeout=5000)
+    finally:
+        page.close()
