@@ -3671,3 +3671,6 @@ SPA（`src/subsched/dashboard/static/index.html`、Vanilla JS + インラインC
 場合は古い詳細を消して利用不可と表示し、遅い旧responseで別taskの選択を上書きしない。
 handoffファイルだけの更新はstate revisionを進めないため、次のstate更新またはtaskの
 再選択時に反映する。
+Kanbanのtaskは表示名をaccessible nameとするnative buttonとし、Tabでの移動と
+Enter/Spaceでの詳細表示を提供する。対象taskが残る場合、ポーリング時の再描画でも
+キーボードfocusを維持する。

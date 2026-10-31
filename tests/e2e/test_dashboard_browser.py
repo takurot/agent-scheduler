@@ -366,3 +366,46 @@ def test_stalled_detail_request_becomes_unavailable_and_recovers(
         expect(page.locator("#detail-body")).to_contain_text("first handoff", timeout=5000)
     finally:
         page.close()
+
+
+@pytest.mark.parametrize("key", ["Enter", "Space"])
+def test_keyboard_can_open_task_detail(browser: Browser, dashboard_url: str, key: str) -> None:
+    page = browser.new_page()
+    try:
+        page.goto(dashboard_url)
+        button = page.get_by_role("button", name="#1 Task 1", exact=True)
+        expect(button).to_be_visible(timeout=5000)
+        page.keyboard.press("Tab")
+        expect(button).to_be_focused()
+        assert button.evaluate("el => getComputedStyle(el).outlineStyle") != "none"
+        page.keyboard.press(key)
+        expect(page.locator("#detail-body")).to_contain_text("#1 Task 1", timeout=5000)
+    finally:
+        page.close()
+
+
+def test_keyboard_focus_survives_polling_and_task_update(
+    browser: Browser, dashboard_url: str, tmp_path: Path
+) -> None:
+    from dataclasses import replace
+
+    store = JsonStateStore(tmp_path)
+    page = browser.new_page()
+    try:
+        page.goto(dashboard_url)
+        button = page.get_by_role("button", name="#1 Task 1", exact=True)
+        expect(button).to_be_visible(timeout=5000)
+        page.keyboard.press("Tab")
+        expect(button).to_be_focused()
+        page.wait_for_timeout(600)
+        expect(button).to_be_focused()
+        store.set_paused(True)
+        expect(page.locator("#status-summary")).to_contain_text("Paused: true", timeout=5000)
+        expect(button).to_be_focused()
+        updated = replace(store.load_tasks()[0], title="Updated task")
+        store.save_tasks((updated,), paused=True)
+        updated_button = page.get_by_role("button", name="#1 Updated task", exact=True)
+        expect(updated_button).to_be_visible(timeout=5000)
+        expect(updated_button).to_be_focused()
+    finally:
+        page.close()
