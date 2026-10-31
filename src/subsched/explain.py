@@ -38,6 +38,17 @@ def explain_issue(
     reasons: list[str] = []
     actions: list[str] = []
 
+    if task is None:
+        reason_codes.append("ISSUE_UNVERIFIED")
+        reasons.append(
+            "Issue is not queued; its existence, labels, and dependencies are unverified."
+        )
+        actions.append(
+            f"Use subsched run --issues {issue.number} --dry-run to discover and queue issues "
+            "without workers; set github.repo or pass --repo OWNER/REPO. "
+            "Dry-run persists discovered tasks."
+        )
+
     if paused:
         reason_codes.append("SCHEDULER_PAUSED")
         reasons.append("Scheduler is paused; new dispatches are disabled.")

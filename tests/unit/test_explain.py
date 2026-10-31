@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -162,4 +163,41 @@ def test_cli_and_mcp_explain_snapshot_state_without_mutation(
         assert reason in cli_result["reason_codes"]
         if paused:
             assert any("subsched resume" in action for action in cli_result["operator_actions"])
+    assert store.load_snapshot() == before
+
+
+@pytest.mark.parametrize("has_capacity", [False, True])
+def test_unregistered_issue_is_unverified_without_mutating_or_probing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, has_capacity: bool
+) -> None:
+    (tmp_path / ".git").mkdir()
+    store = JsonStateStore(tmp_path)
+    capacities = (_capacity(observed_at=datetime.now(UTC)),) if has_capacity else ()
+    store.save_state((), capacities=capacities)
+    before = store.load_snapshot()
+
+    real_run = subprocess.run
+
+    def git_only(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert args[0] == "git" and "rev-parse" in args
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", git_only)
+    cli = runner.invoke(app, ["--repository", str(tmp_path), "explain", "999999", "--json"])
+    assert cli.exit_code == 0
+    result = json.loads(cli.output)
+    assert result == explain_task(999999, str(tmp_path))
+    assert result["current_status"] == "UNQUEUED"
+    assert result["dispatchable"] is False
+    assert result["selected_provider"] is None
+    assert "ISSUE_UNVERIFIED" in result["reason_codes"]
+    assert any(
+        "existence" in reason and "labels" in reason and "dependencies" in reason
+        for reason in result["reasons"]
+    )
+    assert any(
+        "--dry-run" in action and "999999" in action and "persists" in action
+        and "--repo" in action
+        for action in result["operator_actions"]
+    )
     assert store.load_snapshot() == before
