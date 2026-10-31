@@ -14,7 +14,6 @@ from subsched.agents.isolation import (
 from subsched.agents.process import (
     COMMON_ENV_ALLOWLIST,
     filter_environment,
-    redact_sensitive_command_audit,
     run_process_group,
 )
 from subsched.config import NativeIsolationConfig
@@ -34,6 +33,7 @@ class GateResult:
     # #373: mirrors ProcessExecutionResult.cleanup_succeeded -- False means the gate
     # process group may still be running and the exit code must not be trusted as a PASS.
     cleanup_succeeded: bool = True
+    output_limit_exceeded: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,12 +52,37 @@ def _gate_summary(gate: GateResult) -> str:
         return "FAIL (process cleanup unconfirmed)"
     if gate.passed:
         return "PASS"
+    if gate.timed_out:
+        return "FAIL (timeout)"
+    if gate.output_limit_exceeded:
+        return "FAIL (output limit exceeded)"
     if gate.command_not_found:
-        stderr = redact_sensitive_command_audit((gate.stderr,))[0]
-        if len(stderr) > MAX_VERIFICATION_ERROR_CHARS:
-            stderr = stderr[:MAX_VERIFICATION_ERROR_CHARS] + "... [truncated]"
-        return f"FAIL (command not found: {stderr})"
-    return f"FAIL (exit {gate.exit_code})"
+        truncated = " ... [truncated]" if len(gate.stderr) > MAX_VERIFICATION_ERROR_CHARS else ""
+        return f"FAIL (command not found: [REDACTED]{truncated})"
+    stages = {
+        "=== Syncing dependencies ===": "dependency sync",
+        "=== Running Ruff linter ===": "ruff",
+        "=== Running Mypy type checker ===": "mypy",
+        "=== Running Pytest with Coverage Quality Gate (>=80% line, >=80% branch) ===": (
+            "pytest/coverage"
+        ),
+        "=== Running Dependency Vulnerability Audit ===": "dependency audit",
+    }
+    reported_stage = next(
+        (stages[line] for line in reversed(gate.stdout.splitlines()) if line in stages), None
+    )
+    suffix = f"; reported stage: {reported_stage}" if reported_stage else ""
+    try:
+        argv = shlex.split(gate.command)
+    except ValueError:
+        argv = []
+    if len(argv) >= 2 and argv[:2] == ["uv", "run"]:
+        argv = argv[2:]
+        if argv and argv[0] == "--frozen":
+            argv = argv[1:]
+    if argv and argv[0] in {"pytest", "ruff", "mypy", "pip-audit"}:
+        suffix += f"; invoked tool: {argv[0]}"
+    return f"FAIL (exit {gate.exit_code}){suffix}"
 
 
 def run_verification(
@@ -170,6 +195,7 @@ def run_verification(
                 timed_out=res.timed_out,
                 command_not_found=res.command_not_found,
                 cleanup_succeeded=cleanup_succeeded,
+                output_limit_exceeded=res.output_limit_exceeded,
             )
         )
         if not passed:
@@ -182,9 +208,7 @@ def run_verification(
             summary="FAIL (no executable verification commands configured)",
         )
 
-    summary_lines = [
-        f"{g.command}: {_gate_summary(g)}" for g in gate_results
-    ]
+    summary_lines = [f"gate {index}: {_gate_summary(g)}" for index, g in enumerate(gate_results, 1)]
     return VerificationReport(
         passed=all_passed,
         gates=tuple(gate_results),

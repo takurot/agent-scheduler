@@ -607,6 +607,14 @@ merge証拠がない場合は、次回読み込み時にレビュー待ちへ戻
 | **`PR_REVIEW`** | Read-Only (Writable `.ai/reviews/`) | Reviewer agent inspects differential diff (`git diff origin/<base_branch>...HEAD`), runs tests, and persists report `.ai/reviews/<issue>-r<round>.md`. | `APPROVE` advances to PR creation and `READY_FOR_REVIEW`. | `REQUEST_CHANGES` advances to `REVISING` (up to `max_review_cycles`, then `NEEDS_HUMAN`). |
 | **`REVISING`** | Read-Write | Agent reads PR review findings and revises code and tests to address reviewer feedback. | Advances to `VERIFYING`. | Re-enters verification loop. |
 
+Verification checkpoints distinguish timeout, output limit and unconfirmed cleanup.
+Summaries identify gates by execution order without persisting their command arguments.
+For the repository quality-gate script, a failed gate can also include a fixed
+`reported stage` label derived from known progress markers; arbitrary output is not
+included in that label. The label is a diagnostic hint, not proof of execution.
+On retry, workers are instructed to read the prior `.ai/checkpoints/<issue>.json`
+when it exists.
+
 ### Per-Stage Model Routing (`agents.<name>.models`)
 
 Different stages demand different model strengths. For example, architecture planning and code review benefit from deep reasoning capabilities (such as Claude Opus), while code implementation benefits from fast, responsive models (such as Claude Sonnet).

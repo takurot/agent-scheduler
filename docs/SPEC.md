@@ -3194,6 +3194,11 @@ resource limits, `no-new-privileges`, exact-name forced cleanup, and cleanup con
 remain mandatory. Direct host verification is permitted only when isolation is explicitly
 disabled; an enabled container backend with missing runtime inputs fails closed.
 
+Verification summaries distinguish timeout, output limit, and unconfirmed cleanup.
+For recognized quality-gate progress markers, failures may include a fixed reported
+stage label rather than arbitrary output. Stage markers are untrusted hints and cannot
+establish success. Retry prompts identify the prior task checkpoint when available.
+
 The opt-in real-Docker suite uses synthetic host/provider credential canaries and covers
 host-path and runtime-socket denial, allowed proxy egress, direct proxy bypass denial,
 task-local commit import, and timeout descendant cleanup. Mocked tests additionally cover
