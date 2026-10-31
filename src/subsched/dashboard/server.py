@@ -231,7 +231,7 @@ def run_dashboard_server(
 
 
 def find_free_port_from(host: str, start_port: int, *, max_attempts: int = 20) -> int:
-    for candidate in range(start_port, start_port + max_attempts):
+    for candidate in range(start_port, min(start_port + max_attempts, 65536)):
         with (
             contextlib.suppress(OSError),
             socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe,
@@ -239,14 +239,14 @@ def find_free_port_from(host: str, start_port: int, *, max_attempts: int = 20) -
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind((host, candidate))
             return candidate
-    raise OSError(
-        f"no free port found in range {start_port}-{start_port + max_attempts - 1} on {host}"
-    )
+    raise OSError(f"no free port found at or above {min(start_port, 65535)} on {host}")
 
 
 def resolve_port(host: str, requested_port: int) -> int:
     """Return `requested_port` if it's free, otherwise the next free port after it.
     `requested_port == 0` (let the OS choose) is returned unchanged."""
+    if not 0 <= requested_port <= 65535:
+        raise ValueError("port must be between 0 and 65535")
     if requested_port == 0:
         return 0
     with contextlib.suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:

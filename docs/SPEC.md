@@ -3644,6 +3644,8 @@ SPA（`src/subsched/dashboard/static/index.html`、Vanilla JS + インラインC
   リクエスト（`/`を含む全エンドポイント）は`403 Forbidden`を返す。
 - **Read-Only**: `GET`以外の全メソッド（`POST`/`PUT`/`DELETE`/`PATCH`）は常に
   `405 Method Not Allowed`を返す。状態変更エンドポイントは存在しない。
+- **ポート**: `--port`は0〜65535を受け付け、0はOSに割り当てを任せる。使用中の場合の
+  上方向探索は65535までとし、候補がなければ起動失敗として診断する。
 - **パストラバーサル対策**: `GET /api/tasks/{issue}`の`{issue}`は正規表現
   `^[1-9]\d*$`のみを受理する。ハンドオフファイル読み込み（`api._read_handoff_safely`）
   はシンボリックリンクを拒否し、`os.path.commonpath`で解決後のパスが

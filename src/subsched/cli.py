@@ -1424,7 +1424,7 @@ def metrics(
 @app.command()
 def dashboard(
     ctx: typer.Context,
-    port: Annotated[int, typer.Option(help="Port to listen on")] = 8080,
+    port: Annotated[int, typer.Option(help="Port to listen on", min=0, max=65535)] = 8080,
     host: Annotated[str, typer.Option(help="Host to bind")] = "127.0.0.1",
     no_browser: Annotated[
         bool, typer.Option("--no-browser", help="Do not open a browser automatically")
@@ -1442,7 +1442,11 @@ def dashboard(
     if interval <= 0:
         raise typer.BadParameter("must be greater than 0", param_hint="--interval")
     context: Context = ctx.obj
-    server = build_dashboard_server(context.repository, host=host, port=port, interval=interval)
+    try:
+        server = build_dashboard_server(context.repository, host=host, port=port, interval=interval)
+    except OSError as error:
+        typer.echo(f"Unable to start dashboard: {error}", err=True)
+        raise typer.Exit(1) from error
     resolved_port = server.server_address[1]
     url = f"http://{host}:{resolved_port}/?token={server.dashboard_token}"
     typer.echo(f"Dashboard listening at {url}")
