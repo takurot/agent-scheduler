@@ -91,7 +91,8 @@ def explain_issue(
             reason_str = task.needs_human_reason or "unknown"
             reasons.append(f"Issue needs human intervention: {reason_str}")
             actions.append(
-                "Diagnose the failure in the worktree, resolve it, and reset/resolve the task."
+                f"Diagnose and fix the failure, then use subsched resolve {issue.number} "
+                "--note 'describe the fix'."
             )
         elif task.status is TaskState.COMPLETE:
             reason_codes.append("COMPLETE")
@@ -99,7 +100,7 @@ def explain_issue(
         elif task.status is TaskState.CANCELLED:
             reason_codes.append("CANCELLED")
             reasons.append("Task was cancelled.")
-            actions.append("Use subsched reset to restore the task to READY if needed.")
+            actions.append(f"Use subsched uncancel {issue.number} to restore the task to READY.")
         elif task.status is TaskState.IN_PROGRESS:
             reason_codes.append("IN_PROGRESS")
             reasons.append("Task is currently in progress.")

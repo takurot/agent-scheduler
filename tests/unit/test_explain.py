@@ -201,3 +201,46 @@ def test_unregistered_issue_is_unverified_without_mutating_or_probing(
         for action in result["operator_actions"]
     )
     assert store.load_snapshot() == before
+
+
+def test_cancelled_explanation_leads_to_uncancel_and_preserves_files(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    marker = worktree / "work.txt"
+    marker.write_text("preserve", encoding="utf-8")
+    handoff = tmp_path / ".ai" / "handoffs" / "42.md"
+    handoff.parent.mkdir(parents=True)
+    handoff.write_text("preserve handoff", encoding="utf-8")
+    store = JsonStateStore(tmp_path)
+    task = replace(Task.from_issue(Issue(number=42, title="Cancelled")),
+                   status=TaskState.CANCELLED, worktree=str(worktree))
+    store.save_state((task,), capacities=(_capacity(observed_at=datetime.now(UTC)),))
+    before = store.load_snapshot()
+
+    cli = runner.invoke(app, ["--repository", str(tmp_path), "explain", "42", "--json"])
+    assert cli.exit_code == 0
+    result = json.loads(cli.output)
+    assert result == explain_task(42, str(tmp_path))
+    assert any("subsched uncancel 42" in action for action in result["operator_actions"])
+    assert store.load_snapshot() == before
+
+    restored = runner.invoke(app, ["--repository", str(tmp_path), "uncancel", "42"])
+    assert restored.exit_code == 0
+    assert store.load_tasks()[0].status is TaskState.READY
+    assert marker.read_text(encoding="utf-8") == "preserve"
+    assert handoff.read_text(encoding="utf-8") == "preserve handoff"
+
+
+def test_needs_human_explanation_names_resolve_and_note(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    store = JsonStateStore(tmp_path)
+    task = replace(Task.from_issue(Issue(number=43, title="Needs human")),
+                   status=TaskState.NEEDS_HUMAN, needs_human_reason="Fix required")
+    store.save_state((task,))
+    cli = runner.invoke(app, ["--repository", str(tmp_path), "explain", "43", "--json"])
+    assert cli.exit_code == 0
+    result = json.loads(cli.output)
+    assert result == explain_task(43, str(tmp_path))
+    assert any("subsched resolve 43 --note" in action for action in result["operator_actions"])
+    assert not any("reset" in action for action in result["operator_actions"])
