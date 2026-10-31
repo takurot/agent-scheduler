@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tomllib
@@ -109,3 +110,35 @@ def test_stale_lock_fails_without_rewriting_it(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert lock.read_bytes() == original
+
+
+def test_offline_gate_fails_closed_when_bundle_validation_fails(tmp_path: Path) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    shutil.copyfile(SCRIPT, scripts / "quality_gate.sh")
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    uv = binaries / "uv"
+    uv.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\n', encoding="utf-8")
+    uv.chmod(0o755)
+    validator = binaries / "python3"
+    validator.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    validator.chmod(0o755)
+    calls = tmp_path / "calls"
+    env = {
+        **os.environ,
+        "PATH": f"{binaries}:{os.environ['PATH']}",
+        "SUBSCHED_OFFLINE_PYTHON": "1",
+        "CALLS": str(calls),
+    }
+
+    result = subprocess.run(
+        ["bash", str(scripts / "quality_gate.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 42
+    assert calls.read_text().splitlines() == ["lock --check"]

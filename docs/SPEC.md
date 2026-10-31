@@ -2942,6 +2942,14 @@ PID lock
 crash recovery
 ```
 
+Semantic handoffs retain `# Issue` on the first line, a blank second line, and
+`#<issue> <title>` on the third line, followed by the eight required sections.
+The identity must match the task. Readback distinguishes a missing Issue header,
+malformed identity line, missing required section, and identity mismatch without
+including handoff content in diagnostics; invalid handoffs remain fail-closed.
+An identity or required-section failure cannot be bypassed by a fresh mechanical
+checkpoint; existing checkpoint recovery remains available for stale handoffs.
+
 Schedulerを強制killして再起動するテストを行う。
 
 ---
@@ -3166,6 +3174,16 @@ Docker Engine on Linux or Docker Desktop's Linux VM on macOS. Other runtimes and
 unverifiable configurations fail closed. Existing subscription and native opt-in gates
 remain necessary.
 
+Doctor displays isolation as `VERIFIED`/`UNVERIFIED`, independently of executable
+presence. Failed runtime, worker image, network, proxy image, and proxy container
+inspections carry fixed `stage` and `reason` codes, a safe configured resource
+identifier, and a read-only Docker check. Timeout, permission, connection, recognized
+missing-resource responses, unavailable executables, and invalid JSON are distinguished;
+unclassified errors remain `inspection_failed`, never assumed absent. Only fixed
+codes and validated identifiers enter these diagnostics: raw stdout/stderr, exception
+text, environment values, and auth contents are excluded. Inspection remains read-only
+and fail-closed, with no resource creation/deletion, automatic pull, or task mutation.
+
 When `isolation.backend: container`, every Scheduler `VERIFYING` gate (including the
 post-rebase gate) executes in the attested, digest-pinned worker image with
 `--network none`. The verification container receives one writable bind mount for the
@@ -3183,6 +3201,19 @@ The read-only root, unprivileged user, dropped capabilities,
 resource limits, `no-new-privileges`, exact-name forced cleanup, and cleanup confirmation
 remain mandatory. Direct host verification is permitted only when isolation is explicitly
 disabled; an enabled container backend with missing runtime inputs fails closed.
+
+For this repository's quality gate, the operator may use a separately prepared
+offline Python image as described in the runbook. Its immutable bundle binds the
+lock, project and build requirements, Python/uv/platform identity, and wheel hashes.
+The gate validates these before creating a fresh temporary environment; the host
+worktree `.venv` is not shared. Missing, stale, or invalid bundle inputs fail closed.
+The mandatory vulnerability audit remains a separate gate and must not be skipped
+when advisory data is unavailable.
+
+Verification summaries distinguish timeout, output limit, and unconfirmed cleanup.
+For recognized quality-gate progress markers, failures may include a fixed reported
+stage label rather than arbitrary output. Stage markers are untrusted hints and cannot
+establish success. Retry prompts identify the prior task checkpoint when available.
 
 The opt-in real-Docker suite uses synthetic host/provider credential canaries and covers
 host-path and runtime-socket denial, allowed proxy egress, direct proxy bypass denial,
@@ -3545,7 +3576,7 @@ CLIとの並行実行時にも競合やデータ破損を完全に防止する�
 ### Tools (13個)
 1. `subsched_get_status`: キュー状態内訳、タスク一覧、プロバイダークールダウン状態の取得。
 2. `subsched_inspect_task`: 指定Issueの詳細情報、パース済みセマンティックハンドオフ、直近コミットの取得。
-3. `subsched_explain`（#384）: 指定Issueが実行可能か、なぜ保留・除外・ブロックされているかを状態変更なしで診断（eligible/excluded label、未完了依存、選択providerと鮮度、cooldown reset、run予算、必要なoperator actionを理由コードと根拠付きで提示）。
+3. `subsched_explain`（#384）: 指定Issueが実行可能か、なぜ保留・除外・ブロックされているかを状態変更なしで診断（未登録Issueの未検証状態、eligible/excluded label、未完了依存、schedulerのpause、PLANNING/VERIFYING中の状態、選択providerと鮮度、cooldown reset、run予算、必要なoperator actionを理由コードと根拠付きで提示）。pause・task・capacityは同一snapshotから読み、未登録Issueの実在・label・依存を未検証のまま実行可能としない。CANCELLEDには`subsched uncancel <issue>`、NEEDS_HUMANには`subsched resolve <issue> --note ...`を案内する。
 4. `subsched_queue_issues`: GitHubからのIssue自動検出およびキュー登録（`dry_run` 対応）。
 5. `subsched_trigger_dispatch`: バックグラウンドプロセスでの `subsched run` 起動。
 6. `subsched_get_dispatch_run`: `run_id`で非同期起動の状態と安全な失敗理由を取得。
@@ -3629,6 +3660,8 @@ SPA（`src/subsched/dashboard/static/index.html`、Vanilla JS + インラインC
   リクエスト（`/`を含む全エンドポイント）は`403 Forbidden`を返す。
 - **Read-Only**: `GET`以外の全メソッド（`POST`/`PUT`/`DELETE`/`PATCH`）は常に
   `405 Method Not Allowed`を返す。状態変更エンドポイントは存在しない。
+- **ポート**: `--port`は0〜65535を受け付け、0はOSに割り当てを任せる。使用中の場合の
+  上方向探索は65535までとし、候補がなければ起動失敗として診断する。
 - **パストラバーサル対策**: `GET /api/tasks/{issue}`の`{issue}`は正規表現
   `^[1-9]\d*$`のみを受理する。ハンドオフファイル読み込み（`api._read_handoff_safely`）
   はシンボリックリンクを拒否し、`os.path.commonpath`で解決後のパスが
@@ -3636,10 +3669,14 @@ SPA（`src/subsched/dashboard/static/index.html`、Vanilla JS + インラインC
 - **セキュリティヘッダー**: 全レスポンス（エラー含む）に`Content-Security-Policy`、
   `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、
   `Referrer-Policy: no-referrer`、`Cache-Control: no-store`を付与する。
-- **未初期化・破損状態**: `.ai/`が存在しない場合は`{"error": "uninitialized"}`、
-  `StateCorruptionError`（quarantine後の復旧待ち状態）の場合は
+- **未初期化・破損状態**: `.ai/`と`subsched.yaml`が共に存在しない場合は
+  `{"error": "uninitialized"}`、設定済みで未実行なら空snapshotを返しstateを作成しない。
+  `.ai`がsymlinkや通常ファイルの場合、または`StateCorruptionError`（quarantine後の復旧待ち状態）の場合は
   `{"error": "state_corrupted"}`を、いずれも`500`ではなく`200`のJSONペイロード
   として返し、SPA側でクラッシュせず案内バナーを描画できるようにする。
+- **通信・応答エラー**: HTTP失敗、JSON不正、通信失敗、status payload不正を区別して
+  案内し、既存表示を無効な状態で上書きせずstaleと明示する。403では新しいdashboard
+  URLを案内し、正常な応答へ復帰したら警告を解除する。ポーリング失敗のPromiseは処理する。
 
 ## エンドポイント
 
@@ -3648,3 +3685,11 @@ SPA（`src/subsched/dashboard/static/index.html`、Vanilla JS + インラインC
 いずれも`?token=...`必須。クライアントはSSEではなく軽量ポーリング
 （既定2秒、`--interval`で変更可）で`revision`の変化のみを監視し、変化した場合に
 限り再描画する。
+
+選択中のtask detailはrevision変化時に再取得する。taskが消失した場合や取得に失敗した
+場合は古い詳細を消して利用不可と表示し、遅い旧responseで別taskの選択を上書きしない。
+handoffファイルだけの更新はstate revisionを進めないため、次のstate更新またはtaskの
+再選択時に反映する。
+Kanbanのtaskは表示名をaccessible nameとするnative buttonとし、Tabでの移動と
+Enter/Spaceでの詳細表示を提供する。対象taskが残る場合、ポーリング時の再描画でも
+キーボードfocusを維持する。

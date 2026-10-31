@@ -118,7 +118,7 @@ git rev-parse --verify origin/main >/dev/null
 git diff origin/main...HEAD >/dev/null
 git log origin/main..HEAD >/dev/null
 test -z "$(git config --get credential.helper || true)"
-curl --silent --show-error --connect-timeout 10 https://api.openai.com/v1/models >/dev/null
+curl --silent --show-error --connect-timeout 10 https://chatgpt.com/backend-api/codex >/dev/null
 if curl --noproxy '*' --silent --show-error --connect-timeout 3 \
   https://example.com >/dev/null 2>&1; then
   exit 41

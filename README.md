@@ -18,8 +18,15 @@
 - 🔄 **Multi-Stage Autonomous Workflow**: Supports `PLANNING` → `PLAN_REVIEW` → `IN_PROGRESS` → `VERIFYING` → `PR_REVIEW` → `REVISING` with structured JSON approval gates, differential diff inspection, and per-stage model/reasoning effort configuration.
 - ⚡ **Reactive Multi-Agent Failover**: Classifies rate-limit results returned by workers and preserves cooldown/reset state for failover. Proactive provider-capacity monitoring is not yet wired.
 - 🛡️ **Automated TDD & Quality Gates**: Enforces test-driven development, running repository verification (`ruff`, `mypy`, `pytest` with $\ge 80\%$ coverage, `pip-audit`) before pull requests.
+
 - 🔀 **Merge Conflict Protection**: Resolves the repository default branch, fetches its latest `origin` state, rebases onto that remote-tracking ref, and cleanly aborts on conflict before escalating to `NEEDS_HUMAN`.
 - 📊 **Observability & Metrics**: Tracks autonomous completion rates, task success metrics, structured JSON Lines event logs, and markdown run reports.
+
+For this repository's networkless container verification, operators can prepare a
+lock- and platform-specific offline Python image as described in the
+[runbook](docs/RUNBOOK.md#offline-python-environment-for-verification).
+The dependency vulnerability audit remains mandatory and needs its own advisory-data
+solution; preparing Python dependencies alone does not make the full gate pass offline.
 
 ---
 
@@ -141,6 +148,8 @@ Verify local executables and GitHub token scope:
 ```bash
 subsched doctor
 ```
+The token-scope diagnostic checks the active `github.com` account only. Authentication
+on a different GitHub host does not satisfy this check, and token values are never shown.
 
 ### Running Tasks
 
@@ -211,6 +220,25 @@ subsched maintenance --apply
 subsched dashboard
 subsched dashboard --no-browser --port 9000
 ```
+
+After `subsched init`, the dashboard shows an empty queue until the first run without
+creating scheduler state. It prompts for setup when both configuration and state are
+absent, and reports corrupted state separately.
+The dashboard reports expired authentication, HTTP failures, invalid responses, and
+connection failures. Previously displayed data is marked stale until polling succeeds;
+for an expired token, open the new URL printed by a restarted dashboard.
+Dashboard ports range from 0 to 65535; port 0 lets the OS choose. If the requested
+port is occupied, the dashboard searches upward within that range and reports failure
+when no candidate is available.
+An open task detail refreshes when the scheduler state revision changes. A handoff-only
+file edit does not advance that revision; select the task again to refresh it immediately.
+An unavailable or timed-out detail is marked as such and retried on later polls; a
+previous selection's delayed response cannot replace the current detail.
+Kanban tasks are keyboard-accessible buttons: use Tab to focus and Enter or Space to
+open details. Focus is preserved across polling when the task remains present.
+The browser regressions use the development-only Playwright dependency and a locally
+installed Chrome or Chromium (`uv run --frozen pytest tests/e2e/test_dashboard_browser.py`).
+When no browser is available they skip, which does not establish browser test coverage.
 
 Every `subsched run` invocation also writes a local per-run summary (Markdown and
 JSON) under `.ai/runtime/run_summaries/run-<run_id>.{md,json}`, covering the same
@@ -557,6 +585,16 @@ subsched doctor
   metered, third-party, unauthenticated, malformed, and unknown states rejected
 - Verification toolchain availability (#364): confirms all executables in `verification.commands` (e.g. `cargo`, `pytest`, `npm`) exist in the worker container image
 
+Isolation is reported as `VERIFIED` or `UNVERIFIED`, rather than binary `FOUND`.
+Failed runtime/image/network/proxy inspections include `stage`, `reason`, the safe
+configured resource identifier, and a read-only check such as `docker network inspect
+subsched-internal`. Reasons distinguish `timeout`, `permission_denied`,
+`connection_failed`, recognized Docker `missing` responses, `invalid_json`, and
+`runtime_unavailable`; unrecognized failures remain `inspection_failed` and block
+dispatch. Raw Docker output, environment values, and credential contents are never
+included. Isolation inspection does not pull images, create/delete resources, or
+change task state; recovery remains an operator action.
+
 > [!TIP]
 > **Worker Image Requirements & Pre-baking Toolchains**: Because worker containers execute with a read-only rootfs and internal network without general internet access, all compilers, linters, test runners, and `procps` (`ps`, per #337) must be pre-baked into the worker container image (#364). See [`examples/docker/`](examples/docker/) for reference Dockerfiles (`Dockerfile.worker-rust`, `Dockerfile.worker-python`) and build instructions.
 
@@ -602,6 +640,14 @@ merge証拠がない場合は、次回読み込み時にレビュー待ちへ戻
 | **`VERIFYING`** | Scheduler Quality Gate | The Scheduler executes `verification.commands` in a networkless worker-image container when `isolation.backend: container`; direct host execution is limited to explicitly disabled isolation. | Passes advance to `PR_REVIEW` (if enabled) or PR creation. | Test/lint failures return to `IN_PROGRESS` with error diagnostics. |
 | **`PR_REVIEW`** | Read-Only (Writable `.ai/reviews/`) | Reviewer agent inspects differential diff (`git diff origin/<base_branch>...HEAD`), runs tests, and persists report `.ai/reviews/<issue>-r<round>.md`. | `APPROVE` advances to PR creation and `READY_FOR_REVIEW`. | `REQUEST_CHANGES` advances to `REVISING` (up to `max_review_cycles`, then `NEEDS_HUMAN`). |
 | **`REVISING`** | Read-Write | Agent reads PR review findings and revises code and tests to address reviewer feedback. | Advances to `VERIFYING`. | Re-enters verification loop. |
+
+Verification checkpoints distinguish timeout, output limit and unconfirmed cleanup.
+Summaries identify gates by execution order without persisting their command arguments.
+For the repository quality-gate script, a failed gate can also include a fixed
+`reported stage` label derived from known progress markers; arbitrary output is not
+included in that label. The label is a diagnostic hint, not proof of execution.
+On retry, workers are instructed to read the prior `.ai/checkpoints/<issue>.json`
+when it exists.
 
 ### Per-Stage Model Routing (`agents.<name>.models`)
 
@@ -860,6 +906,7 @@ Read the project documentation required by those instructions.
 
 5. **Semantic Handoff Integrity**:
    - If a multi-step task is interrupted or switches agents due to quota limits, workers communicate state through `.ai/handoffs/<issue>.md`.
+   - Preserve the identity layout: `# Issue` on the first line, a blank second line, and `#<issue> <title>` on the third line. The issue number must match the task.
    - Instruct agents to preserve all 8 required section headers (`## Goal`, `## Current Plan`, `## Completed`, `## Current Work`, `## Decisions`, `## Known Broken State`, `## Next Action`, `## Timestamp`) and use strict ISO 8601 timestamps.
 
 ### Example Implementations
@@ -885,7 +932,7 @@ See this repository's own [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) 
 | `subsched uncancel <id>` | Restore a `CANCELLED` task to `READY` and preserve its worktree files |
 | `subsched resolve <id> --note <text>` | Resolve a `NEEDS_HUMAN` task to `READY` with sanitized audit logging (`--dry-run`) |
 | `subsched restore-state <file>` | Safely restore scheduler state from a validated backup or quarantine snapshot (`--dry-run`) |
-| `subsched explain <id>` | Explain why an issue is or is not dispatchable without modifying state or making paid probes (`--json`) |
+| `subsched explain <id>` | Explain why an issue is or is not dispatchable, including unverified issues, a paused scheduler or active planning/verification, without modifying state or making paid probes (`--json`) |
 | `subsched mcp` | Run subsched as an MCP server over stdio (`agent-scheduler[mcp]`) |
 | `subsched dispatch-status RUN_ID --json` | Read the persistent status of one detached MCP dispatch |
 | `subsched dashboard` | Serve a local, read-only web dashboard (status, kanban, capacity, metrics, task detail) over stdlib `http.server`, bound to `127.0.0.1` by default with an ephemeral auth token (`--port`, `--host`, `--no-browser`, `--interval`) |
@@ -923,7 +970,7 @@ Yes, execution details are captured and persisted across multiple layers:
 - **Structured Event Logs**: All scheduler lifecycle events (`dispatch`, `agent_finish`, `capacity_reset_cleared`, `rebase`, `verification`, `pr_create`, etc.) are written to structured logs with ISO 8601 timestamps, issue numbers, and duration metrics.
 - **Agent Process Logs & Transcripts**: Stdout, stderr, and output from native coding agent CLI invocations are captured and recorded in per-task worktree directories and scheduler execution logs.
 - **Task Artifacts & Handoffs**: Every worktree retains `.ai/tasks/<issue>.md`, `.ai/handoffs/<issue>.md`, and `.ai/checkpoints/`, documenting incremental progress across worker dispatches and restarts.
-- **Markdown Run Reports**: Comprehensive execution summaries (covering productivity, reliability, failure breakdowns, and capacity events) can be generated at any time using `subsched metrics --report run_report.md`.
+- **Markdown Run Reports**: Comprehensive execution summaries (covering productivity, reliability, failure breakdowns, and capacity events) can be generated at any time using `subsched metrics --report run_report.md`. Report write failures exit nonzero; with `--json --report`, stdout remains a single JSON document and the save confirmation goes to stderr.
 
 ### 6. Why does the GitHub issue stay open after `subsched` merges its pull request?
 This is expected, fail-closed behavior, not a failure: `github.completion.close_issue` defaults to `false`. `subsched` only appends `Closes #<issue>` to the PR body (which lets GitHub auto-close the issue on merge) when you explicitly opt in.

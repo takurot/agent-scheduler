@@ -66,8 +66,21 @@ def _auth_failure(path: Path) -> str | None:
 
 
 def _json_output(
-    run_cmd: Callable[..., subprocess.CompletedProcess[str]], argv: list[str]
+    run_cmd: Callable[..., subprocess.CompletedProcess[str]], argv: list[str], *, stage: str
 ) -> tuple[Any | None, str | None]:
+    # Only configured identifiers and fixed codes may enter diagnostics. Never echo
+    # resolved executable paths, runtime output, exception text, or environment.
+    resource = "docker" if stage == "runtime" else argv[3]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@+-]*", resource):
+        return None, f"native isolation stage={stage} reason=unsafe_resource (dispatch blocked)"
+    operation = ["docker", "info"] if stage == "runtime" else ["docker", *argv[1:4]]
+
+    def failure(reason: str) -> tuple[None, str]:
+        return None, (
+            f"native isolation stage={stage} reason={reason} resource={resource} "
+            f"(dispatch blocked); check: {shlex.join(operation)}"
+        )
+
     try:
         result = run_cmd(
             argv,
@@ -77,14 +90,36 @@ def _json_output(
             timeout=15,
             env=filter_environment(dict(os.environ), allowlist=COMMON_ENV_ALLOWLIST),
         )
+    except subprocess.TimeoutExpired:
+        return failure("timeout")
+    except PermissionError:
+        return failure("permission_denied")
+    except FileNotFoundError:
+        return failure("runtime_unavailable")
     except (OSError, subprocess.SubprocessError):
-        return None, "native isolation runtime inspection failed"
+        return failure("inspection_failed")
     if result.returncode != 0:
-        return None, "native isolation runtime inspection failed"
+        # Recognize known Docker messages without ever returning their contents.
+        stderr = result.stderr.strip() if isinstance(result.stderr, str) else ""
+        missing = {
+            "worker_image": f"No such image: {resource}",
+            "proxy_image": f"No such image: {resource}",
+            "network": f"network {resource} not found",
+            "proxy_container": f"No such container: {resource}",
+        }.get(stage)
+        if missing is not None and stderr in {
+            missing, f"Error response from daemon: {missing}", f"Error: {missing}"
+        }:
+            return failure("missing")
+        if "permission denied" in stderr.lower():
+            return failure("permission_denied")
+        if "cannot connect to the docker daemon" in stderr.lower():
+            return failure("connection_failed")
+        return failure("inspection_failed")
     try:
         return json.loads(result.stdout), None
     except (json.JSONDecodeError, TypeError):
-        return None, "native isolation runtime returned an invalid inspection result"
+        return failure("invalid_json")
 
 
 def _git(
@@ -363,7 +398,11 @@ def verify_native_isolation(
         )
     runtime_raw = resolver(config.runtime)
     if runtime_raw is None:
-        return "native isolation runtime is unavailable"
+        return (
+            "native isolation runtime is unavailable: "
+            "stage=runtime reason=runtime_unavailable resource=docker "
+            "(dispatch blocked); check: docker info"
+        )
     runtime = Path(runtime_raw)
     if not runtime.is_absolute():
         return "native isolation runtime path is not absolute"
@@ -384,7 +423,9 @@ def verify_native_isolation(
         if failure is not None:
             return failure
 
-    os_type, failure = _json_output(run_cmd, [str(runtime), "info", "--format", "{{json .OSType}}"])
+    os_type, failure = _json_output(
+        run_cmd, [str(runtime), "info", "--format", "{{json .OSType}}"], stage="runtime"
+    )
     if failure is not None:
         return failure
     if os_type != "linux":
@@ -400,6 +441,7 @@ def verify_native_isolation(
             "--format",
             "{{json .}}",
         ],
+        stage="worker_image",
     )
     if failure is not None:
         return failure
@@ -417,6 +459,7 @@ def verify_native_isolation(
     network, failure = _json_output(
         run_cmd,
         [str(runtime), "network", "inspect", config.network, "--format", "{{json .}}"],
+        stage="network",
     )
     if failure is not None:
         return failure
@@ -445,6 +488,7 @@ def verify_native_isolation(
             "--format",
             "{{json .}}",
         ],
+        stage="proxy_image",
     )
     if failure is not None:
         return failure
@@ -462,6 +506,7 @@ def verify_native_isolation(
     proxy, failure = _json_output(
         run_cmd,
         [str(runtime), "container", "inspect", proxy_name, "--format", "{{json .}}"],
+        stage="proxy_container",
     )
     if failure is not None:
         return failure

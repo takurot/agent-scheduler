@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from subsched.cli import app
@@ -118,3 +120,127 @@ def test_explain_cli_and_mcp_integration(tmp_path: Path) -> None:
     assert "Issue #42: Diagnosed Issue" in result_text.output
     assert "Dispatchable:       NO" in result_text.output
     assert "Reason Codes:       NEEDS_HUMAN" in result_text.output
+
+
+@pytest.mark.parametrize(
+    ("status", "paused", "reason"),
+    [
+        (TaskState.READY, True, "SCHEDULER_PAUSED"),
+        (TaskState.PLANNING, False, "PLANNING"),
+        (TaskState.VERIFYING, False, "VERIFYING"),
+        (TaskState.DISCOVERED, False, "DISCOVERED"),
+        (TaskState.ELIGIBILITY_CHECK, False, "ELIGIBILITY_CHECK"),
+        (TaskState.DISPATCHED, False, "DISPATCHED"),
+        (TaskState.PLAN_REVIEW, False, "PLAN_REVIEW"),
+        (TaskState.PR_READY, False, "PR_READY"),
+        (TaskState.NEEDS_REBASE, False, "NEEDS_REBASE"),
+        (TaskState.RETRY, False, "RETRY"),
+        (TaskState.FAILED, False, "FAILED"),
+        (TaskState.READY, False, None),
+        (TaskState.PR_REVIEW, False, None),
+        (TaskState.REVISING, False, None),
+        (TaskState.WAITING_CAPACITY, False, None),
+        (TaskState.WAITING_DEPENDENCY, False, None),
+    ],
+)
+def test_cli_and_mcp_explain_snapshot_state_without_mutation(
+    tmp_path: Path, status: TaskState, paused: bool, reason: str | None
+) -> None:
+    (tmp_path / ".git").mkdir()
+    store = JsonStateStore(tmp_path)
+    issue = Issue(number=42, title="Snapshot")
+    task = replace(Task.from_issue(issue), status=status)
+    store.save_state((task,), capacities=(_capacity(observed_at=datetime.now(UTC)),), paused=paused)
+    before = store.load_snapshot()
+
+    cli = runner.invoke(app, ["--repository", str(tmp_path), "explain", "42", "--json"])
+    assert cli.exit_code == 0
+    cli_result = json.loads(cli.output)
+    mcp_result = explain_task(42, str(tmp_path))
+    assert cli_result == mcp_result
+    assert cli_result["dispatchable"] is (reason is None)
+    if reason:
+        assert reason in cli_result["reason_codes"]
+        if paused:
+            assert any("subsched resume" in action for action in cli_result["operator_actions"])
+    assert store.load_snapshot() == before
+
+
+@pytest.mark.parametrize("has_capacity", [False, True])
+def test_unregistered_issue_is_unverified_without_mutating_or_probing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, has_capacity: bool
+) -> None:
+    (tmp_path / ".git").mkdir()
+    store = JsonStateStore(tmp_path)
+    capacities = (_capacity(observed_at=datetime.now(UTC)),) if has_capacity else ()
+    store.save_state((), capacities=capacities)
+    before = store.load_snapshot()
+
+    real_run = subprocess.run
+
+    def git_only(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert args[0] == "git" and "rev-parse" in args
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", git_only)
+    cli = runner.invoke(app, ["--repository", str(tmp_path), "explain", "999999", "--json"])
+    assert cli.exit_code == 0
+    result = json.loads(cli.output)
+    assert result == explain_task(999999, str(tmp_path))
+    assert result["current_status"] == "UNQUEUED"
+    assert result["dispatchable"] is False
+    assert result["selected_provider"] is None
+    assert "ISSUE_UNVERIFIED" in result["reason_codes"]
+    assert any(
+        "existence" in reason and "labels" in reason and "dependencies" in reason
+        for reason in result["reasons"]
+    )
+    assert any(
+        "--dry-run" in action and "999999" in action and "persists" in action
+        and "--repo" in action
+        for action in result["operator_actions"]
+    )
+    assert store.load_snapshot() == before
+
+
+def test_cancelled_explanation_leads_to_uncancel_and_preserves_files(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    marker = worktree / "work.txt"
+    marker.write_text("preserve", encoding="utf-8")
+    handoff = tmp_path / ".ai" / "handoffs" / "42.md"
+    handoff.parent.mkdir(parents=True)
+    handoff.write_text("preserve handoff", encoding="utf-8")
+    store = JsonStateStore(tmp_path)
+    task = replace(Task.from_issue(Issue(number=42, title="Cancelled")),
+                   status=TaskState.CANCELLED, worktree=str(worktree))
+    store.save_state((task,), capacities=(_capacity(observed_at=datetime.now(UTC)),))
+    before = store.load_snapshot()
+
+    cli = runner.invoke(app, ["--repository", str(tmp_path), "explain", "42", "--json"])
+    assert cli.exit_code == 0
+    result = json.loads(cli.output)
+    assert result == explain_task(42, str(tmp_path))
+    assert any("subsched uncancel 42" in action for action in result["operator_actions"])
+    assert store.load_snapshot() == before
+
+    restored = runner.invoke(app, ["--repository", str(tmp_path), "uncancel", "42"])
+    assert restored.exit_code == 0
+    assert store.load_tasks()[0].status is TaskState.READY
+    assert marker.read_text(encoding="utf-8") == "preserve"
+    assert handoff.read_text(encoding="utf-8") == "preserve handoff"
+
+
+def test_needs_human_explanation_names_resolve_and_note(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    store = JsonStateStore(tmp_path)
+    task = replace(Task.from_issue(Issue(number=43, title="Needs human")),
+                   status=TaskState.NEEDS_HUMAN, needs_human_reason="Fix required")
+    store.save_state((task,))
+    cli = runner.invoke(app, ["--repository", str(tmp_path), "explain", "43", "--json"])
+    assert cli.exit_code == 0
+    result = json.loads(cli.output)
+    assert result == explain_task(43, str(tmp_path))
+    assert any("subsched resolve 43 --note" in action for action in result["operator_actions"])
+    assert not any("reset" in action for action in result["operator_actions"])

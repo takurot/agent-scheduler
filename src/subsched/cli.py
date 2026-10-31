@@ -937,13 +937,12 @@ def explain(
         raise typer.Exit(1) from error
 
     try:
-        tasks = context.store.load_tasks()
-        capacities = context.store.load_capacities()
+        snapshot = context.store.load_snapshot()
     except StateCorruptionError as error:
         typer.echo(f"State error: {error}", err=True)
         raise typer.Exit(1) from error
 
-    matching_task = next((t for t in tasks if t.issue_number == issue_number), None)
+    matching_task = next((t for t in snapshot.tasks if t.issue_number == issue_number), None)
     if matching_task:
         issue = Issue(
             number=matching_task.issue_number,
@@ -954,7 +953,7 @@ def explain(
     else:
         issue = Issue(number=issue_number, title=f"Issue #{issue_number}")
 
-    result = explain_issue(issue, tasks, cfg, capacities)
+    result = explain_issue(issue, snapshot.tasks, cfg, snapshot.capacities, paused=snapshot.paused)
 
     if json_output:
         typer.echo(json.dumps(result, indent=2))
@@ -1324,7 +1323,10 @@ def doctor(
         verification_commands=cfg.verification.commands,
     )
     for check in report.checks:
-        typer.echo(f"{check.name:<8} {'FOUND' if check.found else 'MISSING'}")
+        status = "FOUND" if check.found else "MISSING"
+        if check.name == "isolation":
+            status = "VERIFIED" if check.compatible else "UNVERIFIED"
+        typer.echo(f"{check.name:<8} {status}")
         if not check.compatible and check.error:
             typer.echo(f"  compatibility error: {check.error}")
 
@@ -1347,7 +1349,10 @@ def doctor(
 
     if not report.passed:
         raise typer.Exit(1)
-    typer.echo("Native workers remain disabled until Phase 2 assumptions are validated")
+    typer.echo(
+        "Doctor checks passed. Native execution requires --allow-native and "
+        "--subscription-billing-verified and must pass preflight. Doctor does not launch a worker."
+    )
 
 
 @app.command()
@@ -1403,9 +1408,10 @@ def metrics(
     if report_file is not None:
         try:
             report_file.write_text(report_text, encoding="utf-8")
-            typer.echo(f"Report saved to {report_file}")
         except OSError as error:
             typer.echo(f"Failed to write report to {report_file}: {error}", err=True)
+            raise typer.Exit(1) from error
+        typer.echo(f"Report saved to {report_file}", err=json_output)
 
     if json_output:
         typer.echo(json.dumps(calculated.to_dict(), indent=2))
@@ -1418,7 +1424,7 @@ def metrics(
 @app.command()
 def dashboard(
     ctx: typer.Context,
-    port: Annotated[int, typer.Option(help="Port to listen on")] = 8080,
+    port: Annotated[int, typer.Option(help="Port to listen on", min=0, max=65535)] = 8080,
     host: Annotated[str, typer.Option(help="Host to bind")] = "127.0.0.1",
     no_browser: Annotated[
         bool, typer.Option("--no-browser", help="Do not open a browser automatically")
@@ -1436,7 +1442,11 @@ def dashboard(
     if interval <= 0:
         raise typer.BadParameter("must be greater than 0", param_hint="--interval")
     context: Context = ctx.obj
-    server = build_dashboard_server(context.repository, host=host, port=port, interval=interval)
+    try:
+        server = build_dashboard_server(context.repository, host=host, port=port, interval=interval)
+    except OSError as error:
+        typer.echo(f"Unable to start dashboard: {error}", err=True)
+        raise typer.Exit(1) from error
     resolved_port = server.server_address[1]
     url = f"http://{host}:{resolved_port}/?token={server.dashboard_token}"
     typer.echo(f"Dashboard listening at {url}")

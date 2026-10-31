@@ -696,3 +696,100 @@ def test_verification_rejects_nonregular_linkage_before_reading(
     monkeypatch.setattr(Path, "read_text", read_text)
     with pytest.raises(ValueError, match="Git"):
         prepare_verification_git(worktree, tmp_path / "snapshot")
+
+
+@pytest.mark.parametrize(
+    ("result_options", "expected"),
+    [
+        ({"timed_out": True}, "FAIL (timeout)"),
+        ({"output_limit_exceeded": True}, "FAIL (output limit exceeded)"),
+        ({"cleanup_succeeded": False}, "FAIL (process cleanup unconfirmed)"),
+    ],
+)
+def test_verification_distinguishes_failed_process_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result_options: dict[str, bool], expected: str
+) -> None:
+    import subsched.verification as verification
+    from subsched.agents.base import ProcessExecutionResult
+
+    monkeypatch.setattr(
+        verification, "run_process_group",
+        lambda request: ProcessExecutionResult(exit_code=1, stdout="", **result_options),
+    )
+    report = run_verification(tmp_path, ("safe-command",))
+    assert not report.passed
+    assert expected in report.summary
+
+
+def test_verification_reports_known_gate_stage_without_raw_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subsched.verification as verification
+    from subsched.agents.base import ProcessExecutionResult
+
+    canary = "PRIVATE_ARBITRARY_CANARY"
+    output = (
+        "=== Running Ruff linter ===\nAll checks passed!\n"
+        "=== Running Pytest with Coverage Quality Gate (>=80% line, >=80% branch) ===\n"
+        f"{canary}\nFAILED tests/unit/test_{canary}.py\n"
+    )
+    monkeypatch.setattr(
+        verification, "run_process_group",
+        lambda request: ProcessExecutionResult(exit_code=1, stdout=output, stderr=canary),
+    )
+    report = run_verification(tmp_path, ("bash scripts/quality_gate.sh",))
+    assert not report.passed
+    assert "reported stage: pytest/coverage" in report.summary
+    assert canary not in report.summary
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [("pytest tests/unit", "pytest"), ("uv run --frozen mypy src", "mypy"),
+     ("uv run ruff check .", "ruff")],
+)
+def test_verification_identifies_direct_tool_without_echoing_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, label: str
+) -> None:
+    import subsched.verification as verification
+    from subsched.agents.base import ProcessExecutionResult
+
+    monkeypatch.setattr(
+        verification, "run_process_group",
+        lambda request: ProcessExecutionResult(exit_code=1, stdout="PRIVATE_CANARY"),
+    )
+    report = run_verification(tmp_path, (command,))
+    assert f"invoked tool: {label}" in report.summary
+    assert "PRIVATE_CANARY" not in report.summary
+
+
+def test_verification_summary_omits_arbitrary_command_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subsched.verification as verification
+    from subsched.agents.base import ProcessExecutionResult
+
+    monkeypatch.setattr(
+        verification, "run_process_group",
+        lambda request: ProcessExecutionResult(exit_code=1, stdout=""),
+    )
+    report = run_verification(tmp_path, ("pytest -k PRIVATE_COMMAND_CANARY",))
+    assert "gate 1" in report.summary
+    assert "PRIVATE_COMMAND_CANARY" not in report.summary
+
+
+def test_missing_command_diagnostic_omits_unstructured_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subsched.verification as verification
+    from subsched.agents.base import ProcessExecutionResult
+
+    monkeypatch.setattr(
+        verification, "run_process_group",
+        lambda request: ProcessExecutionResult(
+            exit_code=1, stdout="", stderr="PRIVATE_STDERR_CANARY", command_not_found=True
+        ),
+    )
+    report = run_verification(tmp_path, ("missing-command",))
+    assert "command not found" in report.summary
+    assert "PRIVATE_STDERR_CANARY" not in report.summary

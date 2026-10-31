@@ -17,7 +17,8 @@
   .kanban { display: flex; gap: 0.75rem; overflow-x: auto; }
   .column { background: #1f232a; border-radius: 8px; padding: 0.75rem; min-width: 180px; }
   .column h3 { font-size: 0.8rem; margin: 0 0 0.5rem; opacity: 0.8; }
-  .task-chip { background: #2c313a; border-radius: 4px; padding: 0.3rem 0.5rem; margin-bottom: 0.4rem; font-size: 0.8rem; cursor: pointer; }
+  .task-chip { display: block; width: 100%; border: 0; color: inherit; text-align: left; font: inherit; background: #2c313a; border-radius: 4px; padding: 0.3rem 0.5rem; margin-bottom: 0.4rem; font-size: 0.8rem; cursor: pointer; }
+  .task-chip:focus-visible { outline: 2px solid #9bc8ff; outline-offset: 2px; }
   pre { white-space: pre-wrap; word-break: break-word; font-size: 0.8rem; background: #14161a; padding: 0.75rem; border-radius: 6px; }
 </style>
 </head>
@@ -45,14 +46,24 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
 (function () {
   var token = new URLSearchParams(location.search).get("token") || "";
   var lastRevision = null;
+  var polling = false;
+  var selectedIssue = null;
+  var detailRequest = 0;
+  var detailAbort = null;
+  var lastKanban = null;
 
   function withToken(path) {
     var sep = path.indexOf("?") === -1 ? "?" : "&";
     return path + sep + "token=" + encodeURIComponent(token);
   }
 
-  function fetchJson(path) {
-    return fetch(withToken(path)).then(function (res) { return res.json(); });
+  function fetchJson(path, options) {
+    return fetch(withToken(path), options).catch(function () {
+      throw { kind: "network" };
+    }).then(function (res) {
+      if (!res.ok) { throw { kind: "http", status: res.status }; }
+      return res.json().catch(function () { throw { kind: "json" }; });
+    });
   }
 
   function showBanner(message) {
@@ -66,19 +77,49 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
     el.classList.add("show");
   }
 
+  function showRequestError(error) {
+    lastRevision = null;
+    var message;
+    if (error && error.kind === "http" && error.status === 403) {
+      message = "Authentication expired. Open a new dashboard URL.";
+    } else if (error && error.kind === "http") {
+      message = "Dashboard request failed (HTTP " + error.status + ").";
+    } else if (error && error.kind === "json") {
+      message = "Dashboard returned invalid JSON.";
+    } else if (error && error.kind === "status") {
+      message = "Dashboard returned invalid status data.";
+    } else if (error && error.kind === "payload") {
+      message = "Dashboard returned invalid data.";
+    } else {
+      message = "Dashboard connection failed.";
+    }
+    showBanner(message + " Previously displayed data may be stale.");
+  }
+
   function renderStatus(data) {
-    if (data.error === "uninitialized") {
-      showBanner("Repository is not initialized (.ai/ missing). Run `subsched init` first.");
+    if (data && data.error === "uninitialized") {
+      lastRevision = null;
+      showBanner("Repository is not initialized (configuration missing). Run `subsched init` first. " +
+        "Previously displayed data may be stale.");
       return null;
     }
-    if (data.error === "state_corrupted") {
+    if (data && data.error === "state_corrupted") {
+      lastRevision = null;
       showBanner(
-        "Scheduler state was quarantined after corruption. Restore a verified backup and " +
-          "run recovery before continuing."
+        "Scheduler state is invalid or was quarantined after corruption. Restore a verified backup and " +
+          "run recovery before continuing. Previously displayed data may be stale."
       );
       return null;
     }
-    showBanner(null);
+    if (!data || typeof data.paused !== "boolean" || !Number.isSafeInteger(data.queue_size) ||
+        data.queue_size < 0 || !Number.isSafeInteger(data.revision) || data.revision < 0 ||
+        !Array.isArray(data.active_tasks) ||
+        !data.active_tasks.every(function (task) {
+          return task && Number.isSafeInteger(task.issue_number) && task.issue_number > 0 &&
+            typeof task.status === "string" && typeof task.title === "string";
+        })) {
+      throw { kind: "status" };
+    }
     setLines(document.getElementById("status-summary"), [
       "Paused: " + data.paused,
       "Queue size: " + data.queue_size,
@@ -97,12 +138,20 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
   }
 
   function renderKanban(tasks) {
-    var byStatus = {};
+    var key = JSON.stringify(tasks.map(function (task) {
+      return [task.issue_number, task.title, task.status];
+    }));
+    if (key === lastKanban) { return; }
+    var byStatus = Object.create(null);
     tasks.forEach(function (t) {
       byStatus[t.status] = byStatus[t.status] || [];
       byStatus[t.status].push(t);
     });
     var container = document.getElementById("kanban");
+    var active = document.activeElement;
+    var focusedIssue = active && container.contains(active) && active.classList.contains("task-chip")
+      ? active.dataset.issue : null;
+    var focusTarget = null;
     container.innerHTML = "";
     Object.keys(byStatus).sort().forEach(function (status) {
       var column = document.createElement("div");
@@ -111,18 +160,22 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
       heading.textContent = status + " (" + byStatus[status].length + ")";
       column.appendChild(heading);
       byStatus[status].forEach(function (task) {
-        var chip = document.createElement("div");
+        var chip = document.createElement("button");
+        chip.type = "button";
         chip.className = "task-chip";
+        chip.dataset.issue = String(task.issue_number);
         chip.textContent = "#" + task.issue_number + " " + task.title;
         chip.onclick = function () { loadDetail(task.issue_number); };
+        if (chip.dataset.issue === focusedIssue) { focusTarget = chip; }
         column.appendChild(chip);
       });
       container.appendChild(column);
     });
+    lastKanban = key;
+    if (focusTarget) { focusTarget.focus(); }
   }
 
   function renderCapacity(data) {
-    if (data.error) { return; }
     var el = document.getElementById("capacity-summary");
     var lines = (data.capacities || []).map(function (c) {
       return c.agent + ": " + c.state + (c.used_percentage != null ? " (" + c.used_percentage + "%)" : "");
@@ -135,7 +188,6 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
   }
 
   function renderMetrics(data) {
-    if (data.error) { return; }
     var m = data.metrics || {};
     var el = document.getElementById("metrics-summary");
     setLines(el, [
@@ -145,29 +197,81 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
   }
 
   function loadDetail(issue) {
-    fetchJson("/api/tasks/" + encodeURIComponent(issue)).then(function (data) {
-      var card = document.getElementById("detail-card");
-      var body = document.getElementById("detail-body");
+    var card = document.getElementById("detail-card");
+    var body = document.getElementById("detail-body");
+    if (selectedIssue !== issue) {
+      selectedIssue = issue;
       card.style.display = "block";
-      body.textContent = "";
-      var heading = document.createElement("h3");
-      heading.textContent = "#" + data.issue_number + " " + data.title;
-      var pre = document.createElement("pre");
-      pre.textContent = data.handoff || "(no handoff)";
-      body.appendChild(heading);
-      body.appendChild(pre);
-    });
+      body.textContent = "Loading task #" + issue + "…";
+    }
+    var request = ++detailRequest;
+    if (detailAbort !== null) { detailAbort.abort(); }
+    var controller = new AbortController();
+    detailAbort = controller;
+    var timeout = setTimeout(function () { controller.abort(); }, 10000);
+    return fetchJson("/api/tasks/" + encodeURIComponent(issue), { signal: controller.signal })
+      .then(function (data) {
+        if (request !== detailRequest || selectedIssue !== issue) { return false; }
+        if (!data || data.issue_number !== issue || typeof data.title !== "string" ||
+            (data.handoff !== null && typeof data.handoff !== "string")) {
+          throw { kind: "payload" };
+        }
+        body.textContent = "";
+        var heading = document.createElement("h3");
+        heading.textContent = "#" + data.issue_number + " " + data.title;
+        var pre = document.createElement("pre");
+        pre.textContent = data.handoff || "(no handoff)";
+        body.appendChild(heading);
+        body.appendChild(pre);
+        return true;
+      }).catch(function (error) {
+        if (request !== detailRequest || selectedIssue !== issue) { return false; }
+        body.textContent = "Task #" + issue + " is unavailable.";
+        showRequestError(error);
+        return false;
+      }).finally(function () {
+        clearTimeout(timeout);
+        if (detailAbort === controller) { detailAbort = null; }
+      });
   }
 
   function poll() {
+    if (polling) { return; }
+    polling = true;
     fetchJson("/api/status").then(function (data) {
       var revision = renderStatus(data);
       if (revision !== null && revision !== lastRevision) {
-        lastRevision = revision;
-        fetchJson("/api/capacity").then(renderCapacity);
-        fetchJson("/api/metrics").then(renderMetrics);
+        return Promise.all([fetchJson("/api/capacity"), fetchJson("/api/metrics")])
+          .then(function (results) {
+            var capacity = results[0];
+            var metrics = results[1] && results[1].metrics;
+            var productivity = metrics && metrics.productivity;
+            if (!capacity || capacity.error || !Array.isArray(capacity.capacities) ||
+                !capacity.capacities.every(function (item) {
+                  return item && typeof item.agent === "string" && typeof item.state === "string";
+                }) || !productivity ||
+                !Number.isSafeInteger(productivity.issues_attempted) ||
+                productivity.issues_attempted < 0 ||
+                !Number.isSafeInteger(productivity.issues_implemented) ||
+                productivity.issues_implemented < 0) {
+              throw { kind: "payload" };
+            }
+            renderCapacity(results[0]);
+            renderMetrics(results[1]);
+            if (selectedIssue !== null) {
+              return loadDetail(selectedIssue).then(function (updated) {
+                if (!updated) { return; }
+                lastRevision = revision;
+                showBanner(null);
+              });
+            } else {
+              lastRevision = revision;
+              showBanner(null);
+            }
+          });
       }
-    });
+      if (revision !== null) { showBanner(null); }
+    }).catch(showRequestError).finally(function () { polling = false; });
   }
 
   poll();
