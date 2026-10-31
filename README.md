@@ -208,6 +208,13 @@ subsched dashboard
 subsched dashboard --no-browser --port 9000
 ```
 
+The dashboard reports expired authentication, HTTP failures, invalid responses, and
+connection failures. Previously displayed data is marked stale until polling succeeds;
+for an expired token, open the new URL printed by a restarted dashboard.
+The browser regressions use the development-only Playwright dependency and a locally
+installed Chrome or Chromium (`uv run --frozen pytest tests/e2e/test_dashboard_browser.py`).
+When no browser is available they skip, which does not establish browser test coverage.
+
 Every `subsched run` invocation also writes a local per-run summary (Markdown and
 JSON) under `.ai/runtime/run_summaries/run-<run_id>.{md,json}`, covering the same
 metrics as `subsched metrics` plus any NEEDS_HUMAN issue numbers -- so an overnight
