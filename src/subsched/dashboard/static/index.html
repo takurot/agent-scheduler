@@ -46,14 +46,17 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
   var token = new URLSearchParams(location.search).get("token") || "";
   var lastRevision = null;
   var polling = false;
+  var selectedIssue = null;
+  var detailRequest = 0;
+  var detailAbort = null;
 
   function withToken(path) {
     var sep = path.indexOf("?") === -1 ? "?" : "&";
     return path + sep + "token=" + encodeURIComponent(token);
   }
 
-  function fetchJson(path) {
-    return fetch(withToken(path)).catch(function () {
+  function fetchJson(path, options) {
+    return fetch(withToken(path), options).catch(function () {
       throw { kind: "network" };
     }).then(function (res) {
       if (!res.ok) { throw { kind: "http", status: res.status }; }
@@ -179,18 +182,42 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
   }
 
   function loadDetail(issue) {
-    fetchJson("/api/tasks/" + encodeURIComponent(issue)).then(function (data) {
-      var card = document.getElementById("detail-card");
-      var body = document.getElementById("detail-body");
+    var card = document.getElementById("detail-card");
+    var body = document.getElementById("detail-body");
+    if (selectedIssue !== issue) {
+      selectedIssue = issue;
       card.style.display = "block";
-      body.textContent = "";
-      var heading = document.createElement("h3");
-      heading.textContent = "#" + data.issue_number + " " + data.title;
-      var pre = document.createElement("pre");
-      pre.textContent = data.handoff || "(no handoff)";
-      body.appendChild(heading);
-      body.appendChild(pre);
-    }).catch(showRequestError);
+      body.textContent = "Loading task #" + issue + "…";
+    }
+    var request = ++detailRequest;
+    if (detailAbort !== null) { detailAbort.abort(); }
+    var controller = new AbortController();
+    detailAbort = controller;
+    var timeout = setTimeout(function () { controller.abort(); }, 10000);
+    return fetchJson("/api/tasks/" + encodeURIComponent(issue), { signal: controller.signal })
+      .then(function (data) {
+        if (request !== detailRequest || selectedIssue !== issue) { return false; }
+        if (!data || data.issue_number !== issue || typeof data.title !== "string" ||
+            (data.handoff !== null && typeof data.handoff !== "string")) {
+          throw { kind: "payload" };
+        }
+        body.textContent = "";
+        var heading = document.createElement("h3");
+        heading.textContent = "#" + data.issue_number + " " + data.title;
+        var pre = document.createElement("pre");
+        pre.textContent = data.handoff || "(no handoff)";
+        body.appendChild(heading);
+        body.appendChild(pre);
+        return true;
+      }).catch(function (error) {
+        if (request !== detailRequest || selectedIssue !== issue) { return false; }
+        body.textContent = "Task #" + issue + " is unavailable.";
+        showRequestError(error);
+        return false;
+      }).finally(function () {
+        clearTimeout(timeout);
+        if (detailAbort === controller) { detailAbort = null; }
+      });
   }
 
   function poll() {
@@ -216,8 +243,16 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
             }
             renderCapacity(results[0]);
             renderMetrics(results[1]);
-            lastRevision = revision;
-            showBanner(null);
+            if (selectedIssue !== null) {
+              return loadDetail(selectedIssue).then(function (updated) {
+                if (!updated) { return; }
+                lastRevision = revision;
+                showBanner(null);
+              });
+            } else {
+              lastRevision = revision;
+              showBanner(null);
+            }
           });
       }
       if (revision !== null) { showBanner(null); }

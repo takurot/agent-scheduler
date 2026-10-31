@@ -211,6 +211,10 @@ subsched dashboard --no-browser --port 9000
 The dashboard reports expired authentication, HTTP failures, invalid responses, and
 connection failures. Previously displayed data is marked stale until polling succeeds;
 for an expired token, open the new URL printed by a restarted dashboard.
+An open task detail refreshes when the scheduler state revision changes. A handoff-only
+file edit does not advance that revision; select the task again to refresh it immediately.
+An unavailable or timed-out detail is marked as such and retried on later polls; a
+previous selection's delayed response cannot replace the current detail.
 The browser regressions use the development-only Playwright dependency and a locally
 installed Chrome or Chromium (`uv run --frozen pytest tests/e2e/test_dashboard_browser.py`).
 When no browser is available they skip, which does not establish browser test coverage.
