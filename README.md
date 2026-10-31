@@ -790,6 +790,13 @@ notifications:
 limits. With `workflow.mode: multi-stage` and planning enabled, the first dispatch enters
 `PLANNING`; omitting `workflow` retains standard execution. MCP dispatch uses the same CLI path.
 
+Online dependency audits require fresh advisory access, which network-none VERIFYING
+cannot provide. The [online audit design](docs/ONLINE_AUDIT_DESIGN.md) selects
+independent CI evidence for a contract spike; automatic evidence consumption is
+not implemented. Review online requirements before dispatch and stop unsupported
+plans rather than dropping the audit or enabling network/host fallback. See the
+[operator procedure](docs/RUNBOOK.md#online-audit-planning-issue-495).
+
 `verification.commands` must contain at least one non-blank command. An empty list or blank-only
 entry is rejected instead of being treated as a successful verification run.
 
