@@ -3189,9 +3189,9 @@ post-rebase gate) executes in the attested, digest-pinned worker image with
 `--network none`. The verification container receives one writable bind mount for the
 validated task worktree, an isolated tmpfs HOME and `/tmp`, and no provider credentials,
 proxy settings, host Git database, runtime socket, Scheduler state, or other host
-filesystem mounts. Each gate receives an independent Git snapshot containing committed
-objects and branch refs, with a fresh index seeded from HEAD; working files remain in the
-task mount. The snapshot overlays `.git` (a read-only replacement pointer for linked
+filesystem mounts. Each gate receives an independent Git snapshot containing only HEAD
+and its reachable history, without unrelated branches or tags, with a fresh index seeded
+from HEAD; working files remain in the task mount. The snapshot overlays `.git` (a read-only replacement pointer for linked
 worktrees, a private directory for ordinary repositories) and is also mounted at
 `/run/subsched-git`. Host config, hooks, credentials, alternates and worktree registrations
 are not copied or imported back. Missing/malformed Git metadata, symlinked metadata/path

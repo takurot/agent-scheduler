@@ -617,6 +617,51 @@ def test_verification_git_snapshot_is_independent(tmp_path: Path, linked: bool) 
     } == before
 
 
+@pytest.mark.parametrize("linked", [False, True])
+def test_verification_snapshot_excludes_unrelated_branch_objects(
+    tmp_path: Path, linked: bool
+) -> None:
+    from subsched.agents.isolation import prepare_verification_git
+
+    repo = tmp_path / "repo"
+    _verification_repo(repo)
+    subprocess.run(["git", "-C", str(repo), "switch", "-qc", "unrelated"], check=True)
+    (repo / "unrelated.txt").write_text("synthetic unrelated canary\n")
+    subprocess.run(["git", "-C", str(repo), "add", "unrelated.txt"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "unrelated",
+        ],
+        check=True,
+    )
+    unrelated = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+    ).strip()
+    subprocess.run(["git", "-C", str(repo), "switch", "-q", "topic"], check=True)
+    worktree = repo
+    if linked:
+        worktree = tmp_path / "linked"
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-q", "-b", "task", str(worktree)],
+            check=True,
+        )
+    context = prepare_verification_git(worktree, tmp_path / "snapshot")
+    result = subprocess.run(
+        ["git", f"--git-dir={context.git_dir}", "cat-file", "-e", unrelated],
+        capture_output=True,
+    )
+    assert result.returncode != 0
+
+
 @pytest.mark.parametrize(
     "kind",
     [

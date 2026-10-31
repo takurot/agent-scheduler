@@ -873,6 +873,8 @@ def prepare_verification_git(worktree: Path, snapshot_root: Path) -> IsolationGi
                 "--bare",
                 "--no-local",
                 "--no-hardlinks",
+                "--single-branch",
+                "--no-tags",
                 "--",
                 str(worktree),
                 str(git_dir),
