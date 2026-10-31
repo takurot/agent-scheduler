@@ -6,7 +6,9 @@ import threading
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from subsched.cli import app
 from subsched.dashboard.server import run_dashboard_server
 from subsched.models import Task, TaskState
 from subsched.storage import JsonStateStore
@@ -186,6 +188,49 @@ def test_uninitialized_repository_returns_error_payload(tmp_path: Path) -> None:
         status, payload, _ = _get(server, "/api/status", "tok")
         assert status == 200
         assert payload["error"] == "uninitialized"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_init_then_dashboard_reports_empty_unrun_state_without_creating_it(tmp_path: Path) -> None:
+    server = run_dashboard_server(tmp_path, host="127.0.0.1", port=0, interval=2.0, token="tok")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, before, _ = _get(server, "/api/status", "tok")
+        assert status == 200 and before["error"] == "uninitialized"
+        init = CliRunner().invoke(app, ["init", str(tmp_path), "--repo", "owner/name"])
+        assert init.exit_code == 0, init.output
+        assert not (tmp_path / ".ai").exists()
+
+        status, after, _ = _get(server, "/api/status", "tok")
+        assert status == 200
+        assert "error" not in after
+        assert after["queue_size"] == 0
+        assert after["revision"] == 0
+        assert not (tmp_path / ".ai").exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("state_kind", ["file", "broken_symlink"])
+def test_invalid_state_directory_is_not_treated_as_empty(tmp_path: Path, state_kind: str) -> None:
+    (tmp_path / "subsched.yaml").write_text("github: {}\n", encoding="utf-8")
+    state = tmp_path / ".ai"
+    if state_kind == "file":
+        state.write_text("not a directory", encoding="utf-8")
+    else:
+        state.symlink_to(tmp_path / "missing")
+    server = run_dashboard_server(tmp_path, host="127.0.0.1", port=0, interval=2.0, token="tok")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, payload, _ = _get(server, "/api/status", "tok")
+        assert status == 200 and payload["error"] == "state_corrupted"
     finally:
         server.shutdown()
         server.server_close()

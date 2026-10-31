@@ -208,6 +208,9 @@ subsched dashboard
 subsched dashboard --no-browser --port 9000
 ```
 
+After `subsched init`, the dashboard shows an empty queue until the first run without
+creating scheduler state. It prompts for setup when both configuration and state are
+absent, and reports corrupted state separately.
 The dashboard reports expired authentication, HTTP failures, invalid responses, and
 connection failures. Previously displayed data is marked stale until polling succeeds;
 for an expired token, open the new URL printed by a restarted dashboard.

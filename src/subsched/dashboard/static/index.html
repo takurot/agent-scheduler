@@ -99,14 +99,14 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
   function renderStatus(data) {
     if (data && data.error === "uninitialized") {
       lastRevision = null;
-      showBanner("Repository is not initialized (.ai/ missing). Run `subsched init` first. " +
+      showBanner("Repository is not initialized (configuration missing). Run `subsched init` first. " +
         "Previously displayed data may be stale.");
       return null;
     }
     if (data && data.error === "state_corrupted") {
       lastRevision = null;
       showBanner(
-        "Scheduler state was quarantined after corruption. Restore a verified backup and " +
+        "Scheduler state is invalid or was quarantined after corruption. Restore a verified backup and " +
           "run recovery before continuing. Previously displayed data may be stale."
       );
       return null;
