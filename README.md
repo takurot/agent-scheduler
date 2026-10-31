@@ -951,7 +951,7 @@ Yes, execution details are captured and persisted across multiple layers:
 - **Structured Event Logs**: All scheduler lifecycle events (`dispatch`, `agent_finish`, `capacity_reset_cleared`, `rebase`, `verification`, `pr_create`, etc.) are written to structured logs with ISO 8601 timestamps, issue numbers, and duration metrics.
 - **Agent Process Logs & Transcripts**: Stdout, stderr, and output from native coding agent CLI invocations are captured and recorded in per-task worktree directories and scheduler execution logs.
 - **Task Artifacts & Handoffs**: Every worktree retains `.ai/tasks/<issue>.md`, `.ai/handoffs/<issue>.md`, and `.ai/checkpoints/`, documenting incremental progress across worker dispatches and restarts.
-- **Markdown Run Reports**: Comprehensive execution summaries (covering productivity, reliability, failure breakdowns, and capacity events) can be generated at any time using `subsched metrics --report run_report.md`.
+- **Markdown Run Reports**: Comprehensive execution summaries (covering productivity, reliability, failure breakdowns, and capacity events) can be generated at any time using `subsched metrics --report run_report.md`. Report write failures exit nonzero; with `--json --report`, stdout remains a single JSON document and the save confirmation goes to stderr.
 
 ### 6. Why does the GitHub issue stay open after `subsched` merges its pull request?
 This is expected, fail-closed behavior, not a failure: `github.completion.close_issue` defaults to `false`. `subsched` only appends `Closes #<issue>` to the PR body (which lets GitHub auto-close the issue on merge) when you explicitly opt in.

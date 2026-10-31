@@ -1408,9 +1408,10 @@ def metrics(
     if report_file is not None:
         try:
             report_file.write_text(report_text, encoding="utf-8")
-            typer.echo(f"Report saved to {report_file}")
         except OSError as error:
             typer.echo(f"Failed to write report to {report_file}: {error}", err=True)
+            raise typer.Exit(1) from error
+        typer.echo(f"Report saved to {report_file}", err=json_output)
 
     if json_output:
         typer.echo(json.dumps(calculated.to_dict(), indent=2))
