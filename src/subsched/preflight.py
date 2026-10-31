@@ -283,8 +283,19 @@ def probe_command_capabilities(
             )
 
         if name == "claude":
-            v_proc = _safe_run([str(resolved), "--version"], run_cmd=run_cmd)
-            h_proc = _safe_run([str(resolved), "--help"], run_cmd=run_cmd)
+            safe_path = os.pathsep.join(
+                item for item in os.environ.get("PATH", "").split(os.pathsep) if os.path.isabs(item)
+            )
+            if not safe_path:
+                return PreflightCheckResult(
+                    name=name,
+                    found=True,
+                    executable_path=resolved,
+                    error="claude inspection requires an absolute PATH entry",
+                )
+            probe_env = {"PATH": safe_path}
+            v_proc = _safe_run([str(resolved), "--version"], run_cmd=run_cmd, env=probe_env)
+            h_proc = _safe_run([str(resolved), "--help"], run_cmd=run_cmd, env=probe_env)
             if v_proc.returncode != 0 or h_proc.returncode != 0:
                 return PreflightCheckResult(
                     name=name,
