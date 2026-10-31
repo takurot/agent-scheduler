@@ -2942,6 +2942,14 @@ PID lock
 crash recovery
 ```
 
+Semantic handoffs retain `# Issue` on the first line, a blank second line, and
+`#<issue> <title>` on the third line, followed by the eight required sections.
+The identity must match the task. Readback distinguishes a missing Issue header,
+malformed identity line, missing required section, and identity mismatch without
+including handoff content in diagnostics; invalid handoffs remain fail-closed.
+An identity or required-section failure cannot be bypassed by a fresh mechanical
+checkpoint; existing checkpoint recovery remains available for stale handoffs.
+
 Schedulerを強制killして再起動するテストを行う。
 
 ---

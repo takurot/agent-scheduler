@@ -1696,9 +1696,9 @@ class Scheduler:
         capacity, timeout, failure -- called unconditionally right after worker.run()
         returns, before any outcome-specific handling) so `handoff.continuous` has an
         actual runtime-observable meaning instead of being a best-effort natural-language
-        instruction the Agent may or may not follow. A stale/invalid handoff is still
-        allowed to continue if substantive progress was made (#365) or if a mechanical
-        checkpoint proves the same or newer progress happened; otherwise the task is
+        instruction the Agent may or may not follow. A stale handoff can continue when
+        substantive progress was made (#365) or a mechanical checkpoint proves progress;
+        a malformed handoff contract or mismatched Issue identity cannot. Otherwise the task is
         escalated directly to NEEDS_HUMAN -- except for capacity/timeout outcomes
         (see _HANDOFF_NON_ESCALATING_KINDS), which are logged but never forced to escalate,
         since those are externally-imposed interruptions rather than Agent non-compliance.
@@ -1733,7 +1733,9 @@ class Scheduler:
                     },
                 )
             return None
-        if can_recover_from_checkpoint(worktree_dir, task, dispatched_at=dispatched_at):
+        if not readback.contract_invalid and can_recover_from_checkpoint(
+            worktree_dir, task, dispatched_at=dispatched_at
+        ):
             if self.structured_logger is not None:
                 recovered_data: dict[str, Any] = {
                     "recovered_from_checkpoint": True,

@@ -864,6 +864,7 @@ Read the project documentation required by those instructions.
 
 5. **Semantic Handoff Integrity**:
    - If a multi-step task is interrupted or switches agents due to quota limits, workers communicate state through `.ai/handoffs/<issue>.md`.
+   - Preserve the identity layout: `# Issue` on the first line, a blank second line, and `#<issue> <title>` on the third line. The issue number must match the task.
    - Instruct agents to preserve all 8 required section headers (`## Goal`, `## Current Plan`, `## Completed`, `## Current Work`, `## Decisions`, `## Known Broken State`, `## Next Action`, `## Timestamp`) and use strict ISO 8601 timestamps.
 
 ### Example Implementations
