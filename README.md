@@ -18,6 +18,12 @@
 - 🔄 **Multi-Stage Autonomous Workflow**: Supports `PLANNING` → `PLAN_REVIEW` → `IN_PROGRESS` → `VERIFYING` → `PR_REVIEW` → `REVISING` with structured JSON approval gates, differential diff inspection, and per-stage model/reasoning effort configuration.
 - ⚡ **Reactive Multi-Agent Failover**: Classifies rate-limit results returned by workers and preserves cooldown/reset state for failover. Proactive provider-capacity monitoring is not yet wired.
 - 🛡️ **Automated TDD & Quality Gates**: Enforces test-driven development, running repository verification (`ruff`, `mypy`, `pytest` with $\ge 80\%$ coverage, `pip-audit`) before pull requests.
+
+For this repository's networkless container verification, operators can prepare a
+lock- and platform-specific offline Python image as described in the
+[runbook](docs/RUNBOOK.md#offline-python-environment-for-verification).
+The dependency vulnerability audit remains mandatory and needs its own advisory-data
+solution; preparing Python dependencies alone does not make the full gate pass offline.
 - 🔀 **Merge Conflict Protection**: Resolves the repository default branch, fetches its latest `origin` state, rebases onto that remote-tracking ref, and cleanly aborts on conflict before escalating to `NEEDS_HUMAN`.
 - 📊 **Observability & Metrics**: Tracks autonomous completion rates, task success metrics, structured JSON Lines event logs, and markdown run reports.
 
