@@ -1350,7 +1350,10 @@ def doctor(
 
     if not report.passed:
         raise typer.Exit(1)
-    typer.echo("Native workers remain disabled until Phase 2 assumptions are validated")
+    typer.echo(
+        "Doctor checks passed. Native execution requires --allow-native and "
+        "--subscription-billing-verified and must pass preflight. Doctor does not launch a worker."
+    )
 
 
 @app.command()

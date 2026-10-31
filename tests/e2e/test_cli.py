@@ -1727,3 +1727,21 @@ def test_metrics_report_shows_success_message(tmp_path: Path) -> None:
     result = invoke(tmp_path, "metrics", "--report", str(report_file))
     assert result.exit_code == 0
     assert f"Report saved to {report_file}" in result.output
+
+
+def test_doctor_success_describes_native_opt_in_not_obsolete_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from subsched.preflight import PreflightReport
+
+    monkeypatch.setattr(
+        "subsched.cli.validate_native_preflight",
+        lambda **kwargs: PreflightReport(checks=(), passed=True, failure_reasons=()),
+    )
+    result = invoke(tmp_path, "doctor")
+    assert result.exit_code == 0
+    assert "Doctor checks passed" in result.output
+    assert "--allow-native" in result.output
+    assert "--subscription-billing-verified" in result.output
+    assert "does not launch a worker" in result.output
+    assert "Phase 2 assumptions" not in result.output
