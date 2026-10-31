@@ -61,6 +61,35 @@ def test_dashboard_cli_opens_browser_by_default(
     assert opened_urls[0].startswith("http://127.0.0.1:")
 
 
+@pytest.mark.parametrize("port", ["-1", "65536"])
+def test_dashboard_cli_rejects_out_of_range_ports(tmp_path: Path, port: str) -> None:
+    result = CliRunner().invoke(
+        app, ["--repository", str(tmp_path), "dashboard", "--port", port, "--no-browser"]
+    )
+    assert result.exit_code != 0
+    assert "--port" in result.output
+    assert "Traceback" not in result.output
+    assert "Dashboard listening" not in result.output
+    assert not (tmp_path / ".ai").exists()
+
+
+def test_dashboard_cli_reports_port_exhaustion_without_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def exhausted(*args: object, **kwargs: object) -> None:
+        raise OSError("no free port found")
+
+    monkeypatch.setattr(cli_module, "build_dashboard_server", exhausted)
+    result = CliRunner().invoke(
+        app, ["--repository", str(tmp_path), "dashboard", "--port", "65535", "--no-browser"]
+    )
+    assert result.exit_code != 0
+    assert "no free port" in result.output
+    assert "Traceback" not in result.output
+    assert "Dashboard listening" not in result.output
+    assert not (tmp_path / ".ai").exists()
+
+
 @pytest.mark.parametrize("interval", ["0", "-1"])
 def test_dashboard_cli_rejects_non_positive_interval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interval: str

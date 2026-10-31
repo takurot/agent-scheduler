@@ -12,6 +12,31 @@ def test_resolve_port_returns_zero_unchanged() -> None:
     assert resolve_port("127.0.0.1", 0) == 0
 
 
+def test_port_search_stops_at_65535(monkeypatch: pytest.MonkeyPatch) -> None:
+    tried: list[int] = []
+
+    class BusySocket:
+        def __enter__(self) -> BusySocket:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def setsockopt(self, *args: object) -> None:
+            pass
+
+        def bind(self, address: tuple[str, int]) -> None:
+            tried.append(address[1])
+            if address[1] > 65535:
+                raise OverflowError("port out of range")
+            raise OSError("address in use")
+
+    monkeypatch.setattr(socket, "socket", lambda *args: BusySocket())
+    with pytest.raises(OSError, match="no free port"):
+        resolve_port("127.0.0.1", 65534)
+    assert tried == [65534, 65535]
+
+
 def test_resolve_port_returns_requested_port_when_free() -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
