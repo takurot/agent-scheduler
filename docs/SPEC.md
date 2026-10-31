@@ -3560,7 +3560,7 @@ CLIとの並行実行時にも競合やデータ破損を完全に防止する�
 ### Tools (13個)
 1. `subsched_get_status`: キュー状態内訳、タスク一覧、プロバイダークールダウン状態の取得。
 2. `subsched_inspect_task`: 指定Issueの詳細情報、パース済みセマンティックハンドオフ、直近コミットの取得。
-3. `subsched_explain`（#384）: 指定Issueが実行可能か、なぜ保留・除外・ブロックされているかを状態変更なしで診断（eligible/excluded label、未完了依存、schedulerのpause、PLANNING/VERIFYING中の状態、選択providerと鮮度、cooldown reset、run予算、必要なoperator actionを理由コードと根拠付きで提示）。pause・task・capacityは同一snapshotから読む。
+3. `subsched_explain`（#384）: 指定Issueが実行可能か、なぜ保留・除外・ブロックされているかを状態変更なしで診断（未登録Issueの未検証状態、eligible/excluded label、未完了依存、schedulerのpause、PLANNING/VERIFYING中の状態、選択providerと鮮度、cooldown reset、run予算、必要なoperator actionを理由コードと根拠付きで提示）。pause・task・capacityは同一snapshotから読み、未登録Issueの実在・label・依存を未検証のまま実行可能としない。
 4. `subsched_queue_issues`: GitHubからのIssue自動検出およびキュー登録（`dry_run` 対応）。
 5. `subsched_trigger_dispatch`: バックグラウンドプロセスでの `subsched run` 起動。
 6. `subsched_get_dispatch_run`: `run_id`で非同期起動の状態と安全な失敗理由を取得。
