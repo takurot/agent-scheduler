@@ -215,6 +215,8 @@ An open task detail refreshes when the scheduler state revision changes. A hando
 file edit does not advance that revision; select the task again to refresh it immediately.
 An unavailable or timed-out detail is marked as such and retried on later polls; a
 previous selection's delayed response cannot replace the current detail.
+Kanban tasks are keyboard-accessible buttons: use Tab to focus and Enter or Space to
+open details. Focus is preserved across polling when the task remains present.
 The browser regressions use the development-only Playwright dependency and a locally
 installed Chrome or Chromium (`uv run --frozen pytest tests/e2e/test_dashboard_browser.py`).
 When no browser is available they skip, which does not establish browser test coverage.
