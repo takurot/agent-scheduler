@@ -92,6 +92,7 @@ class HandoffReadbackResult:
     ok: bool
     reason: str = ""
     repaired: bool = False
+    contract_invalid: bool = False
 
 
 def _parse_handoff_timestamp(raw_timestamp: str) -> datetime | None:
@@ -155,18 +156,40 @@ def readback_handoff(
     except OSError as error:
         return HandoffReadbackResult(False, f"handoff file unreadable: {error}")
 
-    parsed = parse_semantic_handoff(content)
-    if parsed is None:
+    if not content.startswith("# Issue"):
         return HandoffReadbackResult(
-            False, "handoff schema invalid or missing required sections"
+            False, "handoff schema invalid: Issue header missing", contract_invalid=True
         )
-    if parsed.issue_number != task.issue_number:
+    lines = content.splitlines()
+    match = re.match(r"#(\d+)\s+.*", lines[2]) if len(lines) >= 3 else None
+    if match is None:
+        return HandoffReadbackResult(
+            False, "handoff schema invalid: Issue identity line missing or malformed",
+            contract_invalid=True,
+        )
+    try:
+        issue_number = int(match.group(1))
+    except ValueError:
+        return HandoffReadbackResult(
+            False, "handoff schema invalid: Issue identity line missing or malformed",
+            contract_invalid=True,
+        )
+    if issue_number != task.issue_number:
         return HandoffReadbackResult(
             False,
             f"handoff Issue identity mismatch: expected #{task.issue_number}, "
-            f"found #{parsed.issue_number}",
+            f"found #{issue_number}",
+            contract_invalid=True,
         )
-
+    if not all(section in content for section in REQUIRED_HANDOFF_SECTIONS):
+        return HandoffReadbackResult(
+            False, "handoff schema invalid: required section missing", contract_invalid=True
+        )
+    parsed = parse_semantic_handoff(content)
+    if parsed is None:
+        return HandoffReadbackResult(
+            False, "handoff schema invalid or missing required sections", contract_invalid=True
+        )
     parsed_ts = _parse_handoff_timestamp(parsed.timestamp)
     if parsed_ts is not None and parsed_ts > dispatched_at:
         return HandoffReadbackResult(True)
