@@ -114,7 +114,14 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         corrupted state, so callers never need to distinguish those from a genuine
         empty snapshot."""
         store = JsonStateStore(self.server.dashboard_repository)
-        if not store.state_dir.exists():
+        if store.state_dir.is_symlink() or (
+            store.state_dir.exists() and not store.state_dir.is_dir()
+        ):
+            self._send_json(HTTPStatus.OK, {"error": "state_corrupted"})
+            return None
+        if not store.state_dir.exists() and not (
+            self.server.dashboard_repository / "subsched.yaml"
+        ).is_file():
             self._send_json(HTTPStatus.OK, {"error": "uninitialized"})
             return None
         try:

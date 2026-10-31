@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 from playwright.sync_api import Browser, Route, expect, sync_playwright
+from typer.testing import CliRunner
 
+from subsched.cli import app
 from subsched.dashboard.server import run_dashboard_server
 from subsched.models import Task, TaskState
 from subsched.storage import JsonStateStore
@@ -42,6 +44,26 @@ def dashboard_url(tmp_path: Path) -> Iterator[str]:
     try:
         yield f"http://127.0.0.1:{server.server_address[1]}/?token=synthetic-token"
     finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_dashboard_recovers_after_first_init(browser: Browser, tmp_path: Path) -> None:
+    server = run_dashboard_server(tmp_path, port=0, interval=0.2, token="synthetic-token")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    page = browser.new_page()
+    try:
+        page.goto(f"http://127.0.0.1:{server.server_address[1]}/?token=synthetic-token")
+        expect(page.locator("#banner")).to_contain_text("subsched init", timeout=5000)
+        result = CliRunner().invoke(app, ["init", str(tmp_path), "--repo", "owner/name"])
+        assert result.exit_code == 0, result.output
+        expect(page.locator("#banner")).to_be_hidden(timeout=5000)
+        expect(page.locator("#status-summary")).to_contain_text("Queue size: 0")
+        assert not (tmp_path / ".ai").exists()
+    finally:
+        page.close()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)

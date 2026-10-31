@@ -3651,8 +3651,9 @@ SPA（`src/subsched/dashboard/static/index.html`、Vanilla JS + インラインC
 - **セキュリティヘッダー**: 全レスポンス（エラー含む）に`Content-Security-Policy`、
   `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、
   `Referrer-Policy: no-referrer`、`Cache-Control: no-store`を付与する。
-- **未初期化・破損状態**: `.ai/`が存在しない場合は`{"error": "uninitialized"}`、
-  `StateCorruptionError`（quarantine後の復旧待ち状態）の場合は
+- **未初期化・破損状態**: `.ai/`と`subsched.yaml`が共に存在しない場合は
+  `{"error": "uninitialized"}`、設定済みで未実行なら空snapshotを返しstateを作成しない。
+  `.ai`がsymlinkや通常ファイルの場合、または`StateCorruptionError`（quarantine後の復旧待ち状態）の場合は
   `{"error": "state_corrupted"}`を、いずれも`500`ではなく`200`のJSONペイロード
   として返し、SPA側でクラッシュせず案内バナーを描画できるようにする。
 - **通信・応答エラー**: HTTP失敗、JSON不正、通信失敗、status payload不正を区別して
