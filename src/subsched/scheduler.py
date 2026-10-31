@@ -1580,7 +1580,10 @@ class Scheduler:
                 if new_verification_failures >= self.max_verification_failures
                 else TaskState.READY
             )
-            return retry.transition(next_state, now=now)
+            return retry.transition(
+                next_state, now=now,
+                reason=f"post-rebase verification failed: {post_rebase_report.summary}",
+            )
 
         verification_summary = post_rebase_report.summary
 
@@ -2082,7 +2085,9 @@ class Scheduler:
                     if new_verification_failures >= self.max_verification_failures
                     else TaskState.READY
                 )
-                final = retry.transition(next_state, now=now)
+                final = retry.transition(
+                    next_state, now=now, reason=f"verification failed: {verification_summary}"
+                )
                 self.queue = self.queue.replace(final)
                 self._log(
                     "task_transition",

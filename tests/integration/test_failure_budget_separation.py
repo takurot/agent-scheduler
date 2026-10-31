@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from subsched.models import AgentResult, AgentResultKind, Capacity, CapacityState, Issue, TaskState
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler, ScriptedWorker
@@ -104,3 +106,82 @@ def test_verification_failures_escalate_independently_of_agent_failures(
     assert task.status is TaskState.NEEDS_HUMAN
     assert task.verification_failures == 2
     assert dict(task.per_agent_failures) == {}
+
+
+def test_verification_failure_stage_reaches_retry_checkpoint_and_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subsched.verification as verification
+    from subsched.agents.base import ProcessExecutionResult
+    from subsched.checkpoint import load_checkpoint
+    from subsched.contract import build_worker_prompt
+
+    canary = "PRIVATE_UNFORMATTED_SECRET_CANARY"
+    monkeypatch.setattr(
+        verification, "run_process_group",
+        lambda request: ProcessExecutionResult(
+            exit_code=1,
+            stdout="=== Running Ruff linter ===\n" + canary,
+            stderr=canary,
+        ),
+    )
+    now = datetime(2026, 8, 28, tzinfo=UTC)
+    seen: list[str] = []
+
+    class Worker:
+        def run(self, task, agent):  # type: ignore[no-untyped-def]
+            assert task.worktree is not None
+            checkpoint = load_checkpoint(Path(task.worktree), task.issue_number)
+            if checkpoint is not None:
+                seen.append(checkpoint.test_results)
+                assert f".ai/checkpoints/{task.issue_number}.json" in build_worker_prompt(task)
+                return AgentResult(AgentResultKind.FAILURE)
+            return AgentResult(AgentResultKind.PASS)
+
+    scheduler = Scheduler(
+        store=JsonStateStore(tmp_path / "state.json"),
+        router=Router((AgentConfig("claude", 100),)), worker=Worker(),
+        worktree_root=tmp_path / "worktrees", worktree_adapter=None,
+        verification_commands=("bash scripts/quality_gate.sh",), max_agent_failures=2,
+    )
+    scheduler.discover((Issue(number=1, title="one"),))
+    assert scheduler.tick((_available("claude", now),), now=now)
+    assert scheduler.tasks[0].status is TaskState.READY
+    assert scheduler.tick((_available("claude", now),), now=now)
+    assert len(seen) == 1
+    assert "reported stage: ruff" in seen[0]
+    assert canary not in seen[0]
+
+
+def test_terminal_verification_failure_exposes_safe_stage_to_operator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subsched.verification as verification
+    from subsched.agents.base import ProcessExecutionResult
+
+    canary = "PRIVATE_TERMINAL_CANARY"
+    monkeypatch.setattr(
+        verification, "run_process_group",
+        lambda request: ProcessExecutionResult(
+            exit_code=1, stdout="=== Running Mypy type checker ===\n" + canary, stderr=canary
+        ),
+    )
+    now = datetime(2026, 8, 28, tzinfo=UTC)
+    scheduler = Scheduler(
+        store=JsonStateStore(tmp_path / "state.json"),
+        router=Router((AgentConfig("claude", 100),)),
+        worker=ScriptedWorker({(1, "claude"): (AgentResult(AgentResultKind.PASS),)}),
+        worktree_root=tmp_path / "worktrees", worktree_adapter=None,
+        verification_commands=("bash scripts/quality_gate.sh",), max_verification_failures=1,
+    )
+    scheduler.discover((Issue(number=1, title="one"),))
+    assert scheduler.tick((_available("claude", now),), now=now)
+    task = scheduler.tasks[0]
+    assert task.status is TaskState.NEEDS_HUMAN
+    assert "reported stage: mypy" in (task.needs_human_reason or "")
+    assert canary not in (task.needs_human_reason or "")
+    assert canary not in scheduler.store.path.read_text(encoding="utf-8")
+    assert task.worktree is not None
+    checkpoint = Path(task.worktree) / ".ai/checkpoints/1.json"
+    assert "reported stage: mypy" in checkpoint.read_text(encoding="utf-8")
+    assert canary not in checkpoint.read_text(encoding="utf-8")
