@@ -108,12 +108,9 @@ export SUBSCHED_DOCKER_ISOLATION_TEST=1
 export SUBSCHED_ISOLATION_NETWORK="$run_name"
 export SUBSCHED_ISOLATION_PROXY_URL="http://$run_name-proxy:3128"
 uv sync --frozen
-if ! pytest_output="$(uv run pytest -q -ra tests/integration/test_native_isolation_container.py 2>&1)"; then
+if ! pytest_output="$(uv run pytest -q -ra --junitxml="$run_dir/results.xml" tests/integration/test_native_isolation_container.py 2>&1)"; then
   printf '%s\n' "$pytest_output"
   exit 1
 fi
 printf '%s\n' "$pytest_output"
-if ! printf '%s\n' "$pytest_output" | grep -Eq '^4 passed in '; then
-  echo "error: all four live isolation tests must pass without skips" >&2
-  exit 1
-fi
+uv run --no-sync python scripts/check_live_isolation_results.py "$run_dir/results.xml"
