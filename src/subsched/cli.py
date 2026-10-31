@@ -937,13 +937,12 @@ def explain(
         raise typer.Exit(1) from error
 
     try:
-        tasks = context.store.load_tasks()
-        capacities = context.store.load_capacities()
+        snapshot = context.store.load_snapshot()
     except StateCorruptionError as error:
         typer.echo(f"State error: {error}", err=True)
         raise typer.Exit(1) from error
 
-    matching_task = next((t for t in tasks if t.issue_number == issue_number), None)
+    matching_task = next((t for t in snapshot.tasks if t.issue_number == issue_number), None)
     if matching_task:
         issue = Issue(
             number=matching_task.issue_number,
@@ -954,7 +953,7 @@ def explain(
     else:
         issue = Issue(number=issue_number, title=f"Issue #{issue_number}")
 
-    result = explain_issue(issue, tasks, cfg, capacities)
+    result = explain_issue(issue, snapshot.tasks, cfg, snapshot.capacities, paused=snapshot.paused)
 
     if json_output:
         typer.echo(json.dumps(result, indent=2))
