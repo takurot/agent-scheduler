@@ -344,6 +344,11 @@ PRを持つTaskの`COMPLETE`はmerge確認を要する。CI PASSは`ci_result`�
 依存Issueの解放に使わない。旧stateのPR付き`COMPLETE`にmerge確認記録がない場合は
 `READY_FOR_REVIEW`として読み、operatorの`subsched reconcile`で再確認する。
 
+このrepositoryの隔離verificationでPython環境を準備する場合は、
+[`RUNBOOK.md`](RUNBOOK.md#offline-python-environment-for-verification)の手順で
+対象lockとplatformに対応するoffline imageをoperatorが準備する。必須のdependency auditは
+引き続き必要であり、advisory dataが利用できなければ品質gateは失敗する。
+
 ## 9. コミットとPull Request
 
 対象ファイルだけをstageする。

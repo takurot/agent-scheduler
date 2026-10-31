@@ -3194,6 +3194,14 @@ resource limits, `no-new-privileges`, exact-name forced cleanup, and cleanup con
 remain mandatory. Direct host verification is permitted only when isolation is explicitly
 disabled; an enabled container backend with missing runtime inputs fails closed.
 
+For this repository's quality gate, the operator may use a separately prepared
+offline Python image as described in the runbook. Its immutable bundle binds the
+lock, project and build requirements, Python/uv/platform identity, and wheel hashes.
+The gate validates these before creating a fresh temporary environment; the host
+worktree `.venv` is not shared. Missing, stale, or invalid bundle inputs fail closed.
+The mandatory vulnerability audit remains a separate gate and must not be skipped
+when advisory data is unavailable.
+
 Verification summaries distinguish timeout, output limit, and unconfirmed cleanup.
 For recognized quality-gate progress markers, failures may include a fixed reported
 stage label rather than arbitrary output. Stage markers are untrusted hints and cannot

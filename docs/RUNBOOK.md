@@ -515,3 +515,40 @@ Desktop, Cursor, Antigravity/Gemini) can therefore infer the workflow, argument 
 #### Prompts
 - `triage_task`: Prompt guiding the LLM to inspect handoffs and git commits for `NEEDS_HUMAN` issues before remediating.
 - `bootstrap_repo`: Prompt guiding the LLM to inspect stack tooling and initialize `subsched` configuration.
+# Offline Python environment for verification
+
+For this repository's `bash scripts/quality_gate.sh` in a Linux verification
+container, prepare a separate image for the current checkout and the exact worker
+Python, uv version, and platform. The host needs Docker, uv, and network access to
+the public PyPI artifact host. The digest-pinned worker image must already be
+available locally and provide Python with `pip` and uv. Run from the repository root:
+
+```sh
+uv run --frozen python scripts/prepare_offline_bundle.py \
+  --image 'REGISTRY/WORKER@sha256:REPLACE_WITH_DIGEST' \
+  --output /absolute/path/to/new-offline-bundle
+docker build --network none -t local-subsched-offline /absolute/path/to/new-offline-bundle
+```
+
+The Docker builder must be able to resolve the pinned base image. Some BuildKit
+configurations query the registry even when the image is already present locally;
+use a reachable trusted registry or a builder that can use the local image.
+
+The operator publishes or otherwise makes the resulting image available by digest
+and configures that digest as `isolation.image`. Follow the normal image trust and
+pinning procedure. The preparation command accepts only public PyPI registry sources,
+downloads hash-verified wheels on the host, and fails if the target image or the
+project inputs cannot be verified. The image contains public dependency artifacts;
+do not put credentials in the repository configuration or build context.
+
+The image enables the gate's offline mode. It checks the lock, project metadata,
+wheel hashes, exported requirements, and runtime identity before installing into a
+fresh temporary environment. The host `.venv` is not reused or rewritten. Rebuild
+the image whenever `uv.lock`, `pyproject.toml`, the pinned build requirements, the
+target Python/uv version, or the target platform changes. A missing or stale bundle
+fails the gate; it does not fall back to the network.
+
+This prepares dependencies only. The unchanged mandatory `pip-audit` gate also needs
+fresh vulnerability advisory data; issue #495 tracks that separate networkless
+audit requirement. Until it is resolved, a full isolated gate can still fail at
+the audit stage and must not be reported as passing.

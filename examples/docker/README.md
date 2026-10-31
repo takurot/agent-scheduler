@@ -7,6 +7,10 @@ When running `subsched` with container isolation (`isolation.backend: container`
 
 Because the container cannot access package repositories or toolchain installers at runtime, **all compilers, language runtimes, linters, and test runners needed by your repository must be pre-baked into the worker container image** (#364).
 
+For this repository's Python verification gate, see the
+[offline Python preparation procedure](../../docs/RUNBOOK.md#offline-python-environment-for-verification).
+It creates a lock- and platform-specific image without reusing the host `.venv`.
+
 ## Reference Dockerfiles
 
 This directory provides reference Dockerfiles for common project languages:
