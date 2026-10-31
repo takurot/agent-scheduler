@@ -67,9 +67,10 @@ def test_dashboard_cli_rejects_out_of_range_ports(tmp_path: Path, port: str) -> 
         app, ["--repository", str(tmp_path), "dashboard", "--port", port, "--no-browser"]
     )
     assert result.exit_code != 0
-    assert "--port" in result.output
-    assert "Traceback" not in result.output
-    assert "Dashboard listening" not in result.output
+    clean_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "--port" in clean_output
+    assert "Traceback" not in clean_output
+    assert "Dashboard listening" not in clean_output
     assert not (tmp_path / ".ai").exists()
 
 
