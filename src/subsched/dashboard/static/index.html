@@ -45,6 +45,7 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
 (function () {
   var token = new URLSearchParams(location.search).get("token") || "";
   var lastRevision = null;
+  var polling = false;
 
   function withToken(path) {
     var sep = path.indexOf("?") === -1 ? "?" : "&";
@@ -52,7 +53,12 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
   }
 
   function fetchJson(path) {
-    return fetch(withToken(path)).then(function (res) { return res.json(); });
+    return fetch(withToken(path)).catch(function () {
+      throw { kind: "network" };
+    }).then(function (res) {
+      if (!res.ok) { throw { kind: "http", status: res.status }; }
+      return res.json().catch(function () { throw { kind: "json" }; });
+    });
   }
 
   function showBanner(message) {
@@ -66,19 +72,49 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
     el.classList.add("show");
   }
 
+  function showRequestError(error) {
+    lastRevision = null;
+    var message;
+    if (error && error.kind === "http" && error.status === 403) {
+      message = "Authentication expired. Open a new dashboard URL.";
+    } else if (error && error.kind === "http") {
+      message = "Dashboard request failed (HTTP " + error.status + ").";
+    } else if (error && error.kind === "json") {
+      message = "Dashboard returned invalid JSON.";
+    } else if (error && error.kind === "status") {
+      message = "Dashboard returned invalid status data.";
+    } else if (error && error.kind === "payload") {
+      message = "Dashboard returned invalid data.";
+    } else {
+      message = "Dashboard connection failed.";
+    }
+    showBanner(message + " Previously displayed data may be stale.");
+  }
+
   function renderStatus(data) {
-    if (data.error === "uninitialized") {
-      showBanner("Repository is not initialized (.ai/ missing). Run `subsched init` first.");
+    if (data && data.error === "uninitialized") {
+      lastRevision = null;
+      showBanner("Repository is not initialized (.ai/ missing). Run `subsched init` first. " +
+        "Previously displayed data may be stale.");
       return null;
     }
-    if (data.error === "state_corrupted") {
+    if (data && data.error === "state_corrupted") {
+      lastRevision = null;
       showBanner(
         "Scheduler state was quarantined after corruption. Restore a verified backup and " +
-          "run recovery before continuing."
+          "run recovery before continuing. Previously displayed data may be stale."
       );
       return null;
     }
-    showBanner(null);
+    if (!data || typeof data.paused !== "boolean" || !Number.isSafeInteger(data.queue_size) ||
+        data.queue_size < 0 || !Number.isSafeInteger(data.revision) || data.revision < 0 ||
+        !Array.isArray(data.active_tasks) ||
+        !data.active_tasks.every(function (task) {
+          return task && Number.isSafeInteger(task.issue_number) && task.issue_number > 0 &&
+            typeof task.status === "string" && typeof task.title === "string";
+        })) {
+      throw { kind: "status" };
+    }
     setLines(document.getElementById("status-summary"), [
       "Paused: " + data.paused,
       "Queue size: " + data.queue_size,
@@ -97,7 +133,7 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
   }
 
   function renderKanban(tasks) {
-    var byStatus = {};
+    var byStatus = Object.create(null);
     tasks.forEach(function (t) {
       byStatus[t.status] = byStatus[t.status] || [];
       byStatus[t.status].push(t);
@@ -122,7 +158,6 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
   }
 
   function renderCapacity(data) {
-    if (data.error) { return; }
     var el = document.getElementById("capacity-summary");
     var lines = (data.capacities || []).map(function (c) {
       return c.agent + ": " + c.state + (c.used_percentage != null ? " (" + c.used_percentage + "%)" : "");
@@ -135,7 +170,6 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
   }
 
   function renderMetrics(data) {
-    if (data.error) { return; }
     var m = data.metrics || {};
     var el = document.getElementById("metrics-summary");
     setLines(el, [
@@ -156,18 +190,38 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
       pre.textContent = data.handoff || "(no handoff)";
       body.appendChild(heading);
       body.appendChild(pre);
-    });
+    }).catch(showRequestError);
   }
 
   function poll() {
+    if (polling) { return; }
+    polling = true;
     fetchJson("/api/status").then(function (data) {
       var revision = renderStatus(data);
       if (revision !== null && revision !== lastRevision) {
-        lastRevision = revision;
-        fetchJson("/api/capacity").then(renderCapacity);
-        fetchJson("/api/metrics").then(renderMetrics);
+        return Promise.all([fetchJson("/api/capacity"), fetchJson("/api/metrics")])
+          .then(function (results) {
+            var capacity = results[0];
+            var metrics = results[1] && results[1].metrics;
+            var productivity = metrics && metrics.productivity;
+            if (!capacity || capacity.error || !Array.isArray(capacity.capacities) ||
+                !capacity.capacities.every(function (item) {
+                  return item && typeof item.agent === "string" && typeof item.state === "string";
+                }) || !productivity ||
+                !Number.isSafeInteger(productivity.issues_attempted) ||
+                productivity.issues_attempted < 0 ||
+                !Number.isSafeInteger(productivity.issues_implemented) ||
+                productivity.issues_implemented < 0) {
+              throw { kind: "payload" };
+            }
+            renderCapacity(results[0]);
+            renderMetrics(results[1]);
+            lastRevision = revision;
+            showBanner(null);
+          });
       }
-    });
+      if (revision !== null) { showBanner(null); }
+    }).catch(showRequestError).finally(function () { polling = false; });
   }
 
   poll();

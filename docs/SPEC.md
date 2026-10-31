@@ -3655,6 +3655,9 @@ SPA（`src/subsched/dashboard/static/index.html`、Vanilla JS + インラインC
   `StateCorruptionError`（quarantine後の復旧待ち状態）の場合は
   `{"error": "state_corrupted"}`を、いずれも`500`ではなく`200`のJSONペイロード
   として返し、SPA側でクラッシュせず案内バナーを描画できるようにする。
+- **通信・応答エラー**: HTTP失敗、JSON不正、通信失敗、status payload不正を区別して
+  案内し、既存表示を無効な状態で上書きせずstaleと明示する。403では新しいdashboard
+  URLを案内し、正常な応答へ復帰したら警告を解除する。ポーリング失敗のPromiseは処理する。
 
 ## エンドポイント
 

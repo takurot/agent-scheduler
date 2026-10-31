@@ -49,6 +49,7 @@ dev = [
   "ruff>=0.12,<1",
   "types-PyYAML>=6.0.12",
   "urllib3>=2.8.0,<3",
+  "playwright>=1.56,<2",
 ]
 
 [project.scripts]
