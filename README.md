@@ -135,6 +135,8 @@ Verify local executables and GitHub token scope:
 ```bash
 subsched doctor
 ```
+The token-scope diagnostic checks the active `github.com` account only. Authentication
+on a different GitHub host does not satisfy this check, and token values are never shown.
 
 ### Running Tasks
 
