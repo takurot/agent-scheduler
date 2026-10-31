@@ -1324,7 +1324,10 @@ def doctor(
         verification_commands=cfg.verification.commands,
     )
     for check in report.checks:
-        typer.echo(f"{check.name:<8} {'FOUND' if check.found else 'MISSING'}")
+        status = "FOUND" if check.found else "MISSING"
+        if check.name == "isolation":
+            status = "VERIFIED" if check.compatible else "UNVERIFIED"
+        typer.echo(f"{check.name:<8} {status}")
         if not check.compatible and check.error:
             typer.echo(f"  compatibility error: {check.error}")
 

@@ -3166,6 +3166,16 @@ Docker Engine on Linux or Docker Desktop's Linux VM on macOS. Other runtimes and
 unverifiable configurations fail closed. Existing subscription and native opt-in gates
 remain necessary.
 
+Doctor displays isolation as `VERIFIED`/`UNVERIFIED`, independently of executable
+presence. Failed runtime, worker image, network, proxy image, and proxy container
+inspections carry fixed `stage` and `reason` codes, a safe configured resource
+identifier, and a read-only Docker check. Timeout, permission, connection, recognized
+missing-resource responses, unavailable executables, and invalid JSON are distinguished;
+unclassified errors remain `inspection_failed`, never assumed absent. Only fixed
+codes and validated identifiers enter these diagnostics: raw stdout/stderr, exception
+text, environment values, and auth contents are excluded. Inspection remains read-only
+and fail-closed, with no resource creation/deletion, automatic pull, or task mutation.
+
 When `isolation.backend: container`, every Scheduler `VERIFYING` gate (including the
 post-rebase gate) executes in the attested, digest-pinned worker image with
 `--network none`. The verification container receives one writable bind mount for the
