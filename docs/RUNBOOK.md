@@ -83,15 +83,20 @@ explicit run after correction.
 
 ### Initializing & Running Scheduler
 ```bash
-# Natural language instruction discovery
-uv run subsched run "Run all open issues"
+# Natural language instruction discovery without workers
+uv run subsched run "Run all open issues" --dry-run
 
 # Discover specific issues in dry-run mode
 uv run subsched run --repo owner/repo --issues 101,102,103 --dry-run
 
-# Run with custom config
-uv run subsched run --config subsched.yaml
+# Run native workers with an attested isolation config and subscription-only billing
+uv run subsched run --config subsched.yaml --allow-native --subscription-billing-verified
 ```
+
+The native example requires the container isolation resources and provider auth
+directories described in the health check above. Independently verify subscription
+billing before passing the billing flag. A successful `doctor` does not launch a worker
+or replace that operator verification; native preflight runs again during `run`.
 
 ### Checking Queue & Worker Status
 ```bash

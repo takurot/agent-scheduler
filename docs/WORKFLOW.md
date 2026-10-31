@@ -1,11 +1,10 @@
 # Subscription Agent Scheduler 開発ワークフロー
 
-**最終更新:** 2026-08-13
-**対象:** `subscription-agent-scheduler` v0.3仕様 / Phase 1実装
+**対象:** 現行の `subscription-agent-scheduler` 開発と運用
 
 この文書は、`subsched` のGitHub Issueを安全に実装し、仕様、コード、テスト、運用状態の
-ずれを防ぐための手順を定義する。現在の実装はPhase 1 Queue MVPであり、Claude Code /
-Codexのnative実行、branch push、Pull Request作成はまだ有効化しない。
+ずれを防ぐための手順を定義する。現行実装はClaude Code / Codexのnative実行と
+検証後のbranch push・Pull Request作成を、明示的なopt-inと安全な隔離を前提に提供する。
 
 ## 1. Source of truth
 
@@ -28,7 +27,7 @@ SPEC変更なしに緩和しない。
 - capacity eventをAgent failureとして数えない
 - Agent切替後も同じworktree、semantic handoff、mechanical checkpointを使う
 - verification成功前にPRを作成しない
-- Issueを自動closeせず、merge、release、production deployを自動化しない
+- Issueの自動closeは明示設定時のみ許可し、merge、release、production deployを自動化しない
 - billing、auth、capacity、schemaが不明な場合はfail-closedにする
 
 ## 2. Issueを選ぶ
@@ -97,10 +96,9 @@ uv sync --frozen
 ```
 
 Pythonは3.12以上を使用する。依存関係を変更するIssue以外では`uv.lock`を意図せず更新
-しない。`uv run subsched doctor`はnative phase用CLIを含む環境診断であり、現状はGit、gh、
-Claude、Codexのいずれかがなければnonzeroになる。Phase 1のscripted worker開発ではsetup
-gateにせず、native adapterを扱うIssueで診断結果を確認する。doctorはtokenやcapacityを
-消費するlive probeの代わりにはしない。
+しない。`uv run subsched doctor`は有効な設定のCLIや隔離条件を検査する環境診断である。
+native adapterを扱うIssueでは実行に使う設定で診断する。doctorはworkerを起動せず、
+subscription課金確認やcapacityを消費するlive probeの代わりにはならない。
 
 ## 4. TDD実装サイクル
 
@@ -169,15 +167,14 @@ opt-inし、subscription/billingを確認した最小promptだけを使う。結
 Bernsteinをworktree backendとして実装する前に、SPEC §58〜59のcompatibility spikeと
 Adopt / Reject / Defer判断を完了する。
 
-### Phase 1: Queue MVP hardening
+### Queue and recovery safety
 
-Fake workerでqueue、state、capacity、restartを完成させる。repository lock、real Git
-worktree、Agent contract、task-start handoff、安全なevent loopが揃うまでnative workerを
-有効化しない。
+Fake workerを使うテストでqueue、state、capacity、restartを検証する。repository lock、
+real Git worktree、Agent contract、task-start handoff、安全なevent loopを維持する。
 
-### Phase 2以降: Native execution
+### Native execution
 
-native実行を開放する変更は、少なくとも次を満たす。
+native実行に関する変更は、少なくとも次を満たす。
 
 - subprocessはargv配列、固定cwd、environment allowlist、timeout、output上限を使う
 - process group全体をSIGTERM → grace period → SIGKILLで終了できる
