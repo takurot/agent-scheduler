@@ -14,6 +14,7 @@ from typing import Any, Protocol
 
 from subsched.config import (
     AgentSettings,
+    IndependentAuditConfig,
     NativeIsolationConfig,
     WorkflowConfig,
     validate_base_branch,
@@ -150,6 +151,7 @@ class Scheduler:
         event_sources: tuple[EventSource, ...] = (),
         verification_commands: tuple[str, ...] = ("true",),
         verification_timeout_seconds: float = 120.0,
+        independent_audit: IndependentAuditConfig | None = None,
         isolation_config: NativeIsolationConfig | None = None,
         isolation_runtime_executable: Path | None = None,
         label_scores: dict[str, int] | None = None,
@@ -220,6 +222,7 @@ class Scheduler:
         self.discovery_notes: tuple[tuple[int, str], ...] = ()
         self.reactivated_cancelled: tuple[int, ...] = ()
         self.verification_commands = verification_commands
+        self.independent_audit = independent_audit
         self.isolation_config = isolation_config
         self.isolation_runtime_executable = isolation_runtime_executable
         if verification_timeout_seconds <= 0:
@@ -1528,6 +1531,8 @@ class Scheduler:
             timeout_seconds=self.verification_timeout_seconds,
             isolation_config=self.isolation_config,
             isolation_runtime_executable=self.isolation_runtime_executable,
+            independent_audit=self.independent_audit,
+            audit_repository=self.repo,
         )
         self._log(
             "gate_result",
@@ -1565,6 +1570,13 @@ class Scheduler:
                 reason_code="operator_decision_required",
             )
 
+        if post_rebase_report.audit_unavailable:
+            return verifying.transition(
+                TaskState.NEEDS_HUMAN, current_agent=agent, now=now,
+                reason="independent dependency audit evidence is unavailable or untrusted",
+                reason_code="external_prerequisite",
+            )
+
         if not post_rebase_report.passed:
             new_verification_failures = verifying.verification_failures + 1
             retry = verifying.transition(
@@ -1580,7 +1592,10 @@ class Scheduler:
                 if new_verification_failures >= self.max_verification_failures
                 else TaskState.READY
             )
-            return retry.transition(next_state, now=now)
+            return retry.transition(
+                next_state, now=now,
+                reason=f"post-rebase verification failed: {post_rebase_report.summary}",
+            )
 
         verification_summary = post_rebase_report.summary
 
@@ -1696,9 +1711,9 @@ class Scheduler:
         capacity, timeout, failure -- called unconditionally right after worker.run()
         returns, before any outcome-specific handling) so `handoff.continuous` has an
         actual runtime-observable meaning instead of being a best-effort natural-language
-        instruction the Agent may or may not follow. A stale/invalid handoff is still
-        allowed to continue if substantive progress was made (#365) or if a mechanical
-        checkpoint proves the same or newer progress happened; otherwise the task is
+        instruction the Agent may or may not follow. A stale handoff can continue when
+        substantive progress was made (#365) or a mechanical checkpoint proves progress;
+        a malformed handoff contract or mismatched Issue identity cannot. Otherwise the task is
         escalated directly to NEEDS_HUMAN -- except for capacity/timeout outcomes
         (see _HANDOFF_NON_ESCALATING_KINDS), which are logged but never forced to escalate,
         since those are externally-imposed interruptions rather than Agent non-compliance.
@@ -1733,7 +1748,9 @@ class Scheduler:
                     },
                 )
             return None
-        if can_recover_from_checkpoint(worktree_dir, task, dispatched_at=dispatched_at):
+        if not readback.contract_invalid and can_recover_from_checkpoint(
+            worktree_dir, task, dispatched_at=dispatched_at
+        ):
             if self.structured_logger is not None:
                 recovered_data: dict[str, Any] = {
                     "recovered_from_checkpoint": True,
@@ -1975,6 +1992,21 @@ class Scheduler:
 
             verification_ok = True
             verification_summary = ""
+            if task.worktree is None and self.independent_audit is not None:
+                reason = "independent dependency audit requires a task worktree"
+                final = verifying.transition(
+                    TaskState.NEEDS_HUMAN, current_agent=agent, now=now,
+                    reason=reason, reason_code="external_prerequisite",
+                )
+                self.queue = self.queue.replace(final)
+                self._log(
+                    "task_transition", level="ERROR", issue_number=final.issue_number,
+                    agent=agent, task_id=final.task_id, message=reason,
+                    data={"from_state": verifying.status.value, "to_state": final.status.value,
+                          "attempt": final.attempt, "reason_code": final.needs_human_reason_code},
+                )
+                self._persist()
+                return
             if task.worktree is not None:
                 from subsched.checkpoint import capture_mechanical_checkpoint, save_checkpoint
                 from subsched.verification import run_verification
@@ -1992,6 +2024,8 @@ class Scheduler:
                     timeout_seconds=self.verification_timeout_seconds,
                     isolation_config=self.isolation_config,
                     isolation_runtime_executable=self.isolation_runtime_executable,
+                    independent_audit=self.independent_audit,
+                    audit_repository=self.repo,
                 )
                 verification_ok = v_report.passed
                 verification_summary = v_report.summary
@@ -2050,6 +2084,26 @@ class Scheduler:
                     self._persist()
                     return
 
+                if v_report.audit_unavailable:
+                    reason = "independent dependency audit evidence is unavailable or untrusted"
+                    final = verifying.transition(
+                        TaskState.NEEDS_HUMAN, current_agent=agent, now=now,
+                        reason=reason, reason_code="external_prerequisite",
+                    )
+                    self.queue = self.queue.replace(final)
+                    self._log(
+                        "task_transition", level="ERROR", issue_number=final.issue_number,
+                        agent=agent, task_id=final.task_id, message=reason,
+                        data={
+                            "from_state": verifying.status.value,
+                            "to_state": final.status.value,
+                            "attempt": final.attempt,
+                            "reason_code": final.needs_human_reason_code,
+                        },
+                    )
+                    self._persist()
+                    return
+
             if verification_ok:
                 final_task = self._finalize_verified_task(
                     verifying, agent, now, verification_summary
@@ -2080,7 +2134,9 @@ class Scheduler:
                     if new_verification_failures >= self.max_verification_failures
                     else TaskState.READY
                 )
-                final = retry.transition(next_state, now=now)
+                final = retry.transition(
+                    next_state, now=now, reason=f"verification failed: {verification_summary}"
+                )
                 self.queue = self.queue.replace(final)
                 self._log(
                     "task_transition",

@@ -372,3 +372,84 @@ def test_streams_properly_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     write_stream = TrackingBytesIO()
     _write_stream(write_stream, b"payload")
     assert write_stream.closed_count >= 1
+
+
+class _CollectingSink:
+    def __init__(self) -> None:
+        self.lines: list[bytes] = []
+
+    def feed(self, line: bytes) -> None:
+        self.lines.append(line)
+
+
+def _sink_request(
+    tmp_path: Path, script: str, sink: _CollectingSink, **overrides: object
+) -> ProcessExecutionRequest:
+    return ProcessExecutionRequest(
+        argv=(sys.executable, "-c", script),
+        cwd=tmp_path,
+        env={"PATH": os.environ.get("PATH", "")},
+        timeout_seconds=20.0,
+        stdout_sink=sink,  # type: ignore[arg-type]
+        **overrides,  # type: ignore[arg-type]
+    )
+
+
+def test_stdout_sink_streams_more_than_output_limit_without_retaining(tmp_path: Path) -> None:
+    """#475: many small valid lines totalling > output_limit_bytes are streamed, not buffered."""
+    sink = _CollectingSink()
+    script = "import sys\nfor i in range(300):\n    sys.stdout.write('x' * 99 + '\\n')\n"
+    result = run_process_group(_sink_request(tmp_path, script, sink, output_limit_bytes=1000))
+
+    assert result.output_limit_exceeded is False
+    assert result.exit_code == 0
+    assert result.stdout == ""
+    assert len(sink.lines) == 300
+    assert all(line == b"x" * 99 for line in sink.lines)
+
+
+def test_stdout_sink_feeds_unterminated_trailing_line(tmp_path: Path) -> None:
+    sink = _CollectingSink()
+    result = run_process_group(
+        _sink_request(tmp_path, "import sys; sys.stdout.write('a\\nb')", sink)
+    )
+
+    assert result.output_limit_exceeded is False
+    assert sink.lines == [b"a", b"b"]
+
+
+def test_stdout_sink_single_line_over_limit_is_bounded_failure(tmp_path: Path) -> None:
+    sink = _CollectingSink()
+    result = run_process_group(
+        _sink_request(
+            tmp_path,
+            "import sys; sys.stdout.write('A' * 5000 + '\\n')",
+            sink,
+            output_limit_bytes=1000,
+        )
+    )
+
+    assert result.output_limit_exceeded is True
+    assert result.cleanup_succeeded is True
+    assert sink.lines == []
+
+
+def test_stdout_sink_unbounded_stream_stops_at_total_limit(tmp_path: Path) -> None:
+    sink = _CollectingSink()
+    script = (
+        "import sys\nwhile True:\n    sys.stdout.write('y' * 99 + '\\n')\n    sys.stdout.flush()\n"
+    )
+    result = run_process_group(
+        _sink_request(
+            tmp_path, script, sink, output_limit_bytes=1000, stdout_stream_limit_bytes=10_000
+        )
+    )
+
+    assert result.output_limit_exceeded is True
+    assert result.cleanup_succeeded is True
+    assert sum(len(line) + 1 for line in sink.lines) <= 10_000
+
+
+def test_stdout_stream_limit_must_be_positive(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="stdout_stream_limit_bytes must be positive"):
+        ProcessExecutionRequest(argv=("echo",), cwd=tmp_path, env={}, stdout_stream_limit_bytes=0)

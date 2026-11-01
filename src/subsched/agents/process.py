@@ -10,7 +10,7 @@ import time
 from contextlib import suppress
 from typing import Any
 
-from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
+from subsched.agents.base import LineSink, ProcessExecutionRequest, ProcessExecutionResult
 
 COMMON_ENV_ALLOWLIST: frozenset[str] = frozenset(
     {
@@ -87,11 +87,25 @@ def run_process_group(request: ProcessExecutionRequest) -> ProcessExecutionResul
     output_queue: queue.Queue[tuple[bytes, bool, bool]] = queue.Queue(maxsize=1)
     stderr_queue: queue.Queue[tuple[bytes, bool, bool]] = queue.Queue(maxsize=1)
 
-    stdout_reader = threading.Thread(
-        target=_read_bounded_stream,
-        args=(process.stdout, request.output_limit_bytes, process.pid, output_queue),
-        daemon=True,
-    )
+    if request.stdout_sink is not None:
+        stdout_reader = threading.Thread(
+            target=_read_line_stream,
+            args=(
+                process.stdout,
+                request.stdout_sink,
+                request.output_limit_bytes,
+                request.stdout_stream_limit_bytes,
+                process.pid,
+                output_queue,
+            ),
+            daemon=True,
+        )
+    else:
+        stdout_reader = threading.Thread(
+            target=_read_bounded_stream,
+            args=(process.stdout, request.output_limit_bytes, process.pid, output_queue),
+            daemon=True,
+        )
     stderr_reader = threading.Thread(
         target=_read_bounded_stream,
         args=(process.stderr, request.output_limit_bytes, process.pid, stderr_queue),
@@ -320,6 +334,55 @@ def _read_bounded_stream(
         with suppress(OSError):
             stream.close()
     out_queue.put((buf, False, False))
+
+
+def _read_line_stream(
+    stream: Any,
+    sink: LineSink,
+    max_line_bytes: int,
+    max_total_bytes: int,
+    pgid: int,
+    out_queue: queue.Queue[tuple[bytes, bool, bool]],
+) -> None:
+    """Feed stdout to ``sink`` line by line, retaining at most one partial line (#475)."""
+    if stream is None:
+        out_queue.put((b"", False, True))
+        return
+    read = getattr(stream, "read1", stream.read)
+    partial = bytearray()
+    total = 0
+    try:
+        while chunk := read(65536):
+            total += len(chunk)
+            if total > max_total_bytes:
+                with suppress(OSError):
+                    os.killpg(pgid, signal.SIGTERM)
+                out_queue.put((b"", True, False))
+                return
+            start = 0
+            while (newline := chunk.find(b"\n", start)) != -1:
+                partial += chunk[start:newline]
+                start = newline + 1
+                if len(partial) > max_line_bytes:
+                    break
+                sink.feed(bytes(partial))
+                partial.clear()
+            else:
+                partial += chunk[start:]
+            if len(partial) > max_line_bytes:
+                with suppress(OSError):
+                    os.killpg(pgid, signal.SIGTERM)
+                out_queue.put((b"", True, False))
+                return
+        if partial:
+            sink.feed(bytes(partial))
+    except OSError:
+        out_queue.put((b"", False, True))
+        return
+    finally:
+        with suppress(OSError):
+            stream.close()
+    out_queue.put((b"", False, False))
 
 
 def _write_stream(

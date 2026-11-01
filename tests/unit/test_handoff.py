@@ -378,3 +378,39 @@ def test_reconstruct_handoff_preserves_repository_instructions(tmp_path: Path) -
 
     for name, content in instructions.items():
         assert (tmp_path / name).read_text(encoding="utf-8") == content
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("missing_header", "handoff schema invalid: Issue header missing"),
+        ("missing_identity", "handoff schema invalid: Issue identity line missing or malformed"),
+        ("missing_section", "handoff schema invalid: required section missing"),
+        ("wrong_identity", "handoff Issue identity mismatch: expected #103, found #999"),
+    ],
+)
+def test_readback_reports_distinct_safe_identity_and_section_failures(
+    tmp_path: Path, mutation: str, expected: str
+) -> None:
+    task = Task.from_issue(Issue(number=103, title="Task"))
+    dispatched_at = datetime(2026, 1, 1, tzinfo=UTC)
+    _write_handoff(tmp_path, 103, title="Task", timestamp="2026-01-01T00:01:00Z")
+    path = tmp_path / ".ai/handoffs/103.md"
+    content = path.read_text(encoding="utf-8")
+    if mutation == "missing_header":
+        content = content[content.index("## Goal"):]
+    elif mutation == "missing_identity":
+        content = content.replace("# Issue\n\n#103 Task", "# Issue #103")
+    elif mutation == "missing_section":
+        content = content.replace("## Current Work", "## Work")
+    else:
+        content = content.replace("#103 Task", "#999 Task")
+    content += "\nPRIVATE_HANDOFF_CANARY\n"
+    path.write_text(content, encoding="utf-8")
+
+    result = readback_handoff(tmp_path, task, dispatched_at=dispatched_at)
+
+    assert not result.ok
+    assert result.reason == expected
+    assert "PRIVATE_HANDOFF_CANARY" not in result.reason
+    assert path.read_text(encoding="utf-8") == content

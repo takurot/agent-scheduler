@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -15,6 +16,33 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PUBLIC_TARGET = "93.184.216.10"
+
+
+def _read_status_line(connection: socket.socket, deadline: float) -> int | None:
+    data = b""
+    while b"\r\n" not in data:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("proxy HTTP status line exceeded deadline")
+        connection.settimeout(min(1.0, remaining))
+        try:
+            chunk = connection.recv(8193 - len(data))
+        except TimeoutError as exc:
+            if data:
+                raise ValueError("proxy timed out during HTTP status line") from exc
+            raise
+        if not chunk:
+            if not data:
+                return None
+            raise ValueError("proxy closed an incomplete HTTP status line")
+        data += chunk
+        if len(data) > 8192:
+            raise ValueError("proxy HTTP status line exceeds size limit")
+    status_line = data.split(b"\r\n", 1)[0]
+    match = re.fullmatch(rb"HTTP/1\.[01] ([0-9]{3})(?: [^\r\n]*)?", status_line)
+    if match is None:
+        raise ValueError("proxy returned an invalid HTTP status line")
+    return int(match.group(1))
 
 
 def _run(
@@ -126,8 +154,12 @@ def _proxy_status(
                         f"Host: {authority}:443\r\n\r\n"
                     )
                     connection.sendall(request.encode("ascii"))
-                    status_line = connection.recv(4096).split(b"\r\n", 1)[0]
-                    return int(status_line.split(b" ", 2)[1])
+                    status = _read_status_line(connection, deadline)
+                    if status is not None:
+                        return status
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("proxy returned an empty response before deadline")
+                    time.sleep(0.1)
             except (ConnectionRefusedError, OSError):
                 if time.monotonic() >= deadline:
                     raise

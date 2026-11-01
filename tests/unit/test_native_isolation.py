@@ -1530,3 +1530,174 @@ def test_prepare_isolated_git_excludes_ai_directory(tmp_path: Path) -> None:
     )
     assert ".ai" not in staged.stdout
     assert "code.py" in staged.stdout
+
+
+@pytest.mark.parametrize(
+    "stage_index,stage",
+    list(enumerate(("runtime", "worker_image", "network", "proxy_image", "proxy_container"))),
+)
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "timeout",
+        "permission_denied",
+        "connection_failed",
+        "missing",
+        "invalid_json",
+        "inspection_failed",
+        "os_error",
+        "subprocess_error",
+        "permission_stderr",
+        "runtime_unavailable",
+    ),
+)
+def test_isolation_inspection_diagnostics_are_specific_and_sanitized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage_index: int,
+    stage: str,
+    reason: str,
+) -> None:
+    import subprocess
+
+    from subsched.agents.isolation import verify_native_isolation
+
+    canary = "DIAGNOSTIC_SECRET_CANARY"
+    auth = _secure_auth_dir(tmp_path / "auth")
+    (auth / "auth.json").write_text(canary, encoding="utf-8")
+    monkeypatch.setenv("DOCKER_HOST", f"unix:///{canary}")
+    config = _runtime_config(auth)
+    resources = (
+        "docker",
+        config.image,
+        config.network,
+        config.proxy_image,
+        "subsched-provider-proxy",
+    )
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **kwargs: object) -> CompletedProcess[str]:
+        calls.append(argv)
+        assert kwargs["timeout"] == 15
+        if len(calls) - 1 != stage_index:
+            return CompletedProcess(argv, 0, _successful_attestation_output(argv), "")
+        if reason == "timeout":
+            raise subprocess.TimeoutExpired(argv, 15, output=canary, stderr=canary)
+        if reason == "runtime_unavailable":
+            raise FileNotFoundError(canary)
+        if reason == "os_error":
+            raise OSError(canary)
+        if reason == "subprocess_error":
+            raise subprocess.SubprocessError(canary)
+        if reason == "permission_denied":
+            raise PermissionError(canary)
+        if reason == "invalid_json":
+            return CompletedProcess(argv, 0, canary, canary)
+        stderr = {
+            "connection_failed": f"Cannot connect to the Docker daemon at {canary}",
+            "permission_stderr": (
+                f"permission denied while trying to connect to the Docker daemon socket {canary}"
+            ),
+            "missing": (
+                f"Error response from daemon: network {resources[stage_index]} not found"
+                if stage == "network"
+                else f"Error response from daemon: No such "
+                f"{'container' if stage == 'proxy_container' else 'image'}: "
+                f"{resources[stage_index]}"
+            ),
+            "inspection_failed": f"unknown not found {canary}",
+        }[reason]
+        return CompletedProcess(argv, 1, canary, stderr)
+
+    failure = verify_native_isolation(
+        config,
+        enabled_agents=("codex",),
+        resolver=lambda _: Path("/usr/bin/docker"),
+        run_cmd=runner,
+    )
+    expected_reason = "permission_denied" if reason == "permission_stderr" else reason
+    if reason in {"os_error", "subprocess_error"} or (reason == "missing" and stage == "runtime"):
+        expected_reason = "inspection_failed"
+    assert failure is not None
+    assert f"stage={stage}" in failure
+    assert f"reason={expected_reason}" in failure
+    assert f"resource={resources[stage_index]}" in failure
+    command = {
+        "runtime": "docker info",
+        "worker_image": f"docker image inspect {config.image}",
+        "network": f"docker network inspect {config.network}",
+        "proxy_image": f"docker image inspect {config.proxy_image}",
+        "proxy_container": "docker container inspect subsched-provider-proxy",
+    }[stage]
+    assert f"check: {command}" in failure
+    assert canary not in failure
+    assert len(calls) == stage_index + 1
+
+
+@pytest.mark.parametrize("verified", (False, True))
+def test_doctor_labels_isolation_verification_explicitly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verified: bool,
+) -> None:
+    from subsched.preflight import PreflightReport
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "subsched.cli.validate_native_preflight",
+        lambda **kwargs: PreflightReport(
+            passed=verified,
+            checks=(
+                PreflightCheckResult(
+                    name="isolation",
+                    found=True,
+                    compatible=verified,
+                    error=None if verified else "stage=network reason=missing",
+                ),
+            ),
+            failure_reasons=() if verified else ("isolation unverified",),
+        ),
+    )
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == (0 if verified else 1)
+    assert f"isolation {'VERIFIED' if verified else 'UNVERIFIED'}" in result.output
+    assert "isolation FOUND" not in result.output
+    if not verified:
+        assert "stage=network reason=missing" in result.output
+
+
+def test_isolation_missing_runtime_has_read_only_recovery_guidance(tmp_path: Path) -> None:
+    from subsched.agents.isolation import verify_native_isolation
+
+    failure = verify_native_isolation(
+        _runtime_config(tmp_path / "unused"),
+        enabled_agents=(),
+        resolver=lambda _: None,
+        run_cmd=MagicMock(side_effect=AssertionError("must not run")),
+    )
+    assert failure is not None
+    assert "stage=runtime reason=runtime_unavailable resource=docker" in failure
+    assert "check: docker info" in failure
+
+
+def test_isolation_rejects_unsafe_diagnostic_resource_before_inspection(tmp_path: Path) -> None:
+    from subsched.agents.isolation import verify_native_isolation
+
+    config = dataclasses.replace(_runtime_config(tmp_path / "unused"), image="-bad\nCANARY")
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_: object) -> CompletedProcess[str]:
+        calls.append(argv)
+        assert argv[1] == "info"
+        return CompletedProcess(argv, 0, '"linux"', "")
+
+    failure = verify_native_isolation(
+        config,
+        enabled_agents=(),
+        resolver=lambda _: Path("/usr/bin/docker"),
+        run_cmd=runner,
+    )
+    assert failure is not None
+    assert "stage=worker_image reason=unsafe_resource" in failure
+    assert "CANARY" not in failure
+    assert len(calls) == 1

@@ -66,8 +66,21 @@ def _auth_failure(path: Path) -> str | None:
 
 
 def _json_output(
-    run_cmd: Callable[..., subprocess.CompletedProcess[str]], argv: list[str]
+    run_cmd: Callable[..., subprocess.CompletedProcess[str]], argv: list[str], *, stage: str
 ) -> tuple[Any | None, str | None]:
+    # Only configured identifiers and fixed codes may enter diagnostics. Never echo
+    # resolved executable paths, runtime output, exception text, or environment.
+    resource = "docker" if stage == "runtime" else argv[3]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@+-]*", resource):
+        return None, f"native isolation stage={stage} reason=unsafe_resource (dispatch blocked)"
+    operation = ["docker", "info"] if stage == "runtime" else ["docker", *argv[1:4]]
+
+    def failure(reason: str) -> tuple[None, str]:
+        return None, (
+            f"native isolation stage={stage} reason={reason} resource={resource} "
+            f"(dispatch blocked); check: {shlex.join(operation)}"
+        )
+
     try:
         result = run_cmd(
             argv,
@@ -77,14 +90,36 @@ def _json_output(
             timeout=15,
             env=filter_environment(dict(os.environ), allowlist=COMMON_ENV_ALLOWLIST),
         )
+    except subprocess.TimeoutExpired:
+        return failure("timeout")
+    except PermissionError:
+        return failure("permission_denied")
+    except FileNotFoundError:
+        return failure("runtime_unavailable")
     except (OSError, subprocess.SubprocessError):
-        return None, "native isolation runtime inspection failed"
+        return failure("inspection_failed")
     if result.returncode != 0:
-        return None, "native isolation runtime inspection failed"
+        # Recognize known Docker messages without ever returning their contents.
+        stderr = result.stderr.strip() if isinstance(result.stderr, str) else ""
+        missing = {
+            "worker_image": f"No such image: {resource}",
+            "proxy_image": f"No such image: {resource}",
+            "network": f"network {resource} not found",
+            "proxy_container": f"No such container: {resource}",
+        }.get(stage)
+        if missing is not None and stderr in {
+            missing, f"Error response from daemon: {missing}", f"Error: {missing}"
+        }:
+            return failure("missing")
+        if "permission denied" in stderr.lower():
+            return failure("permission_denied")
+        if "cannot connect to the docker daemon" in stderr.lower():
+            return failure("connection_failed")
+        return failure("inspection_failed")
     try:
         return json.loads(result.stdout), None
     except (json.JSONDecodeError, TypeError):
-        return None, "native isolation runtime returned an invalid inspection result"
+        return failure("invalid_json")
 
 
 def _git(
@@ -363,7 +398,11 @@ def verify_native_isolation(
         )
     runtime_raw = resolver(config.runtime)
     if runtime_raw is None:
-        return "native isolation runtime is unavailable"
+        return (
+            "native isolation runtime is unavailable: "
+            "stage=runtime reason=runtime_unavailable resource=docker "
+            "(dispatch blocked); check: docker info"
+        )
     runtime = Path(runtime_raw)
     if not runtime.is_absolute():
         return "native isolation runtime path is not absolute"
@@ -384,7 +423,9 @@ def verify_native_isolation(
         if failure is not None:
             return failure
 
-    os_type, failure = _json_output(run_cmd, [str(runtime), "info", "--format", "{{json .OSType}}"])
+    os_type, failure = _json_output(
+        run_cmd, [str(runtime), "info", "--format", "{{json .OSType}}"], stage="runtime"
+    )
     if failure is not None:
         return failure
     if os_type != "linux":
@@ -400,6 +441,7 @@ def verify_native_isolation(
             "--format",
             "{{json .}}",
         ],
+        stage="worker_image",
     )
     if failure is not None:
         return failure
@@ -417,6 +459,7 @@ def verify_native_isolation(
     network, failure = _json_output(
         run_cmd,
         [str(runtime), "network", "inspect", config.network, "--format", "{{json .}}"],
+        stage="network",
     )
     if failure is not None:
         return failure
@@ -445,6 +488,7 @@ def verify_native_isolation(
             "--format",
             "{{json .}}",
         ],
+        stage="proxy_image",
     )
     if failure is not None:
         return failure
@@ -462,6 +506,7 @@ def verify_native_isolation(
     proxy, failure = _json_output(
         run_cmd,
         [str(runtime), "container", "inspect", proxy_name, "--format", "{{json .}}"],
+        stage="proxy_container",
     )
     if failure is not None:
         return failure
@@ -759,20 +804,151 @@ def wrap_native_request(
     )
 
 
+def prepare_verification_git(worktree: Path, snapshot_root: Path) -> IsolationGitContext:
+    """Export independent Git objects/refs, never host config, hooks or linked metadata."""
+
+    def validate_path(path: Path) -> None:
+        if not path.is_absolute() or any(p.is_symlink() for p in (path, *path.parents)):
+            raise ValueError("verification Git path must be absolute and contain no symlinks")
+        if not path.exists():
+            raise ValueError("verification Git metadata is missing")
+
+    try:
+        validate_path(worktree)
+        entry = worktree / ".git"
+        validate_path(entry)
+        source = entry
+        if entry.is_file():
+            if entry.stat().st_size > 4096:
+                raise ValueError("verification Git pointer is invalid")
+            pointer = entry.read_text(encoding="utf-8").strip()
+            if not pointer.startswith("gitdir: ") or "\n" in pointer:
+                raise ValueError("verification Git pointer is invalid")
+            source = Path(os.path.abspath(worktree / pointer[8:]))
+            validate_path(source)
+            # Only genuine linked worktrees may point outside their own directory.
+            common = source / "commondir"
+            backlink = source / "gitdir"
+            validate_path(common)
+            validate_path(backlink)
+            if (
+                not common.is_file()
+                or not backlink.is_file()
+                or common.stat().st_size > 4096
+                or backlink.stat().st_size > 4096
+            ):
+                raise ValueError("verification Git linkage is invalid")
+            common_dir = Path(os.path.abspath(source / common.read_text().strip()))
+            validate_path(common_dir)
+            if (
+                source.parent != common_dir / "worktrees"
+                or Path(backlink.read_text().strip()) != entry
+            ):
+                raise ValueError("verification Git linkage is invalid")
+        else:
+            common_dir = source
+        if (common_dir / "commondir").exists():
+            raise ValueError("verification Git common directory is invalid")
+        if not source.is_dir() or not common_dir.is_dir():
+            raise ValueError("verification Git directory is invalid")
+        for path in common_dir.rglob("*"):
+            if path.is_symlink() or not (path.is_dir() or path.is_file()):
+                raise ValueError("verification Git metadata contains unsafe entries")
+        if any(
+            (common_dir / "objects/info" / name).exists()
+            for name in ("alternates", "http-alternates")
+        ):
+            raise ValueError("verification Git alternates are unsupported")
+        validate_path(snapshot_root.parent)
+        if snapshot_root.exists() or snapshot_root.is_symlink():
+            raise ValueError("verification Git snapshot destination already exists")
+        secure_directory(snapshot_root)
+        git_dir = snapshot_root / "repo.git"
+        # Transport copying avoids hardlinks and alternates; clone does not copy source config.
+        commands = (
+            [
+                "git",
+                "clone",
+                "--quiet",
+                "--bare",
+                "--no-local",
+                "--no-hardlinks",
+                "--single-branch",
+                "--no-tags",
+                "--",
+                str(worktree),
+                str(git_dir),
+            ],
+            ["git", f"--git-dir={git_dir}", "config", "core.bare", "false"],
+            ["git", f"--git-dir={git_dir}", "config", "core.hooksPath", "/dev/null"],
+            [
+                "git",
+                f"--git-dir={git_dir}",
+                f"--work-tree={worktree}",
+                "reset",
+                "--quiet",
+                "--mixed",
+                "HEAD",
+            ],
+        )
+
+        def run_git(command: list[str]) -> subprocess.CompletedProcess[str]:
+            clean_env = filter_environment(dict(os.environ), allowlist=COMMON_ENV_ALLOWLIST)
+            clean_env.update(
+                GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null", GIT_TERMINAL_PROMPT="0"
+            )
+            return subprocess.run(
+                ["git", "-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", *command[1:]],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+                env=clean_env,
+            )
+
+        for command in commands:
+            if run_git(command).returncode != 0:
+                raise ValueError("verification Git snapshot preparation failed")
+        head = run_git(["git", f"--git-dir={git_dir}", "rev-parse", "--verify", "HEAD"])
+        if head.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", head.stdout.strip()):
+            raise ValueError("verification Git HEAD is invalid")
+        mount = git_dir
+        if entry.is_file():
+            mount = snapshot_root / "worktree.git"
+            atomic_write_secure_bytes(mount, b"gitdir: /run/subsched-git\n")
+        return IsolationGitContext(git_dir, head.stdout.strip(), mount)
+    except (OSError, UnicodeError, subprocess.SubprocessError) as error:
+        raise ValueError("verification Git metadata could not be safely prepared") from error
+
+
 def wrap_verification_request(
     request: ProcessExecutionRequest,
     *,
     config: NativeIsolationConfig,
     runtime_executable: Path,
     container_name: str,
+    git_context: IsolationGitContext,
+    audit_cache: Path | None = None,
 ) -> ProcessExecutionRequest:
-    """Run a verification gate in the worker image without credentials or network."""
+    """Run a verification gate in the worker image without credentials or network.
+
+    An audit cache must be independently authenticated by the trusted caller;
+    this wrapper enforces mount isolation but cannot establish provenance.
+    """
     if config.backend != "container" or config.image is None:
         raise ValueError("verification container configuration is incomplete")
     if not runtime_executable.is_absolute():
         raise ValueError("verification container runtime path is not absolute")
     if not request.cwd.is_absolute() or request.cwd.is_symlink() or not request.cwd.is_dir():
         raise ValueError("verification worktree is not a valid absolute directory")
+    if audit_cache is not None and (
+        not audit_cache.is_absolute()
+        or not audit_cache.is_dir()
+        or any(path.is_symlink() for path in (audit_cache, *audit_cache.parents))
+        or audit_cache.is_relative_to(request.cwd)
+        or request.cwd.is_relative_to(audit_cache)
+    ):
+        raise ValueError("verification audit cache is not a safe external directory")
 
     uid = os.getuid()
     gid = os.getgid()
@@ -804,6 +980,24 @@ def wrap_verification_request(
         f"/isolated-home:rw,exec,nosuid,nodev,size=256m,mode=700,uid={uid},gid={gid}",
         "--mount",
         _mount_value(request.cwd, str(request.cwd)),
+        "--mount",
+        _mount_value(git_context.git_dir, "/run/subsched-git"),
+        "--mount",
+        _mount_value(
+            git_context.worktree_git_mount,
+            str(request.cwd / ".git"),
+            readonly=git_context.worktree_git_mount.is_file(),
+        ),
+        *(
+            (
+                "--mount",
+                _mount_value(audit_cache, "/run/pip-audit", readonly=True),
+                "--env",
+                "XDG_CACHE_HOME=/run",
+            )
+            if audit_cache is not None
+            else ()
+        ),
         "--workdir",
         str(request.cwd),
         "--env",

@@ -152,16 +152,24 @@ _TOKEN_SCOPES_RE = re.compile(r"^-\s*Token scopes:\s*(.*)$")
 
 
 def _parse_active_token_scopes(text: str) -> tuple[str, ...] | None:
-    """Extract the active account's token scopes from `gh auth status` text output.
+    """Extract the active github.com account's token scopes from `gh auth status` output.
 
     `gh auth status` has no `--json` support, so its human-readable output (which may list
-    multiple hosts/accounts) is parsed line by line. Scopes are only taken from the block
+    multiple hosts/accounts) is parsed line by line. Other host blocks are ignored. Scopes
+    are only taken from the block
     following an explicit "Active account: true" marker; if no such marker exists, the output
     describes a single account and its scopes are used as-is. Returns None when the active
     account's scopes line could not be found, so the caller can fail closed.
     """
     is_active = True
+    in_target_host = False
     for raw_line in text.splitlines():
+        if raw_line and not raw_line[0].isspace():
+            in_target_host = raw_line.strip().lower() == "github.com"
+            is_active = True
+            continue
+        if not in_target_host:
+            continue
         line = raw_line.strip()
         active_match = _ACTIVE_ACCOUNT_RE.match(line)
         if active_match:
@@ -182,7 +190,7 @@ def diagnose_token(run: RunCommand | None = None) -> TokenDiagnosis:
     Never passes `--show-token`; only scope names from `gh auth status` are inspected.
     `gh auth status` does not support `--json`, so its plaintext output is parsed instead.
     """
-    argv = ["gh", "auth", "status"]
+    argv = ["gh", "auth", "status", "--hostname", "github.com"]
     try:
         runner = run or subprocess.run
         result = runner(

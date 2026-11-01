@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-scheduler"
-version = "0.6.1"
+version = "0.6.2"
 description = "A deterministic, subscription-aware coding agent scheduler"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -49,6 +49,7 @@ dev = [
   "ruff>=0.12,<1",
   "types-PyYAML>=6.0.12",
   "urllib3>=2.8.0,<3",
+  "playwright>=1.56,<2",
 ]
 
 [project.scripts]

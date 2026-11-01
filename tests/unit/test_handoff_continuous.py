@@ -4,6 +4,8 @@ from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from subsched.checkpoint import MechanicalCheckpoint, save_checkpoint
 from subsched.models import AgentResult, AgentResultKind, Capacity, CapacityState, Issue, TaskState
 from subsched.router import AgentConfig, Router
@@ -305,3 +307,75 @@ def test_failover_reads_previously_updated_handoff_not_the_bootstrap_placeholder
     # placeholder ("Task bootstrapped" / "Initial implementation").
     assert "Did real work" in reads[1]
     assert "Task bootstrapped" not in reads[1]
+
+
+def test_scheduler_reports_missing_identity_without_exposing_content(tmp_path: Path) -> None:
+    """A worker's malformed identity fails closed with an actionable, sanitized reason."""
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    class MalformedHandoffWorker:
+        def run(self, task, agent):  # type: ignore[no-untyped-def]
+            assert task.worktree is not None
+            _write_handoff(
+                Path(task.worktree), task.issue_number, title=task.title,
+                timestamp=(now + timedelta(minutes=1)).isoformat(),
+            )
+            path = Path(task.worktree) / ".ai" / "handoffs" / f"{task.issue_number}.md"
+            content = path.read_text(encoding="utf-8")
+            path.write_text(
+                content.replace("# Issue\n\n#101 Task 101", "# Issue #101")
+                + "\nPRIVATE_HANDOFF_CANARY\n", encoding="utf-8"
+            )
+            return AgentResult(AgentResultKind.PASS)
+
+    scheduler = _scheduler(tmp_path, MalformedHandoffWorker(), handoff_continuous=True)
+    scheduler.discover([Issue(number=101, title="Task 101")])
+    scheduler.tick([_available("claude", observed_at=now)], now=now)
+
+    task = scheduler.tasks[0]
+    assert task.status is TaskState.NEEDS_HUMAN
+    assert task.needs_human_reason == (
+        "handoff schema invalid: Issue identity line missing or malformed"
+    )
+    assert "PRIVATE_HANDOFF_CANARY" not in task.needs_human_reason
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected"),
+    [
+        ("# Issue\n\n", "", "Issue header missing"),
+        ("# Issue\n\n#101 Task 101", "# Issue #101", "identity line missing or malformed"),
+        ("## Current Work", "## Work", "required section missing"),
+        ("#101 Task 101", "#999 Other", "identity mismatch"),
+    ],
+)
+def test_scheduler_does_not_bypass_invalid_contract_with_fresh_checkpoint(
+    tmp_path: Path, old: str, new: str, expected: str
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    class WrongIdentityWorker:
+        def run(self, task, agent):  # type: ignore[no-untyped-def]
+            assert task.worktree is not None
+            worktree = Path(task.worktree)
+            _write_handoff(
+                worktree, 101, title="Task 101", timestamp=(now + timedelta(minutes=1)).isoformat()
+            )
+            path = worktree / ".ai/handoffs/101.md"
+            path.write_text(
+                path.read_text(encoding="utf-8").replace(old, new),
+                encoding="utf-8",
+            )
+            save_checkpoint(worktree, MechanicalCheckpoint(
+                issue_number=101, git_status="", git_diff_stat="", changed_files=(),
+                head_commit="abc123", test_results="", last_agent_output="", exit_code=0,
+                failure_classification="PASS", timestamp=(now + timedelta(minutes=1)).isoformat(),
+            ))
+            return AgentResult(AgentResultKind.PASS)
+
+    scheduler = _scheduler(tmp_path, WrongIdentityWorker(), handoff_continuous=True)
+    scheduler.discover([Issue(number=101, title="Task 101")])
+    scheduler.tick([_available("claude", observed_at=now)], now=now)
+
+    assert scheduler.tasks[0].status is TaskState.NEEDS_HUMAN
+    assert expected in (scheduler.tasks[0].needs_human_reason or "")
