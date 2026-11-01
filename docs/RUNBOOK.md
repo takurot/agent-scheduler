@@ -91,18 +91,41 @@ Prepare a separately trusted immutable audit workflow on an ephemeral CI runner;
 never give repository code host HOME, credentials, runtime sockets or host execution.
 Keep normal test/lint in network-none containers.
 
-Automatic combination of offline results and online evidence is not implemented.
-Stop an unsupported split verification plan before dispatch and explain the missing
-independent audit integration. Do not configure offline-only commands as full PASS,
-remove mandatory audits, widen the proxy, enable host fallback, or retry workers
-for unavailable metadata. Preserve already-created task worktrees and handoffs for
-operator review. A green ordinary CI badge alone does not implement this contract.
+The optional `verification.independent_audit` configuration can authenticate a
+separately approved GitHub Actions run and supply its cache to the offline gate.
+Use `subsched audit-request WORKTREE --config CONFIG` to derive the exact target
+and inventory; the command only prints the request and does not dispatch it. The
+operator must approve a protected workflow ref and its commit/digest, run the
+workflow with that request, and set the resulting run and artifact IDs in config.
+The workflow must already exist on the default branch before GitHub accepts a
+workflow dispatch. Never use the candidate worktree to choose the trust root.
 
-For the spike, independently authenticate the CI run/attempt and evidence digest,
-match all target bindings, and reject age >=24 hours, future time, missing provenance,
-advisories or failed/skipped/unknown runs. Follow the design's two-record live
-procedure: network-none Docker reproduction and a separate successful trusted online
-audit. These are still outstanding; synthetic tests are not live evidence.
+After reviewing the trust configuration and protecting the dispatch ref, an
+operator can prepare and dispatch an audit as follows. Replace the placeholders;
+the ref must resolve to the configured `workflow_commit` at dispatch time.
+
+```bash
+subsched audit-request /absolute/path/to/task-worktree --config /path/to/config.yaml > audit-request.json
+gh api --method POST -H 'X-GitHub-Api-Version: 2026-03-10' \
+  repos/OWNER/REPO/actions/workflows/independent-audit.yml/dispatches \
+  -f 'ref=PROTECTED_REF' \
+  -f "inputs[target]=$(jq -c .target audit-request.json)" \
+  -f "inputs[inventory]=$(jq -c .inventory audit-request.json)"
+```
+
+Wait for the workflow run to complete, obtain its artifact ID via the GitHub
+Actions API, and set both IDs in the operator-owned configuration. The consumer
+checks the actual run and workflow SHA even if a ref moved. The dispatch ref
+must itself be protected: rejecting an unexpected SHA afterwards cannot undo
+execution of a workflow dispatched from an untrusted ref.
+
+Evidence is bound to the exact commit and expires (at most 900 seconds). Each
+new commit needs a new run and updated IDs; automatic dispatch and refresh are
+not implemented. Missing or untrusted evidence causes operator intervention,
+not a retry or PASS. Do not remove the mandatory audit, widen network access, or
+configure offline-only commands as a full PASS. Live authenticated GitHub Actions
+and ordinary/linked Docker acceptance must be verified before claiming this path
+is production-validated; simulated GitHub responses are not that evidence.
 
 ### Initializing & Running Scheduler
 ```bash

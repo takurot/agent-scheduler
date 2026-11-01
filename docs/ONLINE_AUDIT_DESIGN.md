@@ -1,9 +1,9 @@
 # Online dependency audit contract (issue #495)
 
-Status: design and executable contract spike, not enabled in Scheduler. No task
-state, configuration, gate, or PASS semantics change. Live acceptance is pending;
-see the evidence ledger below. `scripts/audit_contract_spike.py` is a pure model,
-not an artifact importer, signature verifier, or supported verification command.
+Status: issue #526 adds an opt-in CI evidence reader and offline cache handoff.
+The real GitHub Actions producer and end-to-end provenance still require live
+validation before this path can be treated as production-validated. The original
+`scripts/audit_contract_spike.py` remains a model, not a supported importer.
 
 ## Decision
 
@@ -16,7 +16,7 @@ worker claim nor an offline test result supplies the online half.
 | Candidate | Benefit | Cost / decision |
 | --- | --- | --- |
 | Trusted metadata prefetch and offline matching | No network in any repository gate | Requires a complete versioned advisory snapshot, resolver/marker coverage, authenticity and expiry handling, and an offline matcher supported by the pinned tool. An HTTP cache alone does not establish completeness or freshness. Defer. |
-| Independent CI audit | Can reuse an existing online CI service and pinned audit tool without a new advisory database | Requires trusted workflow provenance, exact package inventory and freshness checks. Select for the contract spike; automated consumption remains unsupported. |
+| Independent CI audit | Can reuse an existing online CI service and pinned audit tool without a new advisory database | Requires trusted workflow provenance, exact package inventory and freshness checks. Selected; the optional implementation requires independent CI evidence. |
 
 Do not add PyPI to the provider proxy, give general network to verification, run
 modified repository code on the host, or make the final audit optional in
@@ -75,23 +75,23 @@ missing reports require a new audit, never an implementation retry or suppressio
 
 ## Planning and current operating limits
 
-Before dispatch, the operator reviews `verification.commands` and all scripts they
-invoke for online requirements; binary/toolchain probes do not prove metadata
-availability. The current Scheduler cannot import this independent CI evidence or
-combine it with offline gates. Consequently a full gate containing online
-`pip-audit` in network-none VERIFYING is an unsupported verification plan: explain
-that missing capability and stop before dispatch. Do not dispatch repeatedly in the
-hope that DNS succeeds. Script names are not a reliable generic online detector;
-this planning step is explicitly operator-owned in this design stage.
+The optional implementation derives the target commit, lock, and package inventory
+independently in the pinned, network-none image. An operator-approved workflow
+runs the data-only audit on a fresh ephemeral runner, and the host verifies the
+GitHub run, artifact digest, exact target, inventory and freshness before mounting
+its cache read-only in the verification container. The unchanged quality gate still
+runs `pip-audit`. A missing, untrusted, stale, or mismatched artifact cannot pass.
+The host rechecks evidence and the clean target after the gate. The trusted workflow
+is checked out at its operator-approved commit; it must never import or install the
+candidate project. The operator controls the allowed workflow commit and digest.
 
-Do not configure just the offline half as a full Scheduler gate and allow PR
-creation. Do not enable push/PR completion for an unsupported split plan. If a task
-is already in this situation, preserve its worktree/handoff and use operator
-intervention rather than asking the worker to change network or remove the audit.
-Manual inspection of independent CI can inform review but does not transition a
-Scheduler task or make its VERIFYING result PASS. Automated adoption requires a
-separately reviewed authenticated CI reader and composite gate, with pre-dispatch
-admission and failure classification; this spike deliberately does not add them.
+The current path requires the operator to prepare a new run and artifact for each
+exact target commit; it does not automatically dispatch or refresh evidence after
+worker changes. A missing artifact requires operator intervention, not a worker
+retry. A workflow_dispatch workflow must first exist on the default branch, so a
+feature branch alone cannot establish genuine GitHub producer evidence. Real
+GitHub provenance and both ordinary and linked-worktree acceptance remain required
+before asserting end-to-end validation. See [RUNBOOK.md](RUNBOOK.md#online-audit-planning-issue-495).
 
 ## Spike and acceptance evidence ledger
 
@@ -120,9 +120,6 @@ Two separate live records are required before claiming issue acceptance:
    independently derived expected target; record classification `clean`. Exercise
    advisory, missing/stale and changed-lock fixtures separately from this live run.
 
-At implementation time Docker is not installed in the task environment. Neither
-live record has been produced by this spike. The issue's historical reproduction
-is context, not new acceptance evidence. Unit success, skipped Docker tests and a
-local full gate cannot substitute for these two records. An operator with the
-attested Docker host and trusted CI producer must supply them before this design
-can be considered validated for adoption.
+The original design spike did not produce these live records. Subsequent local
+Docker and simulated GitHub-transport results must be distinguished from a real
+authenticated GitHub Actions run; the latter remains an acceptance requirement.

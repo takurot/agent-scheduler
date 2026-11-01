@@ -356,8 +356,9 @@ PRを持つTaskの`COMPLETE`はmerge確認を要する。CI PASSは`ci_result`�
 
 このrepositoryの隔離verificationでPython環境を準備する場合は、
 [`RUNBOOK.md`](RUNBOOK.md#offline-python-environment-for-verification)の手順で
-対象lockとplatformに対応するoffline imageをoperatorが準備する。必須のdependency auditは
-引き続き必要であり、advisory dataが利用できなければ品質gateは失敗する。
+対象lockとplatformに対応するoffline imageをoperatorが準備する。独立CIによる監査を
+使う場合も、operatorが承認したworkflowと対象commitに一致する新鮮な証拠が必要であり、
+不足・不一致は失敗とする。通常の`pip-audit`は引き続き品質gateで実行する。
 
 ## 9. コミットとPull Request
 

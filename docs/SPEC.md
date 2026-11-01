@@ -3210,6 +3210,17 @@ worktree `.venv` is not shared. Missing, stale, or invalid bundle inputs fail cl
 The mandatory vulnerability audit remains a separate gate and must not be skipped
 when advisory data is unavailable.
 
+An operator may opt in to `verification.independent_audit` for this repository's
+Python gate. The Scheduler derives the full locked package set in an isolated,
+networkless image without mounting task code, checks a clean committed worktree and
+authenticates the exact CI workflow, run attempt, artifact digest, target, inventory
+and acquisition time. Only a clean result with every expected PyPI cache entry can
+be mounted read-only at `/run/pip-audit`; the normal `pip-audit` gate still runs.
+Checks are repeated after the gate, and missing, stale, incomplete or untrusted
+evidence goes to `NEEDS_HUMAN` without consuming verification retries. The operator
+must separately approve the trusted workflow commit and protect the dispatch ref.
+See `docs/ONLINE_AUDIT_DESIGN.md` and the runbook for the trust boundary and limits.
+
 Verification summaries distinguish timeout, output limit, and unconfirmed cleanup.
 For recognized quality-gate progress markers, failures may include a fixed reported
 stage label rather than arbitrary output. Stage markers are untrusted hints and cannot
