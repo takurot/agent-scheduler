@@ -63,7 +63,7 @@ jobs:
         run: uv build
 
       - name: Validate distribution artifacts
-        run: uvx twine check --strict dist/*
+        run: uvx twine==7.0.0 check --strict dist/*
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2

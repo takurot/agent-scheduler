@@ -5,8 +5,18 @@ unset GIT_DIR GIT_WORK_TREE
 cd "$(dirname "$0")/.."
 
 echo "=== Syncing dependencies ==="
+if [[ "${SUBSCHED_OFFLINE_PYTHON:-}" == "1" ]]; then
+    offline_root="$(mktemp -d /tmp/subsched-offline.XXXXXXXX)"
+    export UV_PROJECT_ENVIRONMENT="$offline_root/venv"
+    export UV_CACHE_DIR="$offline_root/cache"
+    export UV_NO_SYNC=1 UV_OFFLINE=1 UV_PYTHON_DOWNLOADS=never
+fi
 uv lock --check
-uv sync --frozen
+if [[ "${SUBSCHED_OFFLINE_PYTHON:-}" == "1" ]]; then
+    python3 scripts/offline_verification.py /opt/subsched-offline "$UV_PROJECT_ENVIRONMENT" "$UV_CACHE_DIR"
+else
+    uv sync --frozen
+fi
 
 echo "=== Running Ruff linter ==="
 uv run --frozen ruff check .

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tomllib
@@ -15,9 +16,22 @@ from packaging.version import Version
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "quality_gate.sh"
 
 
-@pytest.mark.parametrize("package,minimum", [("pyjwt", "2.15.1"), ("urllib3", "2.8.0")])
+@pytest.mark.parametrize(
+    "package,minimum",
+    [
+        ("pyjwt", "2.15.1"),
+        ("urllib3", "2.8.0"),
+        # Issue #491: certifi's PYSEC-2026-4320 appears twice in the pip-audit
+        # output (fixed versions 2026.10.18 and 2026.10.19); both are distinct
+        # rows for the same advisory, so the single highest floor covers it.
+        ("certifi", "2026.10.19"),
+        ("filelock", "4.2.1"),
+        ("msgpack", "1.2.3"),
+        ("opentelemetry-api", "1.45.1"),
+    ],
+)
 def test_lock_excludes_vulnerable_dependency_versions(package: str, minimum: str) -> None:
-    """Issue #449: retain the audited security updates in the frozen environment."""
+    """Issues #449, #491: retain the audited security updates in the frozen environment."""
     with (SCRIPT.parents[1] / "uv.lock").open("rb") as lock_file:
         lock = tomllib.load(lock_file)
     versions = [entry["version"] for entry in lock["package"] if entry["name"] == package]
@@ -96,3 +110,35 @@ def test_stale_lock_fails_without_rewriting_it(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert lock.read_bytes() == original
+
+
+def test_offline_gate_fails_closed_when_bundle_validation_fails(tmp_path: Path) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    shutil.copyfile(SCRIPT, scripts / "quality_gate.sh")
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    uv = binaries / "uv"
+    uv.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALLS"\n', encoding="utf-8")
+    uv.chmod(0o755)
+    validator = binaries / "python3"
+    validator.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    validator.chmod(0o755)
+    calls = tmp_path / "calls"
+    env = {
+        **os.environ,
+        "PATH": f"{binaries}:{os.environ['PATH']}",
+        "SUBSCHED_OFFLINE_PYTHON": "1",
+        "CALLS": str(calls),
+    }
+
+    result = subprocess.run(
+        ["bash", str(scripts / "quality_gate.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 42
+    assert calls.read_text().splitlines() == ["lock --check"]

@@ -100,3 +100,44 @@ def test_native_codex_execution_tool_lifecycle_reproduction(tmp_path: Path) -> N
     assert capture.req is not None
     assert "--output-schema" in capture.req.argv
     assert '{"result"' in capture.req.stdin_payload.decode("utf-8")
+
+
+def test_native_codex_item_updated_and_new_item_types_reach_pass(tmp_path: Path) -> None:
+    """#474: item.updated, mcp_tool_call, todo_list and a non-fatal error item must not be
+    misclassified as FAILURE, so the NativeWorker result proceeds to verification."""
+    events = [
+        {"type": "thread.started", "thread_id": "audit"},
+        {"type": "turn.started"},
+        {"type": "item.started", "item": {"id": "c1", "type": "command_execution"}},
+        {"type": "item.updated", "item": {"id": "c1", "type": "command_execution"}},
+        {"type": "item.completed", "item": {"id": "c1", "type": "command_execution"}},
+        {"type": "item.started", "item": {"id": "m1", "type": "mcp_tool_call"}},
+        {"type": "item.completed", "item": {"id": "m1", "type": "mcp_tool_call"}},
+        {"type": "item.started", "item": {"id": "t1", "type": "todo_list"}},
+        {"type": "item.updated", "item": {"id": "t1", "type": "todo_list"}},
+        {"type": "item.completed", "item": {"id": "t1", "type": "todo_list"}},
+        {"type": "item.completed", "item": {"id": "e1", "type": "error", "message": "warn"}},
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "a1",
+                "type": "agent_message",
+                "text": json.dumps({"result": "pass", "summary": "Done", "reason_code": None}),
+            },
+        },
+        {"type": "turn.completed", "usage": {}},
+    ]
+    task = Task.from_issue(Issue(1, "Fixture"), worktree=str(tmp_path))
+    bootstrap_task_files(tmp_path, task)
+
+    class Replay:
+        def execute(self, req):  # type: ignore[no-untyped-def]
+            return parse_codex_jsonl("\n".join(map(json.dumps, events)), returncode=0)
+
+    worker = NativeWorker(
+        codex_agent=Replay(),
+        subscription_billing_verified=True,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+    )
+
+    assert worker.run(task, "codex").kind is AgentResultKind.PASS

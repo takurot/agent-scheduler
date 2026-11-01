@@ -202,7 +202,7 @@ def test_diagnose_token_never_requests_token_value() -> None:
 
     diagnose_token(run=fake_run)
 
-    assert calls == [["gh", "auth", "status"]]
+    assert calls == [["gh", "auth", "status", "--hostname", "github.com"]]
     assert "--show-token" not in calls[0]
 
 
@@ -378,3 +378,68 @@ def test_parse_issue_handles_malformed_labels() -> None:
     issue2 = GitHubIssueSource._parse_issue(payload_no_list)
     assert issue2.number == 43
     assert issue2.labels == ()
+
+
+@pytest.mark.parametrize("target_first", [True, False])
+def test_token_diagnosis_uses_only_github_com_active_account(target_first: bool) -> None:
+    target = (
+        "github.com\n"
+        "  ✓ Logged in to github.com account previous\n"
+        "  - Active account: false\n"
+        "  - Token scopes: 'workflow'\n"
+        "  ✓ Logged in to github.com account active\n"
+        "  - Active account: true\n"
+        "  - Token scopes: 'read:org'\n"
+    )
+    enterprise = (
+        "github.enterprise.example\n"
+        "  ✓ Logged in to github.enterprise.example account bot\n"
+        "  - Active account: true\n"
+        "  - Token scopes: 'repo', 'workflow'\n"
+    )
+    output = target + enterprise if target_first else enterprise + target
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        assert argv == ["gh", "auth", "status", "--hostname", "github.com"]
+        return subprocess.CompletedProcess(argv, 0, stdout=output, stderr="")
+
+    diagnosis = diagnose_token(run=fake_run)
+    assert diagnosis.authenticated
+    assert diagnosis.scopes == ("read:org",)
+    assert not diagnosis.can_write
+
+
+def test_token_diagnosis_does_not_use_other_host_when_target_missing() -> None:
+    output = (
+        "enterprise.example\n"
+        "  ✓ Logged in to enterprise.example account bot\n"
+        "  - Active account: true\n"
+        "  - Token scopes: 'repo'\n"
+    )
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, stdout=output, stderr="")
+
+    diagnosis = diagnose_token(run=fake_run)
+    assert not diagnosis.authenticated
+    assert not diagnosis.can_write
+
+
+def test_token_diagnosis_does_not_use_other_host_when_target_inactive() -> None:
+    output = (
+        "github.com\n"
+        "  ✓ Logged in to github.com account inactive\n"
+        "  - Active account: false\n"
+        "  - Token scopes: 'repo'\n"
+        "enterprise.example\n"
+        "  ✓ Logged in to enterprise.example account bot\n"
+        "  - Active account: true\n"
+        "  - Token scopes: 'repo'\n"
+    )
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, stdout=output, stderr="")
+
+    diagnosis = diagnose_token(run=fake_run)
+    assert not diagnosis.authenticated
+    assert not diagnosis.can_write
