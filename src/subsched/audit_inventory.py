@@ -10,8 +10,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 import subprocess
 import tempfile
+import zlib
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +26,20 @@ _NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\Z")
 _VERSION = re.compile(r"[0-9][A-Za-z0-9.!+_-]*\Z")
 _MAX_PACKAGES = 10000
 _MAX_REPORT = 2 * 1024 * 1024
+_MAX_RESPONSE = 1024 * 1024
+_AUDIT_BOOTSTRAP = (
+    "import os,pathlib,runpy,sys; "
+    "os.environ['PIPAPI_PYTHON_LOCATION']=str(pathlib.Path.cwd()/'pip-python'); "
+    "sys.path.insert(0,str(pathlib.Path(sys.executable).parent.parent/'lib'/"
+    "('python%d.%d'%sys.version_info[:2])/'site-packages')); "
+    "runpy.run_module('pip_audit',run_name='__main__',alter_sys=True)"
+)
+_PIP_BOOTSTRAP = (
+    "import pathlib,runpy,sys; "
+    "sys.path.insert(0,str(pathlib.Path(sys.executable).parent.parent/'lib'/"
+    "('python%d.%d'%sys.version_info[:2])/'site-packages')); "
+    "runpy.run_module('pip',run_name='__main__',alter_sys=True)"
+)
 
 
 def _normalized(items: Sequence[tuple[str, str]]) -> list[dict[str, str]]:
@@ -61,7 +77,11 @@ def expected_cache_paths(items: Sequence[tuple[str, str]]) -> set[str]:
 
 
 def _cache_complete(cache: Path, items: Sequence[tuple[str, str]]) -> bool:
-    expected = expected_cache_paths(items)
+    packages = _normalized(items)
+    expected = {
+        next(iter(expected_cache_paths([(package["name"], package["version"])]))): package
+        for package in packages
+    }
     actual: set[str] = set()
     total = 0
     for path in cache.rglob("*"):
@@ -74,8 +94,47 @@ def _cache_complete(cache: Path, items: Sequence[tuple[str, str]]) -> bool:
             total += size
             if total > 16 * 1024 * 1024:
                 return False
-            actual.add(path.relative_to(cache).as_posix())
-    return actual == expected
+            relative = path.relative_to(cache).as_posix()
+            if relative not in expected or not _valid_cached_response(path, expected[relative]):
+                return False
+            actual.add(relative)
+    return actual == set(expected)
+
+
+def _valid_cached_response(path: Path, package: dict[str, str]) -> bool:
+    try:
+        import msgpack  # type: ignore[import-untyped]
+    except ImportError:
+        return False
+    try:
+        data = path.read_bytes()
+        if not data.startswith(b"cc=4,"):
+            return False
+        response = msgpack.unpackb(data[5:], raw=False)["response"]
+        headers = {key.lower(): value for key, value in response["headers"].items()}
+        body = response["body"]
+        if response["status"] != 200 or not isinstance(body, bytes):
+            return False
+        encoding = headers.get("content-encoding", "identity").lower()
+        if encoding == "gzip":
+            decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            body = decoder.decompress(body, _MAX_RESPONSE + 1)
+            if not decoder.eof or decoder.unconsumed_tail or decoder.unused_data:
+                return False
+        elif encoding != "identity":
+            return False
+        if len(body) > _MAX_RESPONSE:
+            return False
+        payload = json.loads(body, object_pairs_hook=_unique_object)
+        info = payload["info"]
+        return (
+            _normalized([(info["name"], info["version"])]) == [package]
+            and payload["vulnerabilities"] == []
+            and isinstance(payload["vulnerabilities"], list)
+        )
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, UnicodeError,
+            RecursionError, zlib.error, msgpack.UnpackException):
+        return False
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -147,6 +206,16 @@ def run_data_audit(
         with tempfile.TemporaryDirectory(prefix="subsched-data-audit-") as directory:
             cwd = Path(directory).resolve()
             env = {"HOME": str(cwd), "PATH": "/usr/bin:/bin"}
+            shim = cwd / "pip-python"
+            shim.write_text(
+                "#!/bin/sh\n"
+                '[ "$#" -eq 3 ] && [ "$1" = "-m" ] && [ "$2" = "pip" ] '
+                '&& [ "$3" = "--version" ] || exit 126\n'
+                f"exec {shlex.quote(str(tool.parent / 'python'))} -I -S -c "
+                f"{shlex.quote(_PIP_BOOTSTRAP)} --version\n",
+                encoding="utf-8",
+            )
+            shim.chmod(0o700)
             if cache_dir is not None and (
                 not cache_dir.is_absolute()
                 or cache_dir.is_symlink()
@@ -158,7 +227,8 @@ def run_data_audit(
             effective_cache = cache_dir if cache_dir is not None else cwd / "cache"
             version = runner(
                 ProcessExecutionRequest(
-                    argv=(str(tool), "--version"),
+                    argv=(str(tool.parent / "python"), "-I", "-S", "-c", _AUDIT_BOOTSTRAP,
+                          "--version"),
                     cwd=cwd,
                     env=env,
                     timeout_seconds=10,
@@ -182,7 +252,11 @@ def run_data_audit(
             result = runner(
                 ProcessExecutionRequest(
                     argv=(
-                        str(tool),
+                        str(tool.parent / "python"),
+                        "-I",
+                        "-S",
+                        "-c",
+                        _AUDIT_BOOTSTRAP,
                         "--disable-pip",
                         "--no-deps",
                         "--format",

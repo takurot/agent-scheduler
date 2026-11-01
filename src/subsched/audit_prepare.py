@@ -6,6 +6,7 @@ import hashlib
 import re
 import shutil
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from subsched.audit_cache import materialize_audit_cache
 from subsched.audit_github import AuditTransportIsolationError, fetch_github_cache
 from subsched.audit_inventory import canonical_inventory
 from subsched.audit_locked_inventory import AuditIsolationError, _read, derive_locked_inventory
-from subsched.audit_provenance import AuditPolicy
+from subsched.audit_provenance import AuditPolicy, AuthenticatedCache
 from subsched.config import IndependentAuditConfig
 
 
@@ -26,6 +27,15 @@ class AuditUnavailable(ValueError):
     def __init__(self, *, cleanup_confirmed: bool = True) -> None:
         super().__init__("independent dependency audit is unavailable or untrusted")
         self.cleanup_confirmed = cleanup_confirmed
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedAudit:
+    path: Path
+    evidence: AuthenticatedCache
+
+    def is_fresh(self, now: datetime) -> bool:
+        return self.evidence.is_fresh(now)
 
 
 def _checked_lock(
@@ -141,9 +151,9 @@ def prepare_independent_audit(
     gh: Path | None = None,
     runner: Callable[[ProcessExecutionRequest], ProcessExecutionResult] = run_process_group,
     derive: Callable[..., list[tuple[str, str]]] = derive_locked_inventory,
-    fetch: Callable[..., dict[str, bytes] | None] = fetch_github_cache,
+    fetch: Callable[..., AuthenticatedCache | None] = fetch_github_cache,
     now: datetime | None = None,
-) -> Path:
+) -> PreparedAudit:
     """Fetch clean exact-target evidence; never import untrusted cache on failure."""
     try:
         gh_executable = gh or (Path(found).resolve() if (found := shutil.which("gh")) else None)
@@ -174,12 +184,12 @@ def prepare_independent_audit(
             config.run_id,
             config.artifact_id,
             policy,
-            now or datetime.now(UTC),
+            now,
             inventory,
             gh=gh_executable,
         )
         if (
-            cache is None
+            not isinstance(cache, AuthenticatedCache)
             or hashlib.sha256(
                 _checked_lock(worktree, git_context, cache_root.parent, runner)
             ).hexdigest()
@@ -187,7 +197,9 @@ def prepare_independent_audit(
         ):
             raise ValueError("audit evidence is unavailable")
         materialize_audit_cache(cache_root, cache, inventory)
-        return cache_root
+        if not cache.is_fresh(now or datetime.now(UTC)):
+            raise ValueError("audit evidence expired before cache handoff")
+        return PreparedAudit(cache_root, cache)
     except (AuditIsolationError, AuditTransportIsolationError) as error:
         raise AuditUnavailable(cleanup_confirmed=False) from error
     except (OSError, ValueError, TypeError, UnicodeError) as error:

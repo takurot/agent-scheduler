@@ -5,6 +5,7 @@ import shlex
 import shutil
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from subsched.agents.base import ProcessExecutionRequest
@@ -19,7 +20,7 @@ from subsched.agents.process import (
     filter_environment,
     run_process_group,
 )
-from subsched.audit_prepare import AuditUnavailable
+from subsched.audit_prepare import AuditUnavailable, PreparedAudit
 from subsched.config import IndependentAuditConfig, NativeIsolationConfig
 
 MAX_VERIFICATION_ERROR_CHARS = 2000
@@ -149,7 +150,8 @@ def run_verification(
         snapshot_root: Path | None = None
         container_name: str | None = None
         container_runtime: Path | None = None
-        audit_cache: Path | None = None
+        audit_cache: PreparedAudit | None = None
+        post_audit: PreparedAudit | None = None
         git_context = None
         if isolation_config is not None and isolation_config.backend == "container":
             if isolation_runtime_executable is None:
@@ -188,8 +190,10 @@ def run_verification(
                         runtime_executable=isolation_runtime_executable,
                         container_name=container_name,
                         git_context=git_context,
-                        audit_cache=audit_cache,
+                        audit_cache=audit_cache.path,
                     )
+                    if not audit_cache.is_fresh(datetime.now(UTC)):
+                        raise AuditUnavailable()
                 else:
                     req = wrap_verification_request(
                         req,
@@ -244,7 +248,7 @@ def run_verification(
                     and audit_repository is not None
                 )
                 try:
-                    prepare_independent_audit(
+                    post_audit = prepare_independent_audit(
                         worktree_dir,
                         git_context,
                         independent_audit,
@@ -268,6 +272,8 @@ def run_verification(
                 and (audit_failure is None or audit_failure.cleanup_confirmed)
             ):
                 shutil.rmtree(snapshot_root)
+        if post_audit is not None and not post_audit.is_fresh(datetime.now(UTC)):
+            audit_failure = AuditUnavailable()
         cleanup_succeeded = (
             res.cleanup_succeeded
             and cleanup_failure is None

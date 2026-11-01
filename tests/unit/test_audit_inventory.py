@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import subprocess
+import sys
+import venv
 from datetime import UTC, datetime
 from pathlib import Path
 
+import msgpack
 import pytest
 
 from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
@@ -22,6 +26,18 @@ def test_inventory_is_normalized_sorted_and_deterministic() -> None:
     assert canonical_inventory([("Z.foo", "1.2"), ("alpha", "2.0")]) == (
         b'[{"name":"alpha","version":"2.0"},{"name":"z-foo","version":"1.2"}]'
     )
+
+
+def test_inventory_module_import_does_not_require_optional_audit_dependencies() -> None:
+    script = (
+        "import builtins; original=builtins.__import__; "
+        "exec('def guarded(name,*args,**kwargs):\\n"
+        " if name == \\\"msgpack\\\": raise ImportError(\\\"not installed\\\")\\n"
+        " return original(name,*args,**kwargs)'); "
+        "builtins.__import__=guarded; import subsched.audit_inventory"
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_expected_cache_keys_bind_canonical_package_and_version() -> None:
@@ -44,6 +60,13 @@ def result(code: int, dependencies: list[dict]) -> subprocess.CompletedProcess[b
         stdout=json.dumps({"dependencies": dependencies, "fixes": []}).encode(),
         stderr=b"",
     )
+
+
+def cached_pypi_response(payload: object) -> bytes:
+    body = json.dumps(payload).encode()
+    return b"cc=4," + msgpack.packb({"response": {
+        "status": 200, "headers": {}, "body": body,
+    }, "vary": {}}, use_bin_type=True)
 
 
 def test_clean_requires_exact_inventory_and_clean_exit() -> None:
@@ -113,7 +136,9 @@ def test_clean_audit_requires_complete_retained_cache(tmp_path: Path, populate: 
         if populate:
             entry = cache / next(iter(expected_cache_paths([("demo", "1")])))
             entry.parent.mkdir(parents=True)
-            entry.write_bytes(b"cached response")
+            entry.write_bytes(cached_pypi_response({
+                "info": {"name": "demo", "version": "1"}, "vulnerabilities": [],
+            }))
         return ProcessExecutionResult(
             exit_code=0,
             stdout='{"dependencies":[{"name":"demo","version":"1","vulns":[]}],"fixes":[]}',
@@ -123,6 +148,102 @@ def test_clean_audit_requires_complete_retained_cache(tmp_path: Path, populate: 
         [("demo", "1")], tool, "pip-audit 2.10.1", cache_dir=cache, runner=fake_runner
     )
     assert outcome == ("clean" if populate else "unavailable")
+
+
+@pytest.mark.parametrize("payload", [
+    {},
+    {"info": {"name": "demo", "version": "1"}, "vulnerabilities": None},
+    {"info": {"name": "other", "version": "1"}, "vulnerabilities": []},
+    {"info": {"name": "demo", "version": "2"}, "vulnerabilities": []},
+    {"info": {"name": "demo", "version": "1"}, "vulnerabilities": [{"id": "X"}]},
+])
+def test_malformed_cached_upstream_metadata_is_never_clean(
+    tmp_path: Path, payload: object
+) -> None:
+    tool = tmp_path / "pip-audit"
+    tool.touch()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+
+    def runner(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        if request.argv[-1] == "--version":
+            return ProcessExecutionResult(exit_code=0, stdout="pip-audit 2.10.1\n")
+        entry = cache / next(iter(expected_cache_paths([("demo", "1")])))
+        entry.parent.mkdir(parents=True)
+        entry.write_bytes(cached_pypi_response(payload))
+        return ProcessExecutionResult(
+            exit_code=0,
+            stdout='{"dependencies":[{"name":"demo","version":"1","vulns":[]}],"fixes":[]}',
+        )
+
+    assert run_data_audit([("demo", "1")], tool, "pip-audit 2.10.1",
+                          cache_dir=cache, runner=runner) == "unavailable"
+
+
+def test_audit_launch_suppresses_python_startup_hooks(tmp_path: Path) -> None:
+    tool = tmp_path / "pip-audit"
+    tool.touch()
+    requests: list[ProcessExecutionRequest] = []
+
+    def runner(request: ProcessExecutionRequest) -> ProcessExecutionResult:
+        requests.append(request)
+        if request.argv[-1] == "--version":
+            return ProcessExecutionResult(exit_code=0, stdout="pip-audit 2.10.1\n")
+        return ProcessExecutionResult(
+            exit_code=0,
+            stdout='{"dependencies":[{"name":"demo","version":"1","vulns":[]}],"fixes":[]}',
+        )
+
+    assert run_data_audit([("demo", "1")], tool, "pip-audit 2.10.1", runner=runner) == "clean"
+    assert len(requests) == 2
+    assert all(request.argv[0] == str(tmp_path / "python") for request in requests)
+    assert all(request.argv[1:3] == ("-I", "-S") for request in requests)
+
+
+def test_audit_and_nested_pip_do_not_execute_pth_hooks(tmp_path: Path) -> None:
+    virtualenv = tmp_path / "venv"
+    venv.EnvBuilder(with_pip=False).create(virtualenv)
+    site = (
+        virtualenv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    marker = tmp_path / "executed"
+    (site / "canary.pth").write_text(f"import pathlib; pathlib.Path({str(marker)!r}).touch()\n")
+    pip = site / "pip"
+    pip.mkdir()
+    (pip / "__init__.py").write_text("")
+    (pip / "__main__.py").write_text("print('pip 1.0')\n")
+    audit = site / "pip_audit"
+    audit.mkdir()
+    (audit / "__init__.py").write_text("")
+    (audit / "__main__.py").write_text(
+        "import os,subprocess,sys\n"
+        "subprocess.check_output([os.environ['PIPAPI_PYTHON_LOCATION'],'-m','pip','--version'])\n"
+        "assert subprocess.run([os.environ['PIPAPI_PYTHON_LOCATION'],'-m','pip','install',"
+        "'evil'],check=False).returncode == 126\n"
+        "print('pip-audit 2.10.1' if '--version' in sys.argv else "
+        "'{\"dependencies\":[{\"name\":\"demo\",\"version\":\"1\",\"vulns\":[]}],\"fixes\":[]}')\n"
+    )
+    tool = virtualenv / "bin" / "pip-audit"
+    tool.touch()
+    assert run_data_audit([("demo", "1")], tool, "pip-audit 2.10.1") == "clean"
+    assert not marker.exists()
+
+
+def test_cached_response_gzip_size_is_bounded(tmp_path: Path) -> None:
+    from subsched.audit_inventory import _valid_cached_response
+
+    path = tmp_path / "cache"
+    expected = {"name": "demo", "version": "1"}
+    body = json.dumps({"info": expected, "vulnerabilities": []}).encode()
+    def write(data: bytes) -> None:
+        path.write_bytes(b"cc=4," + msgpack.packb({"response": {
+            "status": 200, "headers": {"content-encoding": "gzip"}, "body": data,
+        }, "vary": {}}, use_bin_type=True))
+    write(gzip.compress(body))
+    assert _valid_cached_response(path, expected)
+    write(gzip.compress(b"x" * (1024 * 1024 + 1)))
+    assert not _valid_cached_response(path, expected)
 
 
 @pytest.mark.parametrize(

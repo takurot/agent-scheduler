@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -9,10 +9,15 @@ from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
 from subsched.agents.isolation import IsolationGitContext
 from subsched.audit_inventory import expected_cache_paths
 from subsched.audit_prepare import AuditUnavailable, prepare_independent_audit
+from subsched.audit_provenance import AuthenticatedCache
 from subsched.config import IndependentAuditConfig
 
 
-def test_prepares_cache_only_after_commit_inventory_and_ci_match(tmp_path: Path) -> None:
+def test_prepares_cache_only_after_commit_inventory_and_ci_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subsched.audit_prepare as prepare_module
+
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     (worktree / "uv.lock").write_text("locked\n")
@@ -47,9 +52,12 @@ def test_prepares_cache_only_after_commit_inventory_and_ci_match(tmp_path: Path)
         now: datetime,
         inventory: object,
         **kwargs: object,
-    ) -> dict[str, bytes]:
+    ) -> AuthenticatedCache:
         calls.append((repo, run_id, artifact_id, policy, now, inventory))
-        return {path: b"authenticated" for path in expected_cache_paths(items)}
+        return AuthenticatedCache(
+            {path: b"authenticated" for path in expected_cache_paths(items)},
+            now - timedelta(seconds=1), timedelta(minutes=15),
+        )
 
     cache = prepare_independent_audit(
         worktree,
@@ -65,9 +73,9 @@ def test_prepares_cache_only_after_commit_inventory_and_ci_match(tmp_path: Path)
         fetch=fetch,
         now=datetime(2026, 11, 1, tzinfo=UTC),
     )
-    assert len(calls) == 1 and cache.is_dir()
+    assert len(calls) == 1 and cache.path.is_dir()
     assert {
-        p.relative_to(cache).as_posix() for p in cache.rglob("*") if p.is_file()
+        p.relative_to(cache.path).as_posix() for p in cache.path.rglob("*") if p.is_file()
     } == expected_cache_paths(items)
 
     def changed_head(request: ProcessExecutionRequest) -> ProcessExecutionResult:
@@ -111,6 +119,34 @@ def test_prepares_cache_only_after_commit_inventory_and_ci_match(tmp_path: Path)
             now=datetime(2026, 11, 1, tzinfo=UTC),
         )
     assert failure.value.cleanup_confirmed is False
+
+    clock = [datetime(2026, 11, 1, tzinfo=UTC)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            return clock[0]
+
+    def expiring_fetch(*args: object, **kwargs: object) -> AuthenticatedCache:
+        return AuthenticatedCache(
+            {path: b"authenticated" for path in expected_cache_paths(items)},
+            clock[0], timedelta(seconds=1),
+        )
+
+    original_materialize = prepare_module.materialize_audit_cache
+
+    def slow_materialize(*args: object, **kwargs: object) -> None:
+        original_materialize(*args, **kwargs)
+        clock[0] += timedelta(seconds=1)
+
+    monkeypatch.setattr(prepare_module, "datetime", Clock)
+    monkeypatch.setattr(prepare_module, "materialize_audit_cache", slow_materialize)
+    with pytest.raises(AuditUnavailable):
+        prepare_independent_audit(
+            worktree, context, config, "owner/repo", "image@sha256:" + "d" * 64,
+            Path("/usr/bin/true"), tmp_path / "expired-cache", gh=Path("/usr/bin/true"),
+            runner=runner, derive=derive, fetch=expiring_fetch,
+        )
 
 
 def test_missing_github_evidence_fails_closed(tmp_path: Path) -> None:

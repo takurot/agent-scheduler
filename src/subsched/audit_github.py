@@ -12,7 +12,7 @@ import json
 import re
 import tempfile
 from collections.abc import Callable, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
 from subsched.agents.process import run_process_group
 from subsched.audit_provenance import (
     AuditPolicy,
+    AuthenticatedCache,
     _unique_object,
     authenticate_audit_artifact,
     authenticate_cache_bundle,
@@ -167,7 +168,7 @@ def fetch_github_audit(
     run_id: int,
     artifact_id: int,
     policy: AuditPolicy,
-    now: datetime,
+    now: datetime | None,
     *,
     gh: Path,
     runner: Callable[[ProcessExecutionRequest], ProcessExecutionResult] = run_process_group,
@@ -177,7 +178,9 @@ def fetch_github_audit(
     if evidence is None:
         return "unavailable"
     run, artifact, workflow, archive = evidence
-    return authenticate_audit_artifact(policy, run, artifact, workflow, archive, now)
+    return authenticate_audit_artifact(
+        policy, run, artifact, workflow, archive, now or datetime.now(UTC)
+    )
 
 
 def fetch_github_cache(
@@ -185,15 +188,17 @@ def fetch_github_cache(
     run_id: int,
     artifact_id: int,
     policy: AuditPolicy,
-    now: datetime,
+    now: datetime | None,
     inventory: Sequence[tuple[str, str]],
     *,
     gh: Path,
     runner: Callable[[ProcessExecutionRequest], ProcessExecutionResult] = run_process_group,
-) -> dict[str, bytes] | None:
+) -> AuthenticatedCache | None:
     """Fetch cache bytes only for authenticated, clean, exact-scope evidence."""
     evidence = _fetch_github_evidence(repo, run_id, artifact_id, policy, gh=gh, runner=runner)
     if evidence is None:
         return None
     run, artifact, workflow, archive = evidence
-    return authenticate_cache_bundle(policy, run, artifact, workflow, archive, now, inventory)
+    return authenticate_cache_bundle(
+        policy, run, artifact, workflow, archive, now or datetime.now(UTC), inventory
+    )

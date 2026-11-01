@@ -6,7 +6,7 @@ import io
 import json
 import zipfile
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -166,3 +166,42 @@ def test_unconfirmed_github_process_cleanup_is_not_an_ordinary_unavailable_resul
             gh=Path("/usr/bin/true"),
             runner=runner,
         )
+
+
+def test_cache_freshness_is_measured_after_github_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subsched.audit_github as github
+
+    policy, run, artifact, workflow, _, now = fixture()
+    items = [("packaging", "26.3")]
+    inventory = canonical_inventory(items)
+    target = {**policy.target, "packages_sha256": hashlib.sha256(inventory).hexdigest()}
+    policy = replace(policy, target=target, max_age=timedelta(minutes=2))
+    record = {"schema": 1, "target": target,
+              "observed_at": (now - timedelta(minutes=1)).isoformat(), "outcome": "clean"}
+    path = next(iter(expected_cache_paths(items)))
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as archive:
+        archive.writestr("audit.json", json.dumps(record))
+        archive.writestr("inventory.json", inventory)
+        archive.writestr("cache/" + path, b"cache")
+    payload = data.getvalue()
+    artifact["digest"] = "sha256:" + hashlib.sha256(payload).hexdigest()
+    clock = [now]
+    advance = [False]
+
+    def fetch(*args: object, **kwargs: object) -> tuple[dict, dict, bytes, bytes]:
+        if advance[0]:
+            clock[0] += timedelta(minutes=2)
+        return run, artifact, workflow, payload
+
+    monkeypatch.setattr(github, "_fetch_github_evidence", fetch)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+    monkeypatch.setattr(github, "datetime", Clock)
+    assert fetch_github_cache("owner/repo", 33, 44, policy, None, items,
+                              gh=Path("/usr/bin/true")) == {path: b"cache"}
+    advance[0] = True
+    assert fetch_github_cache("owner/repo", 33, 44, policy, None, items,
+                              gh=Path("/usr/bin/true")) is None

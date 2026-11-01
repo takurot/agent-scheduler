@@ -45,6 +45,23 @@ class AuditPolicy:
     max_age: timedelta
 
 
+class AuthenticatedCache(dict[str, bytes]):
+    """Authenticated cache with the immutable record's freshness interval."""
+
+    def __init__(
+        self, entries: dict[str, bytes], observed_at: datetime, max_age: timedelta
+    ) -> None:
+        super().__init__(entries)
+        self.observed_at = observed_at
+        self.max_age = max_age
+
+    def is_fresh(self, now: datetime) -> bool:
+        try:
+            return timedelta(0) <= now - self.observed_at < self.max_age
+        except (TypeError, OverflowError):
+            return False
+
+
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -199,7 +216,7 @@ def authenticate_cache_bundle(
     archive: bytes,
     now: datetime,
     inventory: Sequence[tuple[str, str]],
-) -> dict[str, bytes] | None:
+) -> AuthenticatedCache | None:
     """Return the complete cache only after CI provenance and exact scope pass."""
     if authenticate_audit_artifact(policy, run, artifact, workflow, archive, now) != "clean":
         return None
@@ -218,7 +235,10 @@ def authenticate_cache_bundle(
             cache = {path: zipped.read(members["cache/" + path]) for path in paths}
             if any(not content for content in cache.values()):
                 return None
-            return cache
+            record = json.loads(
+                zipped.read(members["audit.json"]), object_pairs_hook=_unique_object
+            )
+            return AuthenticatedCache(cache, _time(record["observed_at"]), policy.max_age)
     except (KeyError, TypeError, ValueError, OSError, zipfile.BadZipFile, RuntimeError,
             EOFError, zlib.error):
         return None

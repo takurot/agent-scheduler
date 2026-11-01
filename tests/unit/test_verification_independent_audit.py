@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
 from subsched.agents.isolation import IsolationGitContext
-from subsched.audit_prepare import AuditUnavailable
+from subsched.audit_prepare import AuditUnavailable, PreparedAudit
+from subsched.audit_provenance import AuthenticatedCache
 from subsched.config import IndependentAuditConfig, NativeIsolationConfig
 from subsched.verification import run_verification
 
@@ -17,7 +19,9 @@ def config() -> IndependentAuditConfig:
     )
 
 
-@pytest.mark.parametrize("case", ["missing", "cleanup", "stale_after", "valid"])
+@pytest.mark.parametrize("case", [
+    "missing", "cleanup", "stale_after", "cleanup_expiry", "cleanup_and_expiry", "valid",
+])
 def test_verification_requires_audit_before_and_after_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
@@ -25,19 +29,25 @@ def test_verification_requires_audit_before_and_after_gate(
     import subsched.verification as verification
 
     calls: list[str] = []
+    clock = [datetime.now(UTC)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            return clock[0]
 
     def git_snapshot(worktree: Path, root: Path) -> IsolationGitContext:
         root.mkdir()
         return IsolationGitContext(root, "a" * 40, root)
 
-    def prepare(*args: object, **kwargs: object) -> Path:
+    def prepare(*args: object, **kwargs: object) -> PreparedAudit:
         calls.append("audit")
         if case in {"missing", "cleanup"} or (case == "stale_after" and len(calls) == 3):
             raise AuditUnavailable(cleanup_confirmed=case != "cleanup")
         path = args[6]
         assert isinstance(path, Path)
         path.mkdir()
-        return path
+        return PreparedAudit(path, AuthenticatedCache({}, clock[0], timedelta(seconds=1)))
 
     def wrap(request: ProcessExecutionRequest, **kwargs: object) -> ProcessExecutionRequest:
         assert isinstance(kwargs.get("audit_cache"), Path)
@@ -51,7 +61,13 @@ def test_verification_requires_audit_before_and_after_gate(
     monkeypatch.setattr(audit, "prepare_independent_audit", prepare)
     monkeypatch.setattr(verification, "wrap_verification_request", wrap)
     monkeypatch.setattr(verification, "run_process_group", run)
-    monkeypatch.setattr(verification, "cleanup_native_container", lambda *args, **kwargs: None)
+    def cleanup(*args: object, **kwargs: object) -> str | None:
+        if case in {"cleanup_expiry", "cleanup_and_expiry"}:
+            clock[0] += timedelta(seconds=1)
+        return "unconfirmed" if case == "cleanup_and_expiry" else None
+
+    monkeypatch.setattr(verification, "datetime", Clock)
+    monkeypatch.setattr(verification, "cleanup_native_container", cleanup)
     report = run_verification(
         tmp_path,
         ("true",),
@@ -64,7 +80,7 @@ def test_verification_requires_audit_before_and_after_gate(
     )
     assert report.passed is (case == "valid")
     assert report.audit_unavailable is (case != "valid")
-    assert report.cleanup_confirmed is (case != "cleanup")
+    assert report.cleanup_confirmed is (case not in {"cleanup", "cleanup_and_expiry"})
     assert calls == (["audit"] if case in {"missing", "cleanup"} else ["audit", "gate", "audit"])
 
 
