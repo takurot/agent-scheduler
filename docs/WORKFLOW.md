@@ -1,11 +1,10 @@
 # Subscription Agent Scheduler 開発ワークフロー
 
-**最終更新:** 2026-08-13
-**対象:** `subscription-agent-scheduler` v0.3仕様 / Phase 1実装
+**対象:** 現行の `subscription-agent-scheduler` 開発と運用
 
 この文書は、`subsched` のGitHub Issueを安全に実装し、仕様、コード、テスト、運用状態の
-ずれを防ぐための手順を定義する。現在の実装はPhase 1 Queue MVPであり、Claude Code /
-Codexのnative実行、branch push、Pull Request作成はまだ有効化しない。
+ずれを防ぐための手順を定義する。現行実装はClaude Code / Codexのnative実行と
+検証後のbranch push・Pull Request作成を、明示的なopt-inと安全な隔離を前提に提供する。
 
 ## 1. Source of truth
 
@@ -28,7 +27,7 @@ SPEC変更なしに緩和しない。
 - capacity eventをAgent failureとして数えない
 - Agent切替後も同じworktree、semantic handoff、mechanical checkpointを使う
 - verification成功前にPRを作成しない
-- Issueを自動closeせず、merge、release、production deployを自動化しない
+- Issueの自動closeは明示設定時のみ許可し、merge、release、production deployを自動化しない
 - billing、auth、capacity、schemaが不明な場合はfail-closedにする
 
 ## 2. Issueを選ぶ
@@ -97,10 +96,9 @@ uv sync --frozen
 ```
 
 Pythonは3.12以上を使用する。依存関係を変更するIssue以外では`uv.lock`を意図せず更新
-しない。`uv run subsched doctor`はnative phase用CLIを含む環境診断であり、現状はGit、gh、
-Claude、Codexのいずれかがなければnonzeroになる。Phase 1のscripted worker開発ではsetup
-gateにせず、native adapterを扱うIssueで診断結果を確認する。doctorはtokenやcapacityを
-消費するlive probeの代わりにはしない。
+しない。`uv run subsched doctor`は有効な設定のCLIや隔離条件を検査する環境診断である。
+native adapterを扱うIssueでは実行に使う設定で診断する。doctorはworkerを起動せず、
+subscription課金確認やcapacityを消費するlive probeの代わりにはならない。
 
 ## 4. TDD実装サイクル
 
@@ -169,15 +167,14 @@ opt-inし、subscription/billingを確認した最小promptだけを使う。結
 Bernsteinをworktree backendとして実装する前に、SPEC §58〜59のcompatibility spikeと
 Adopt / Reject / Defer判断を完了する。
 
-### Phase 1: Queue MVP hardening
+### Queue and recovery safety
 
-Fake workerでqueue、state、capacity、restartを完成させる。repository lock、real Git
-worktree、Agent contract、task-start handoff、安全なevent loopが揃うまでnative workerを
-有効化しない。
+Fake workerを使うテストでqueue、state、capacity、restartを検証する。repository lock、
+real Git worktree、Agent contract、task-start handoff、安全なevent loopを維持する。
 
-### Phase 2以降: Native execution
+### Native execution
 
-native実行を開放する変更は、少なくとも次を満たす。
+native実行に関する変更は、少なくとも次を満たす。
 
 - subprocessはargv配列、固定cwd、environment allowlist、timeout、output上限を使う
 - process group全体をSIGTERM → grace period → SIGKILLで終了できる
@@ -326,6 +323,16 @@ Schedulerが管理するコンテナ隔離ワークツリー（`subsched/issue-N
 
 コンテナ固有の環境制約（`ps`欠落、ファイルシステム権限差異等）によりリポジトリ全体のフル品質ゲート（`bash scripts/quality_gate.sh`）で無関係な既存テストが失敗した場合、スコープ付きテストの合格を確認した上でローカルコミットを作成する（`NEEDS_HUMAN`に不要にエスカレーションしない）。リポジトリ全体の厳格なフル品質ゲートは、タスク終了後の `VERIFYING` ステージでScheduler自身が独立して実行・検証する。対象設定で`isolation.backend: container`が有効な場合、このScheduler検証もworker imageを使うネットワーク遮断コンテナ内で実行し、ホスト上で直接実行しない。
 
+### 7.2 Online dependency audits (issue #495)
+
+Review online requirements during verification planning. Network-none VERIFYING
+cannot fetch current advisory data, and a toolchain probe only checks tool presence.
+The [independent CI contract spike](ONLINE_AUDIT_DESIGN.md) specifies provenance,
+target and freshness checks, but does not enable automatic evidence ingestion or
+replace the mandatory full gate. Reject unsupported plans before dispatch. Keep
+separate evidence for real Docker network denial and a trusted online audit; local
+or synthetic results cannot be reported as both. See the RUNBOOK for preparation.
+
 ## 8. ドキュメントとstate schemaの同期
 
 次の変更は、コードと同じPRで文書を更新する。
@@ -346,6 +353,12 @@ SPECから逸脱する実装を先にmergeしない。別のstate layoutや延�
 PRを持つTaskの`COMPLETE`はmerge確認を要する。CI PASSは`ci_result`として別に記録し、
 依存Issueの解放に使わない。旧stateのPR付き`COMPLETE`にmerge確認記録がない場合は
 `READY_FOR_REVIEW`として読み、operatorの`subsched reconcile`で再確認する。
+
+このrepositoryの隔離verificationでPython環境を準備する場合は、
+[`RUNBOOK.md`](RUNBOOK.md#offline-python-environment-for-verification)の手順で
+対象lockとplatformに対応するoffline imageをoperatorが準備する。独立CIによる監査を
+使う場合も、operatorが承認したworkflowと対象commitに一致する新鮮な証拠が必要であり、
+不足・不一致は失敗とする。通常の`pip-audit`は引き続き品質gateで実行する。
 
 ## 9. コミットとPull Request
 

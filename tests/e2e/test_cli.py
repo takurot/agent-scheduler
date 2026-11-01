@@ -905,7 +905,8 @@ def test_cli_commands_catch_state_corruption_error(tmp_path: Path) -> None:
     assert "State error:" in res_metrics.output
 
 
-def test_metrics_handles_report_write_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize("json_output", [False, True])
+def test_metrics_handles_report_write_failure(tmp_path: Path, json_output: bool) -> None:
     store = JsonStateStore(tmp_path)
     store.init_directories()
 
@@ -913,10 +914,10 @@ def test_metrics_handles_report_write_failure(tmp_path: Path) -> None:
     report_dir = tmp_path / "a_directory"
     report_dir.mkdir()
 
-    result = invoke(tmp_path, "metrics", "--report", str(report_dir))
-    assert result.exit_code == 0
-    assert f"Failed to write report to {report_dir}" in result.output
-    assert "Productivity Metrics" in result.output
+    args = ("metrics", "--report", str(report_dir), *(("--json",) if json_output else ()))
+    result = invoke(tmp_path, *args)
+    assert result.exit_code != 0
+    assert f"Failed to write report to {report_dir}" in result.stderr
 
 
 def test_run_output_message_reflects_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1727,3 +1728,47 @@ def test_metrics_report_shows_success_message(tmp_path: Path) -> None:
     result = invoke(tmp_path, "metrics", "--report", str(report_file))
     assert result.exit_code == 0
     assert f"Report saved to {report_file}" in result.output
+
+
+def test_metrics_json_and_report_have_separate_streams(tmp_path: Path) -> None:
+    report_file = tmp_path / "report.md"
+    result = invoke(tmp_path, "metrics", "--json", "--report", str(report_file))
+    assert result.exit_code == 0
+    assert "productivity" in json.loads(result.stdout)
+    assert f"Report saved to {report_file}" in result.stderr
+    assert "Productivity Metrics" in report_file.read_text(encoding="utf-8")
+
+
+def test_metrics_json_without_report_is_a_json_document(tmp_path: Path) -> None:
+    result = invoke(tmp_path, "metrics", "--json")
+    assert result.exit_code == 0
+    assert "productivity" in json.loads(result.stdout)
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_metrics_missing_report_parent_is_an_error(tmp_path: Path, json_output: bool) -> None:
+    report_file = tmp_path / "missing" / "report.md"
+    args = ("metrics", "--report", str(report_file), *(("--json",) if json_output else ()))
+    result = invoke(tmp_path, *args)
+    assert result.exit_code != 0
+    assert "Failed to write report" in result.stderr
+    assert not report_file.exists()
+
+
+def test_doctor_success_describes_native_opt_in_not_obsolete_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from subsched.preflight import PreflightReport
+
+    monkeypatch.setattr(
+        "subsched.cli.validate_native_preflight",
+        lambda **kwargs: PreflightReport(checks=(), passed=True, failure_reasons=()),
+    )
+    result = invoke(tmp_path, "doctor")
+    assert result.exit_code == 0
+    assert "Doctor checks passed" in result.output
+    assert "--allow-native" in result.output
+    assert "--subscription-billing-verified" in result.output
+    assert "does not launch a worker" in result.output
+    assert "Phase 2 assumptions" not in result.output

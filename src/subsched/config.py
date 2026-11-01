@@ -231,9 +231,24 @@ class HandoffConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class IndependentAuditConfig:
+    repository: str
+    repository_id: int
+    workflow_id: int
+    workflow_commit: str
+    workflow_sha256: str
+    run_id: int | None
+    artifact_id: int | None
+    tool: str
+    policy: str
+    max_age_seconds: int = 900
+
+
+@dataclass(frozen=True, slots=True)
 class VerificationConfig:
     commands: tuple[str, ...] = ("pytest", "ruff check .")
     timeout_seconds: int = 120
+    independent_audit: IndependentAuditConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,7 +378,7 @@ SECTION_KEYS: dict[str, frozenset[str]] = {
     ),
     "queue": frozenset({"priority"}),
     "handoff": frozenset({"continuous"}),
-    "verification": frozenset({"commands", "timeout_seconds"}),
+    "verification": frozenset({"commands", "timeout_seconds", "independent_audit"}),
     "workflow": frozenset({"mode", "stages", "limits"}),
     "notifications": frozenset({"enabled", "max_delivery_attempts"}),
 }
@@ -709,9 +724,56 @@ def _parse_verification_config(raw: Mapping[str, Any]) -> VerificationConfig:
     timeout_seconds = _strict_pos_int(
         raw.get("timeout_seconds", 120), "verification.timeout_seconds"
     )
+    audit: IndependentAuditConfig | None = None
+    if "independent_audit" in raw:
+        data = raw["independent_audit"]
+        required = {
+            "repository", "repository_id", "workflow_id", "workflow_commit", "workflow_sha256",
+            "tool", "policy",
+        }
+        if (not isinstance(data, dict) or not required <= set(data)
+                or set(data) - required - {"run_id", "artifact_id", "max_age_seconds"}
+                or ("run_id" in data) != ("artifact_id" in data)):
+            raise ConfigError("verification.independent_audit requires valid trust settings")
+        repository = validate_repo(data["repository"])
+        ids = {key: _strict_pos_int(data[key], f"verification.independent_audit.{key}")
+               for key in ("repository_id", "workflow_id")}
+        run_id = (
+            _strict_pos_int(data["run_id"], "verification.independent_audit.run_id")
+            if "run_id" in data else None
+        )
+        artifact_id = (
+            _strict_pos_int(data["artifact_id"], "verification.independent_audit.artifact_id")
+            if "artifact_id" in data else None
+        )
+        ids_to_check = (
+            *ids.values(), *(item for item in (run_id, artifact_id) if item is not None)
+        )
+        if any(value > 2**63 - 1 for value in ids_to_check):
+            raise ConfigError("verification.independent_audit identifier is out of range")
+        commit = data["workflow_commit"]
+        workflow_sha = data["workflow_sha256"]
+        tool = data["tool"]
+        policy = data["policy"]
+        age = _strict_pos_int(
+            data.get("max_age_seconds", 900), "verification.independent_audit.max_age_seconds"
+        )
+        if (not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None
+                or not isinstance(workflow_sha, str)
+                or re.fullmatch(r"[0-9a-f]{64}", workflow_sha) is None
+                or not isinstance(tool, str)
+                or re.fullmatch(r"pip-audit [0-9][A-Za-z0-9.!+_-]*", tool) is None
+                or not isinstance(policy, str)
+                or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", policy) is None
+                or age > 900):
+            raise ConfigError("verification.independent_audit contains an invalid trust setting")
+        audit = IndependentAuditConfig(repository=repository, workflow_commit=commit,
+                 workflow_sha256=workflow_sha, run_id=run_id, artifact_id=artifact_id,
+                 tool=tool, policy=policy, max_age_seconds=age, **ids)
     return VerificationConfig(
         commands=tuple(commands_raw),
         timeout_seconds=timeout_seconds,
+        independent_audit=audit,
     )
 
 
@@ -898,6 +960,11 @@ def load_config(path: Path) -> SchedulerConfig:
     isolation = _parse_isolation_config(raw.get("isolation", {}))
     if isolation.backend == "container" and execution.concurrency != 1:
         raise ConfigError("container isolation currently requires execution.concurrency: 1")
+    if verification.independent_audit is not None and isolation.backend != "container":
+        raise ConfigError("verification.independent_audit requires container isolation")
+    if (verification.independent_audit is not None and github.repo is not None
+            and verification.independent_audit.repository != github.repo):
+        raise ConfigError("verification.independent_audit repository must match github.repo")
     notifications = _parse_notifications_config(raw.get("notifications", {}))
 
     return SchedulerConfig(

@@ -103,3 +103,12 @@ def test_release_triggers_only_on_semver_tags() -> None:
     # PyYAML's safe_load parses the bare `on:` trigger key as the boolean True (YAML 1.1).
     tags = release[True]["push"]["tags"]
     assert any(re.fullmatch(r"v\*\.\*\.\*", pattern) for pattern in tags)
+
+
+def test_release_validates_distributions_with_pinned_twine() -> None:
+    release = _load_workflow("release.yml")
+    commands = _run_commands(release["jobs"]["pypi-publish"])
+    assert any(
+        re.fullmatch(r"uvx twine==\d+\.\d+\.\d+ check --strict dist/\*", cmd.strip())
+        for cmd in commands
+    ), "distribution validation must use an exact Twine version"
