@@ -18,7 +18,8 @@ def test_audit_workflow_only_uses_dispatch_and_trusted_checkout() -> None:
     assert "${{" not in audit["run"]
     assert audit["env"]["SUBSCHED_AUDIT_TARGET"] == "${{ inputs.target }}"
     assert audit["env"]["SUBSCHED_AUDIT_INVENTORY"] == "${{ inputs.inventory }}"
-    assert audit["env"]["PYTHONPATH"] == "${{ github.workspace }}/src"
+    assert "PYTHONPATH" not in audit["env"]
+    assert "-I -S" in audit["run"]
     assert "--no-sync" in audit["run"]
     sync = next(step["run"] for step in steps if step.get("run", "").startswith("uv sync"))
     assert "--no-install-project" in sync and "--no-build" in sync

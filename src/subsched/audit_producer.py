@@ -76,7 +76,7 @@ def main() -> None:
             raise ValueError("missing workflow")
         if hashlib.sha256(workflow.read_bytes()).hexdigest() != target.get("workflow_sha256"):
             raise ValueError("workflow mismatch")
-        tool = Path(sys.prefix) / "bin" / "pip-audit"
+        tool = Path(sys.executable).parent / "pip-audit"
         output = Path(os.environ["SUBSCHED_AUDIT_OUTPUT"])
         if (not output.is_absolute() or output.name != "audit.json"
                 or any(parent.is_symlink() for parent in output.parents)):
