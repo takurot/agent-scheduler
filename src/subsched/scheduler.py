@@ -14,6 +14,7 @@ from typing import Any, Protocol
 
 from subsched.config import (
     AgentSettings,
+    IndependentAuditConfig,
     NativeIsolationConfig,
     WorkflowConfig,
     validate_base_branch,
@@ -150,6 +151,7 @@ class Scheduler:
         event_sources: tuple[EventSource, ...] = (),
         verification_commands: tuple[str, ...] = ("true",),
         verification_timeout_seconds: float = 120.0,
+        independent_audit: IndependentAuditConfig | None = None,
         isolation_config: NativeIsolationConfig | None = None,
         isolation_runtime_executable: Path | None = None,
         label_scores: dict[str, int] | None = None,
@@ -220,6 +222,7 @@ class Scheduler:
         self.discovery_notes: tuple[tuple[int, str], ...] = ()
         self.reactivated_cancelled: tuple[int, ...] = ()
         self.verification_commands = verification_commands
+        self.independent_audit = independent_audit
         self.isolation_config = isolation_config
         self.isolation_runtime_executable = isolation_runtime_executable
         if verification_timeout_seconds <= 0:
@@ -1528,6 +1531,8 @@ class Scheduler:
             timeout_seconds=self.verification_timeout_seconds,
             isolation_config=self.isolation_config,
             isolation_runtime_executable=self.isolation_runtime_executable,
+            independent_audit=self.independent_audit,
+            audit_repository=self.repo,
         )
         self._log(
             "gate_result",
@@ -1563,6 +1568,13 @@ class Scheduler:
                     "intervention required to inspect running processes"
                 ),
                 reason_code="operator_decision_required",
+            )
+
+        if post_rebase_report.audit_unavailable:
+            return verifying.transition(
+                TaskState.NEEDS_HUMAN, current_agent=agent, now=now,
+                reason="independent dependency audit evidence is unavailable or untrusted",
+                reason_code="external_prerequisite",
             )
 
         if not post_rebase_report.passed:
@@ -1980,6 +1992,21 @@ class Scheduler:
 
             verification_ok = True
             verification_summary = ""
+            if task.worktree is None and self.independent_audit is not None:
+                reason = "independent dependency audit requires a task worktree"
+                final = verifying.transition(
+                    TaskState.NEEDS_HUMAN, current_agent=agent, now=now,
+                    reason=reason, reason_code="external_prerequisite",
+                )
+                self.queue = self.queue.replace(final)
+                self._log(
+                    "task_transition", level="ERROR", issue_number=final.issue_number,
+                    agent=agent, task_id=final.task_id, message=reason,
+                    data={"from_state": verifying.status.value, "to_state": final.status.value,
+                          "attempt": final.attempt, "reason_code": final.needs_human_reason_code},
+                )
+                self._persist()
+                return
             if task.worktree is not None:
                 from subsched.checkpoint import capture_mechanical_checkpoint, save_checkpoint
                 from subsched.verification import run_verification
@@ -1997,6 +2024,8 @@ class Scheduler:
                     timeout_seconds=self.verification_timeout_seconds,
                     isolation_config=self.isolation_config,
                     isolation_runtime_executable=self.isolation_runtime_executable,
+                    independent_audit=self.independent_audit,
+                    audit_repository=self.repo,
                 )
                 verification_ok = v_report.passed
                 verification_summary = v_report.summary
@@ -2045,6 +2074,26 @@ class Scheduler:
                         agent=agent,
                         task_id=final.task_id,
                         message=reason,
+                        data={
+                            "from_state": verifying.status.value,
+                            "to_state": final.status.value,
+                            "attempt": final.attempt,
+                            "reason_code": final.needs_human_reason_code,
+                        },
+                    )
+                    self._persist()
+                    return
+
+                if v_report.audit_unavailable:
+                    reason = "independent dependency audit evidence is unavailable or untrusted"
+                    final = verifying.transition(
+                        TaskState.NEEDS_HUMAN, current_agent=agent, now=now,
+                        reason=reason, reason_code="external_prerequisite",
+                    )
+                    self.queue = self.queue.replace(final)
+                    self._log(
+                        "task_transition", level="ERROR", issue_number=final.issue_number,
+                        agent=agent, task_id=final.task_id, message=reason,
                         data={
                             "from_state": verifying.status.value,
                             "to_state": final.status.value,

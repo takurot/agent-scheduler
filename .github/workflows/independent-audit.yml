@@ -1,0 +1,44 @@
+name: Independent dependency audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Canonical audit target JSON
+        required: true
+        type: string
+      inventory:
+        description: Canonical package inventory JSON
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
+          python-version: "3.12"
+      - run: uv sync --frozen --no-install-project --no-build
+      - name: Run independent audit
+        env:
+          SUBSCHED_AUDIT_TARGET: ${{ inputs.target }}
+          SUBSCHED_AUDIT_INVENTORY: ${{ inputs.inventory }}
+          SUBSCHED_AUDIT_OUTPUT: ${{ runner.temp }}/audit-evidence/audit.json
+        run: >-
+          uv run --frozen --no-sync python -I -S -c
+          "import pathlib,runpy,sys; sys.path.insert(0,str(pathlib.Path(sys.executable).parent.parent/'lib'/('python%d.%d'%sys.version_info[:2])/'site-packages')); sys.path.insert(0,str(pathlib.Path.cwd()/'src')); runpy.run_module('subsched.audit_producer',run_name='__main__',alter_sys=True)"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: audit-evidence-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/audit-evidence/
+          if-no-files-found: error

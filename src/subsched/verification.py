@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
+import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.isolation import (
     cleanup_native_container,
     native_container_name,
+    prepare_verification_git,
     wrap_verification_request,
 )
 from subsched.agents.process import (
@@ -16,7 +20,8 @@ from subsched.agents.process import (
     filter_environment,
     run_process_group,
 )
-from subsched.config import NativeIsolationConfig
+from subsched.audit_prepare import AuditUnavailable, PreparedAudit
+from subsched.config import IndependentAuditConfig, NativeIsolationConfig
 
 MAX_VERIFICATION_ERROR_CHARS = 2000
 
@@ -45,6 +50,7 @@ class VerificationReport:
     # The Scheduler treats this as a terminal safety condition (NEEDS_HUMAN), never as
     # an ordinary gate failure that consumes the verification retry budget.
     cleanup_confirmed: bool = True
+    audit_unavailable: bool = False
 
 
 def _gate_summary(gate: GateResult) -> str:
@@ -93,6 +99,8 @@ def run_verification(
     output_limit_bytes: int = 524288,
     isolation_config: NativeIsolationConfig | None = None,
     isolation_runtime_executable: Path | None = None,
+    independent_audit: IndependentAuditConfig | None = None,
+    audit_repository: str | None = None,
 ) -> VerificationReport:
     """Execute verification gates on the host or in the configured container boundary."""
     source_env = dict(os.environ) if env is None else env
@@ -100,6 +108,19 @@ def run_verification(
     gate_results: list[GateResult] = []
     all_passed = True
     all_cleanups_confirmed = True
+    if independent_audit is not None and (
+        isolation_config is None
+        or isolation_config.backend != "container"
+        or isolation_config.image is None
+        or isolation_runtime_executable is None
+        or audit_repository is None
+    ):
+        return VerificationReport(
+            passed=False,
+            gates=(),
+            summary="FAIL (independent audit requires isolated verification)",
+            audit_unavailable=True,
+        )
 
     for cmd in commands:
         try:
@@ -126,8 +147,12 @@ def run_verification(
             timeout_seconds=timeout_seconds,
             output_limit_bytes=output_limit_bytes,
         )
+        snapshot_root: Path | None = None
         container_name: str | None = None
         container_runtime: Path | None = None
+        audit_cache: PreparedAudit | None = None
+        post_audit: PreparedAudit | None = None
+        git_context = None
         if isolation_config is not None and isolation_config.backend == "container":
             if isolation_runtime_executable is None:
                 all_passed = False
@@ -144,13 +169,52 @@ def run_verification(
             container_runtime = isolation_runtime_executable
             container_name = native_container_name("verification")
             try:
-                req = wrap_verification_request(
-                    req,
-                    config=isolation_config,
-                    runtime_executable=isolation_runtime_executable,
-                    container_name=container_name,
+                snapshot_root = Path(tempfile.mkdtemp(prefix="subsched-verification-")).resolve()
+                git_context = prepare_verification_git(worktree_dir, snapshot_root / "git")
+                if independent_audit is not None:
+                    from subsched.audit_prepare import prepare_independent_audit
+
+                    assert audit_repository is not None and isolation_config.image is not None
+                    audit_cache = prepare_independent_audit(
+                        worktree_dir,
+                        git_context,
+                        independent_audit,
+                        audit_repository,
+                        isolation_config.image,
+                        isolation_runtime_executable,
+                        snapshot_root / "audit-cache",
+                    )
+                    req = wrap_verification_request(
+                        req,
+                        config=isolation_config,
+                        runtime_executable=isolation_runtime_executable,
+                        container_name=container_name,
+                        git_context=git_context,
+                        audit_cache=audit_cache.path,
+                    )
+                    if not audit_cache.is_fresh(datetime.now(UTC)):
+                        raise AuditUnavailable()
+                else:
+                    req = wrap_verification_request(
+                        req,
+                        config=isolation_config,
+                        runtime_executable=isolation_runtime_executable,
+                        container_name=container_name,
+                        git_context=git_context,
+                    )
+            except AuditUnavailable as error:
+                if snapshot_root is not None and error.cleanup_confirmed:
+                    shutil.rmtree(snapshot_root)
+                return VerificationReport(
+                    passed=False,
+                    gates=tuple(gate_results),
+                    summary="FAIL (independent dependency audit unavailable or untrusted)",
+                    cleanup_confirmed=error.cleanup_confirmed,
+                    audit_unavailable=True,
                 )
-            except ValueError as error:
+            except (ValueError, OSError) as error:
+                if snapshot_root is not None:
+                    shutil.rmtree(snapshot_root)
                 all_passed = False
                 gate_results.append(
                     GateResult(
@@ -163,8 +227,38 @@ def run_verification(
                 )
                 break
         cleanup_failure: str | None = None
+        audit_failure = None
         try:
             res = run_process_group(req)
+            if (
+                independent_audit is not None
+                and res.exit_code == 0
+                and not res.timed_out
+                and not res.output_limit_exceeded
+                and res.cleanup_succeeded
+            ):
+                from subsched.audit_prepare import prepare_independent_audit
+
+                assert (
+                    snapshot_root is not None
+                    and git_context is not None
+                    and isolation_config is not None
+                    and isolation_config.image is not None
+                    and isolation_runtime_executable is not None
+                    and audit_repository is not None
+                )
+                try:
+                    post_audit = prepare_independent_audit(
+                        worktree_dir,
+                        git_context,
+                        independent_audit,
+                        audit_repository,
+                        isolation_config.image,
+                        isolation_runtime_executable,
+                        snapshot_root / "audit-recheck",
+                    )
+                except AuditUnavailable as error:
+                    audit_failure = error
         finally:
             if container_name is not None and container_runtime is not None:
                 cleanup_failure = cleanup_native_container(
@@ -172,7 +266,19 @@ def run_verification(
                     container_name,
                     env=req.env,
                 )
-        cleanup_succeeded = res.cleanup_succeeded and cleanup_failure is None
+            if (
+                snapshot_root is not None
+                and cleanup_failure is None
+                and (audit_failure is None or audit_failure.cleanup_confirmed)
+            ):
+                shutil.rmtree(snapshot_root)
+        if post_audit is not None and not post_audit.is_fresh(datetime.now(UTC)):
+            audit_failure = AuditUnavailable()
+        cleanup_succeeded = (
+            res.cleanup_succeeded
+            and cleanup_failure is None
+            and (audit_failure is None or audit_failure.cleanup_confirmed)
+        )
         # #373: an unconfirmed cleanup invalidates the gate even at exit 0 -- leftover
         # processes are a terminal safety condition, not a green result.
         passed = (
@@ -180,6 +286,7 @@ def run_verification(
             and not res.timed_out
             and not res.output_limit_exceeded
             and cleanup_succeeded
+            and audit_failure is None
         )
         if not passed:
             all_passed = False
@@ -198,6 +305,14 @@ def run_verification(
                 output_limit_exceeded=res.output_limit_exceeded,
             )
         )
+        if audit_failure is not None:
+            return VerificationReport(
+                passed=False,
+                gates=tuple(gate_results),
+                summary="FAIL (independent dependency audit changed or became unavailable)",
+                cleanup_confirmed=cleanup_succeeded,
+                audit_unavailable=True,
+            )
         if not passed:
             break
 

@@ -288,12 +288,13 @@ def explain_task(issue_number: int, repository_path: str | None = None) -> dict[
     cfg = load_config(config_path) if config_path.is_file() else SchedulerConfig()
     store = _store_for(repository_path)
     try:
-        tasks = store.load_tasks()
-        capacities = store.load_capacities()
+        snapshot = store.load_snapshot()
     except StateCorruptionError as error:
         raise McpToolError(f"scheduler state error: {error}") from error
 
-    matching_task = next((task for task in tasks if task.issue_number == issue_number), None)
+    matching_task = next(
+        (task for task in snapshot.tasks if task.issue_number == issue_number), None
+    )
     if matching_task:
         issue = Issue(
             number=matching_task.issue_number,
@@ -304,7 +305,7 @@ def explain_task(issue_number: int, repository_path: str | None = None) -> dict[
     else:
         issue = Issue(number=issue_number, title=f"Issue #{issue_number}")
 
-    return explain_issue(issue, tasks, cfg, capacities)
+    return explain_issue(issue, snapshot.tasks, cfg, snapshot.capacities, paused=snapshot.paused)
 
 
 def queue_issues(
