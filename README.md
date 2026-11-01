@@ -50,6 +50,12 @@ The snapshot contains only HEAD and its reachable history, with a HEAD-seeded in
 other branches and tags are unavailable. Its changes are never imported back. Unsafe or
 missing source metadata fails closed. See SPEC §72.2 for details.
 
+For this repository's Python gate, an opt-in independent audit can supply authenticated
+PyPI cache data to the networkless container. The operator must approve the CI workflow
+and provide a fresh run and artifact for the exact commit and dependency inventory;
+missing or mismatched evidence blocks verification. See the
+[audit runbook](docs/RUNBOOK.md#online-audit-planning-issue-495).
+
 The Scheduler, host kernel/Docker engine, pinned worker/proxy images, and operator-owned
 proxy allowlist remain trusted. Native runs also require
 `--subscription-billing-verified` as explicit operator authorization. The flag is not

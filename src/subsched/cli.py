@@ -367,6 +367,15 @@ def run(
     except ConfigError as error:
         raise typer.BadParameter(str(error), param_hint="--config") from error
 
+    audit = cfg.verification.independent_audit
+    if (not dry_run and allow_native and audit is not None
+            and (audit.run_id is None or audit.artifact_id is None)):
+        typer.echo(
+            "Independent audit evidence is missing; prepare a trusted run and artifact first.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
     intent = _resolve_intent(cfg=cfg, query=query, repo=repo, label=label, issues=issues)
     resolved_repo = intent.repo
     resolved_label = intent.label
@@ -555,6 +564,7 @@ def run(
             label_scores=dict(cfg.queue.priority.label_scores),
             verification_commands=cfg.verification.commands,
             verification_timeout_seconds=float(cfg.verification.timeout_seconds),
+            independent_audit=cfg.verification.independent_audit,
             isolation_config=cfg.isolation,
             isolation_runtime_executable=isolation_runtime_executable,
             concurrency=cfg.execution.concurrency,
@@ -1290,6 +1300,55 @@ def restore_state(
         f"{prefix}Restored state from {res.source_file} "
         f"({res.restored_tasks_count} tasks, revision {res.revision})"
     )
+
+
+@app.command("audit-request")
+def audit_request(
+    ctx: typer.Context,
+    worktree: Annotated[Path, typer.Argument(help="Clean task worktree to audit")],
+    config: Annotated[Path | None, typer.Option("--config", exists=True, dir_okay=False)] = None,
+) -> None:
+    """Prepare data-only input for an independently trusted dependency audit."""
+    import shutil
+    import tempfile
+
+    from subsched.agents.isolation import prepare_verification_git
+    from subsched.audit_locked_inventory import AuditIsolationError
+    from subsched.audit_prepare import build_audit_target
+
+    context: Context = ctx.obj
+    snapshot: Path | None = None
+    cleanup_confirmed = True
+    try:
+        cfg = _load_effective_config(context.repository, config)
+        trust = cfg.verification.independent_audit
+        runtime = shutil.which(cfg.isolation.runtime)
+        if trust is None or cfg.isolation.backend != "container" or cfg.isolation.image is None:
+            raise ValueError("independent audit and container isolation must be configured")
+        if cfg.github.repo is not None and cfg.github.repo != trust.repository:
+            raise ValueError("audit repository must match the task repository")
+        if runtime is None:
+            raise ValueError("container runtime is unavailable")
+        snapshot = Path(tempfile.mkdtemp(prefix="subsched-audit-request-")).resolve()
+        absolute_worktree = worktree.absolute()
+        git_context = prepare_verification_git(absolute_worktree, snapshot / "git")
+        target, inventory = build_audit_target(
+            absolute_worktree, git_context, trust, trust.repository, cfg.isolation.image,
+            Path(runtime).resolve(), snapshot,
+        )
+    except AuditIsolationError:
+        cleanup_confirmed = False
+        typer.echo("Audit request failed: container cleanup could not be confirmed", err=True)
+        raise typer.Exit(1) from None
+    except (OSError, ValueError, ConfigError):
+        typer.echo("Audit request failed: target or isolation could not be verified", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        if snapshot is not None and cleanup_confirmed:
+            shutil.rmtree(snapshot)
+    typer.echo(json.dumps({"target": target, "inventory": [
+        {"name": name, "version": version} for name, version in inventory
+    ]}, separators=(",", ":")))
 
 
 @app.command()

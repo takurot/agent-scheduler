@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from subsched.config import NativeIsolationConfig
+from subsched.config import NativeIsolationConfig, load_config
 from subsched.verification import run_verification
 
 
@@ -36,6 +36,16 @@ def test_real_verification_full_gate_preserves_host_metadata(tmp_path: Path, lin
     image = os.environ.get("SUBSCHED_ISOLATION_WORKER_IMAGE", "")
     assert runtime is not None, "Docker is required for real verification gates"
     assert re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image), "pin worker image by digest"
+    audit_config = None
+    audit_repository = None
+    audit_path = os.environ.get("SUBSCHED_VERIFICATION_AUDIT_CONFIG")
+    if audit_path:
+        configured = load_config(Path(audit_path))
+        audit_config = configured.verification.independent_audit
+        assert audit_config is not None, "independent audit configuration is required"
+        assert configured.isolation.image == image, "configured audit image must match test image"
+        audit_repository = configured.github.repo
+        assert audit_repository == audit_config.repository, "audit repository mismatch"
     repo = tmp_path / "repository"
     subprocess.run(
         [
@@ -86,6 +96,8 @@ def test_real_verification_full_gate_preserves_host_metadata(tmp_path: Path, lin
             output_limit_bytes=4 * 1024 * 1024,
             isolation_config=NativeIsolationConfig(backend="container", image=image),
             isolation_runtime_executable=Path(runtime),
+            independent_audit=audit_config,
+            audit_repository=audit_repository,
         )
         assert report.passed, (
             report.summary + "\n" + "\n".join(gate.stdout + gate.stderr for gate in report.gates)

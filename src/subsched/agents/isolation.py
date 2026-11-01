@@ -928,14 +928,27 @@ def wrap_verification_request(
     runtime_executable: Path,
     container_name: str,
     git_context: IsolationGitContext,
+    audit_cache: Path | None = None,
 ) -> ProcessExecutionRequest:
-    """Run a verification gate in the worker image without credentials or network."""
+    """Run a verification gate in the worker image without credentials or network.
+
+    An audit cache must be independently authenticated by the trusted caller;
+    this wrapper enforces mount isolation but cannot establish provenance.
+    """
     if config.backend != "container" or config.image is None:
         raise ValueError("verification container configuration is incomplete")
     if not runtime_executable.is_absolute():
         raise ValueError("verification container runtime path is not absolute")
     if not request.cwd.is_absolute() or request.cwd.is_symlink() or not request.cwd.is_dir():
         raise ValueError("verification worktree is not a valid absolute directory")
+    if audit_cache is not None and (
+        not audit_cache.is_absolute()
+        or not audit_cache.is_dir()
+        or any(path.is_symlink() for path in (audit_cache, *audit_cache.parents))
+        or audit_cache.is_relative_to(request.cwd)
+        or request.cwd.is_relative_to(audit_cache)
+    ):
+        raise ValueError("verification audit cache is not a safe external directory")
 
     uid = os.getuid()
     gid = os.getgid()
@@ -974,6 +987,16 @@ def wrap_verification_request(
             git_context.worktree_git_mount,
             str(request.cwd / ".git"),
             readonly=git_context.worktree_git_mount.is_file(),
+        ),
+        *(
+            (
+                "--mount",
+                _mount_value(audit_cache, "/run/pip-audit", readonly=True),
+                "--env",
+                "XDG_CACHE_HOME=/run",
+            )
+            if audit_cache is not None
+            else ()
         ),
         "--workdir",
         str(request.cwd),
