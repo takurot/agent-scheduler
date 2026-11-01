@@ -278,6 +278,59 @@ def test_probe_command_capabilities_claude_success(tmp_path: Path) -> None:
     assert "headless flags verified" in res.details
 
 
+@pytest.mark.parametrize("help_fails", [False, True])
+def test_claude_env_shebang_executes_without_inheriting_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, help_fails: bool
+) -> None:
+    node = tmp_path / "node"
+    node.write_text(
+        "#!/bin/sh\n"
+        'test -z "${ANTHROPIC_API_KEY+x}" || exit 91\n'
+        'test -z "${PROBE_SECRET+x}" || exit 92\n'
+        'if [ "$2" = --version ]; then printf "2.1.229\\n"; exit 0; fi\n'
+        + (
+            "exit 7\n"
+            if help_fails
+            else "printf '%s\\n' '--print --json-schema --output-format --permission-mode "
+            '--safe-mode --no-session-persistence --strict-mcp-config --tools "json" dontAsk' "'\n"
+        ),
+        encoding="utf-8",
+    )
+    node.chmod(0o755)
+    exe = tmp_path / "claude"
+    exe.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f":{tmp_path}:relative")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-key")
+    monkeypatch.setenv("PROBE_SECRET", "synthetic-secret")
+
+    exit_codes: list[int] = []
+
+    def run_real(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs["env"] == {"PATH": str(tmp_path)}
+        result = subprocess.run(argv, **kwargs)
+        exit_codes.append(result.returncode)
+        return result
+
+    result = probe_command_capabilities("claude", exe, run_cmd=run_real)
+    assert exit_codes == [0, 7 if help_fails else 0]
+    assert result.compatible is not help_fails
+    if help_fails:
+        assert "inspection failed" in result.error
+
+
+def test_claude_probe_rejects_path_without_absolute_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exe = tmp_path / "claude"
+    exe.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", ":relative")
+    result = probe_command_capabilities("claude", exe, run_cmd=subprocess.run)
+    assert result.compatible is False
+    assert "PATH" in result.error
+
+
 def test_probe_command_capabilities_codex_success(tmp_path: Path) -> None:
     exe = tmp_path / "codex"
     exe.write_text("", encoding="utf-8")

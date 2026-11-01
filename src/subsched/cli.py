@@ -367,6 +367,15 @@ def run(
     except ConfigError as error:
         raise typer.BadParameter(str(error), param_hint="--config") from error
 
+    audit = cfg.verification.independent_audit
+    if (not dry_run and allow_native and audit is not None
+            and (audit.run_id is None or audit.artifact_id is None)):
+        typer.echo(
+            "Independent audit evidence is missing; prepare a trusted run and artifact first.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
     intent = _resolve_intent(cfg=cfg, query=query, repo=repo, label=label, issues=issues)
     resolved_repo = intent.repo
     resolved_label = intent.label
@@ -555,6 +564,7 @@ def run(
             label_scores=dict(cfg.queue.priority.label_scores),
             verification_commands=cfg.verification.commands,
             verification_timeout_seconds=float(cfg.verification.timeout_seconds),
+            independent_audit=cfg.verification.independent_audit,
             isolation_config=cfg.isolation,
             isolation_runtime_executable=isolation_runtime_executable,
             concurrency=cfg.execution.concurrency,
@@ -937,13 +947,12 @@ def explain(
         raise typer.Exit(1) from error
 
     try:
-        tasks = context.store.load_tasks()
-        capacities = context.store.load_capacities()
+        snapshot = context.store.load_snapshot()
     except StateCorruptionError as error:
         typer.echo(f"State error: {error}", err=True)
         raise typer.Exit(1) from error
 
-    matching_task = next((t for t in tasks if t.issue_number == issue_number), None)
+    matching_task = next((t for t in snapshot.tasks if t.issue_number == issue_number), None)
     if matching_task:
         issue = Issue(
             number=matching_task.issue_number,
@@ -954,7 +963,7 @@ def explain(
     else:
         issue = Issue(number=issue_number, title=f"Issue #{issue_number}")
 
-    result = explain_issue(issue, tasks, cfg, capacities)
+    result = explain_issue(issue, snapshot.tasks, cfg, snapshot.capacities, paused=snapshot.paused)
 
     if json_output:
         typer.echo(json.dumps(result, indent=2))
@@ -1293,6 +1302,55 @@ def restore_state(
     )
 
 
+@app.command("audit-request")
+def audit_request(
+    ctx: typer.Context,
+    worktree: Annotated[Path, typer.Argument(help="Clean task worktree to audit")],
+    config: Annotated[Path | None, typer.Option("--config", exists=True, dir_okay=False)] = None,
+) -> None:
+    """Prepare data-only input for an independently trusted dependency audit."""
+    import shutil
+    import tempfile
+
+    from subsched.agents.isolation import prepare_verification_git
+    from subsched.audit_locked_inventory import AuditIsolationError
+    from subsched.audit_prepare import build_audit_target
+
+    context: Context = ctx.obj
+    snapshot: Path | None = None
+    cleanup_confirmed = True
+    try:
+        cfg = _load_effective_config(context.repository, config)
+        trust = cfg.verification.independent_audit
+        runtime = shutil.which(cfg.isolation.runtime)
+        if trust is None or cfg.isolation.backend != "container" or cfg.isolation.image is None:
+            raise ValueError("independent audit and container isolation must be configured")
+        if cfg.github.repo is not None and cfg.github.repo != trust.repository:
+            raise ValueError("audit repository must match the task repository")
+        if runtime is None:
+            raise ValueError("container runtime is unavailable")
+        snapshot = Path(tempfile.mkdtemp(prefix="subsched-audit-request-")).resolve()
+        absolute_worktree = worktree.absolute()
+        git_context = prepare_verification_git(absolute_worktree, snapshot / "git")
+        target, inventory = build_audit_target(
+            absolute_worktree, git_context, trust, trust.repository, cfg.isolation.image,
+            Path(runtime).resolve(), snapshot,
+        )
+    except AuditIsolationError:
+        cleanup_confirmed = False
+        typer.echo("Audit request failed: container cleanup could not be confirmed", err=True)
+        raise typer.Exit(1) from None
+    except (OSError, ValueError, ConfigError):
+        typer.echo("Audit request failed: target or isolation could not be verified", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        if snapshot is not None and cleanup_confirmed:
+            shutil.rmtree(snapshot)
+    typer.echo(json.dumps({"target": target, "inventory": [
+        {"name": name, "version": version} for name, version in inventory
+    ]}, separators=(",", ":")))
+
+
 @app.command()
 def doctor(
     ctx: typer.Context,
@@ -1409,9 +1467,10 @@ def metrics(
     if report_file is not None:
         try:
             report_file.write_text(report_text, encoding="utf-8")
-            typer.echo(f"Report saved to {report_file}")
         except OSError as error:
             typer.echo(f"Failed to write report to {report_file}: {error}", err=True)
+            raise typer.Exit(1) from error
+        typer.echo(f"Report saved to {report_file}", err=json_output)
 
     if json_output:
         typer.echo(json.dumps(calculated.to_dict(), indent=2))
@@ -1424,7 +1483,7 @@ def metrics(
 @app.command()
 def dashboard(
     ctx: typer.Context,
-    port: Annotated[int, typer.Option(help="Port to listen on")] = 8080,
+    port: Annotated[int, typer.Option(help="Port to listen on", min=0, max=65535)] = 8080,
     host: Annotated[str, typer.Option(help="Host to bind")] = "127.0.0.1",
     no_browser: Annotated[
         bool, typer.Option("--no-browser", help="Do not open a browser automatically")
@@ -1442,7 +1501,11 @@ def dashboard(
     if interval <= 0:
         raise typer.BadParameter("must be greater than 0", param_hint="--interval")
     context: Context = ctx.obj
-    server = build_dashboard_server(context.repository, host=host, port=port, interval=interval)
+    try:
+        server = build_dashboard_server(context.repository, host=host, port=port, interval=interval)
+    except OSError as error:
+        typer.echo(f"Unable to start dashboard: {error}", err=True)
+        raise typer.Exit(1) from error
     resolved_port = server.server_address[1]
     url = f"http://{host}:{resolved_port}/?token={server.dashboard_token}"
     typer.echo(f"Dashboard listening at {url}")

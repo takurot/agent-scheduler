@@ -323,6 +323,16 @@ Schedulerが管理するコンテナ隔離ワークツリー（`subsched/issue-N
 
 コンテナ固有の環境制約（`ps`欠落、ファイルシステム権限差異等）によりリポジトリ全体のフル品質ゲート（`bash scripts/quality_gate.sh`）で無関係な既存テストが失敗した場合、スコープ付きテストの合格を確認した上でローカルコミットを作成する（`NEEDS_HUMAN`に不要にエスカレーションしない）。リポジトリ全体の厳格なフル品質ゲートは、タスク終了後の `VERIFYING` ステージでScheduler自身が独立して実行・検証する。対象設定で`isolation.backend: container`が有効な場合、このScheduler検証もworker imageを使うネットワーク遮断コンテナ内で実行し、ホスト上で直接実行しない。
 
+### 7.2 Online dependency audits (issue #495)
+
+Review online requirements during verification planning. Network-none VERIFYING
+cannot fetch current advisory data, and a toolchain probe only checks tool presence.
+The [independent CI contract spike](ONLINE_AUDIT_DESIGN.md) specifies provenance,
+target and freshness checks, but does not enable automatic evidence ingestion or
+replace the mandatory full gate. Reject unsupported plans before dispatch. Keep
+separate evidence for real Docker network denial and a trusted online audit; local
+or synthetic results cannot be reported as both. See the RUNBOOK for preparation.
+
 ## 8. ドキュメントとstate schemaの同期
 
 次の変更は、コードと同じPRで文書を更新する。
@@ -343,6 +353,12 @@ SPECから逸脱する実装を先にmergeしない。別のstate layoutや延�
 PRを持つTaskの`COMPLETE`はmerge確認を要する。CI PASSは`ci_result`として別に記録し、
 依存Issueの解放に使わない。旧stateのPR付き`COMPLETE`にmerge確認記録がない場合は
 `READY_FOR_REVIEW`として読み、operatorの`subsched reconcile`で再確認する。
+
+このrepositoryの隔離verificationでPython環境を準備する場合は、
+[`RUNBOOK.md`](RUNBOOK.md#offline-python-environment-for-verification)の手順で
+対象lockとplatformに対応するoffline imageをoperatorが準備する。独立CIによる監査を
+使う場合も、operatorが承認したworkflowと対象commitに一致する新鮮な証拠が必要であり、
+不足・不一致は失敗とする。通常の`pip-audit`は引き続き品質gateで実行する。
 
 ## 9. コミットとPull Request
 

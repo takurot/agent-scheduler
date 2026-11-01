@@ -15,6 +15,7 @@ from subsched.models import (
     detect_dependency_cycles,
     parse_dependencies,
 )
+from subsched.queue import TaskQueue
 from subsched.router import AgentConfig, Router, _is_fresh_provider
 from subsched.selection import excluded_issue_labels
 
@@ -26,6 +27,7 @@ def explain_issue(
     capacities: Iterable[Capacity],
     *,
     now: datetime | None = None,
+    paused: bool = False,
     run_dispatched_issues: set[int] | frozenset[int] | None = None,
 ) -> dict[str, Any]:
     current = now or datetime.now(UTC)
@@ -35,6 +37,22 @@ def explain_issue(
     reason_codes: list[str] = []
     reasons: list[str] = []
     actions: list[str] = []
+
+    if task is None:
+        reason_codes.append("ISSUE_UNVERIFIED")
+        reasons.append(
+            "Issue is not queued; its existence, labels, and dependencies are unverified."
+        )
+        actions.append(
+            f"Use subsched run --issues {issue.number} --dry-run to discover and queue issues "
+            "without workers; set github.repo or pass --repo OWNER/REPO. "
+            "Dry-run persists discovered tasks."
+        )
+
+    if paused:
+        reason_codes.append("SCHEDULER_PAUSED")
+        reasons.append("Scheduler is paused; new dispatches are disabled.")
+        actions.append("Use subsched resume to allow new dispatches.")
 
     # 1. Label eligibility
     excluded = excluded_issue_labels(issue, frozenset(config.github.exclude_labels))
@@ -73,7 +91,8 @@ def explain_issue(
             reason_str = task.needs_human_reason or "unknown"
             reasons.append(f"Issue needs human intervention: {reason_str}")
             actions.append(
-                "Diagnose the failure in the worktree, resolve it, and reset/resolve the task."
+                f"Diagnose and fix the failure, then use subsched resolve {issue.number} "
+                "--note 'describe the fix'."
             )
         elif task.status is TaskState.COMPLETE:
             reason_codes.append("COMPLETE")
@@ -81,13 +100,26 @@ def explain_issue(
         elif task.status is TaskState.CANCELLED:
             reason_codes.append("CANCELLED")
             reasons.append("Task was cancelled.")
-            actions.append("Use subsched reset to restore the task to READY if needed.")
+            actions.append(f"Use subsched uncancel {issue.number} to restore the task to READY.")
         elif task.status is TaskState.IN_PROGRESS:
             reason_codes.append("IN_PROGRESS")
             reasons.append("Task is currently in progress.")
+        elif task.status is TaskState.PLANNING:
+            reason_codes.append("PLANNING")
+            reasons.append("Task planning is currently in progress.")
+        elif task.status is TaskState.VERIFYING:
+            reason_codes.append("VERIFYING")
+            reasons.append("Task verification is currently in progress.")
         elif task.status is TaskState.READY_FOR_REVIEW:
             reason_codes.append("READY_FOR_REVIEW")
             reasons.append("Task PR is waiting for review/CI/merge.")
+        elif task.status not in TaskQueue._DISPATCHABLE_STATES and task.status not in {
+            TaskState.BLOCKED,
+            TaskState.WAITING_CAPACITY,
+            TaskState.WAITING_DEPENDENCY,
+        }:
+            reason_codes.append(task.status.value)
+            reasons.append(f"Task is in {task.status.value} and is not ready for dispatch.")
 
     # 4. Run budget
     dispatched = run_dispatched_issues or set()

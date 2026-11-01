@@ -81,6 +81,52 @@ CI and release jobs run the opt-in tests as skips; their green status alone does
 establish a live Docker boundary result. A failed or missing report requires another
 explicit run after correction.
 
+### Online audit planning (issue #495)
+
+Before dispatch, inspect verification commands and invoked scripts for online
+requirements, including `pip-audit`. Installed tools do not imply advisory access.
+Read the [selected independent-CI contract](ONLINE_AUDIT_DESIGN.md), including its
+actor boundaries, package inventory, authentication and 24-hour freshness policy.
+Prepare a separately trusted immutable audit workflow on an ephemeral CI runner;
+never give repository code host HOME, credentials, runtime sockets or host execution.
+Keep normal test/lint in network-none containers.
+
+The optional `verification.independent_audit` configuration can authenticate a
+separately approved GitHub Actions run and supply its cache to the offline gate.
+Use `subsched audit-request WORKTREE --config CONFIG` to derive the exact target
+and inventory; the command only prints the request and does not dispatch it. The
+operator must approve a protected workflow ref and its commit/digest, run the
+workflow with that request, and set the resulting run and artifact IDs in config.
+The workflow must already exist on the default branch before GitHub accepts a
+workflow dispatch. Never use the candidate worktree to choose the trust root.
+
+After reviewing the trust configuration and protecting the dispatch ref, an
+operator can prepare and dispatch an audit as follows. Replace the placeholders;
+the ref must resolve to the configured `workflow_commit` at dispatch time.
+
+```bash
+subsched audit-request /absolute/path/to/task-worktree --config /path/to/config.yaml > audit-request.json
+gh api --method POST -H 'X-GitHub-Api-Version: 2026-03-10' \
+  repos/OWNER/REPO/actions/workflows/independent-audit.yml/dispatches \
+  -f 'ref=PROTECTED_REF' \
+  -f "inputs[target]=$(jq -c .target audit-request.json)" \
+  -f "inputs[inventory]=$(jq -c .inventory audit-request.json)"
+```
+
+Wait for the workflow run to complete, obtain its artifact ID via the GitHub
+Actions API, and set both IDs in the operator-owned configuration. The consumer
+checks the actual run and workflow SHA even if a ref moved. The dispatch ref
+must itself be protected: rejecting an unexpected SHA afterwards cannot undo
+execution of a workflow dispatched from an untrusted ref.
+
+Evidence is bound to the exact commit and expires (at most 900 seconds). Each
+new commit needs a new run and updated IDs; automatic dispatch and refresh are
+not implemented. Missing or untrusted evidence causes operator intervention,
+not a retry or PASS. Do not remove the mandatory audit, widen network access, or
+configure offline-only commands as a full PASS. Live authenticated GitHub Actions
+and ordinary/linked Docker acceptance must be verified before claiming this path
+is production-validated; simulated GitHub responses are not that evidence.
+
 ### Initializing & Running Scheduler
 ```bash
 # Natural language instruction discovery without workers
@@ -515,3 +561,40 @@ Desktop, Cursor, Antigravity/Gemini) can therefore infer the workflow, argument 
 #### Prompts
 - `triage_task`: Prompt guiding the LLM to inspect handoffs and git commits for `NEEDS_HUMAN` issues before remediating.
 - `bootstrap_repo`: Prompt guiding the LLM to inspect stack tooling and initialize `subsched` configuration.
+# Offline Python environment for verification
+
+For this repository's `bash scripts/quality_gate.sh` in a Linux verification
+container, prepare a separate image for the current checkout and the exact worker
+Python, uv version, and platform. The host needs Docker, uv, and network access to
+the public PyPI artifact host. The digest-pinned worker image must already be
+available locally and provide Python with `pip` and uv. Run from the repository root:
+
+```sh
+uv run --frozen python scripts/prepare_offline_bundle.py \
+  --image 'REGISTRY/WORKER@sha256:REPLACE_WITH_DIGEST' \
+  --output /absolute/path/to/new-offline-bundle
+docker build --network none -t local-subsched-offline /absolute/path/to/new-offline-bundle
+```
+
+The Docker builder must be able to resolve the pinned base image. Some BuildKit
+configurations query the registry even when the image is already present locally;
+use a reachable trusted registry or a builder that can use the local image.
+
+The operator publishes or otherwise makes the resulting image available by digest
+and configures that digest as `isolation.image`. Follow the normal image trust and
+pinning procedure. The preparation command accepts only public PyPI registry sources,
+downloads hash-verified wheels on the host, and fails if the target image or the
+project inputs cannot be verified. The image contains public dependency artifacts;
+do not put credentials in the repository configuration or build context.
+
+The image enables the gate's offline mode. It checks the lock, project metadata,
+wheel hashes, exported requirements, and runtime identity before installing into a
+fresh temporary environment. The host `.venv` is not reused or rewritten. Rebuild
+the image whenever `uv.lock`, `pyproject.toml`, the pinned build requirements, the
+target Python/uv version, or the target platform changes. A missing or stale bundle
+fails the gate; it does not fall back to the network.
+
+This prepares dependencies only. The unchanged mandatory `pip-audit` gate also needs
+fresh vulnerability advisory data; issue #495 tracks that separate networkless
+audit requirement. Until it is resolved, a full isolated gate can still fail at
+the audit stage and must not be reported as passing.

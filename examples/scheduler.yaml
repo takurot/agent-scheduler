@@ -101,6 +101,20 @@ verification:
   commands:
     - pytest
     - ruff check .
+  # Optional for this repository's networkless Python quality gate. Supply IDs only
+  # after the trusted workflow has audited the exact committed task and produced
+  # an artifact. See docs/RUNBOOK.md for the protected-ref and freshness requirements.
+  # independent_audit:
+  #   repository: owner/project
+  #   repository_id: 123
+  #   workflow_id: 456
+  #   workflow_commit: "0123456789abcdef0123456789abcdef01234567"
+  #   workflow_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  #   tool: "pip-audit 2.10.1"
+  #   policy: "lock-dev-v1"
+  #   max_age_seconds: 900
+  #   run_id: 789
+  #   artifact_id: 1011
 
 billing:
   api_fallback: false
