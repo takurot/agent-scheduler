@@ -7,6 +7,7 @@ import time
 import webbrowser
 from collections import Counter
 from collections.abc import Callable
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -47,7 +48,7 @@ from subsched.github.reconcile import (
 from subsched.init import InitError, build_scaffold_plan, write_scaffold_plan
 from subsched.maintenance import MaintenanceError, apply_archive_plan, build_maintenance_report
 from subsched.models import Capacity, Issue, TaskState
-from subsched.preflight import validate_native_preflight
+from subsched.preflight import validate_basic_preflight, validate_native_preflight
 from subsched.router import AgentConfig, Router
 from subsched.scheduler import Scheduler
 from subsched.selection import (
@@ -1351,6 +1352,11 @@ def audit_request(
     ]}, separators=(",", ":")))
 
 
+class DoctorScope(StrEnum):
+    BASIC = "basic"
+    NATIVE = "native"
+
+
 @app.command()
 def doctor(
     ctx: typer.Context,
@@ -1358,6 +1364,10 @@ def doctor(
         Path | None,
         typer.Option("--config", exists=True, dir_okay=False, resolve_path=True),
     ] = None,
+    scope: Annotated[
+        DoctorScope,
+        typer.Option("--scope", help="Diagnostic scope: basic discovery or native execution."),
+    ] = DoctorScope.NATIVE,
 ) -> None:
     """Check required local executables and warn on an overly broad `gh` token scope.
 
@@ -1374,13 +1384,16 @@ def doctor(
     enabled_agents = tuple(
         name for name, settings in cfg.agents.items() if settings.enabled
     )
-    report = validate_native_preflight(
-        enabled_agents=enabled_agents,
-        write_policy_requires_auth=False,
-        isolation_config=cfg.isolation,
-        agents=cfg.agents,
-        verification_commands=cfg.verification.commands,
-    )
+    if scope == DoctorScope.BASIC:
+        report = validate_basic_preflight()
+    else:
+        report = validate_native_preflight(
+            enabled_agents=enabled_agents,
+            write_policy_requires_auth=False,
+            isolation_config=cfg.isolation,
+            agents=cfg.agents,
+            verification_commands=cfg.verification.commands,
+        )
     for check in report.checks:
         status = "FOUND" if check.found else "MISSING"
         if check.name == "isolation":
@@ -1405,9 +1418,14 @@ def doctor(
                 )
         else:
             typer.echo("gh token scope could not be determined (not authenticated)")
+        if scope == DoctorScope.BASIC and not diagnosis.can_discover:
+            raise typer.Exit(1)
 
     if not report.passed:
         raise typer.Exit(1)
+    if scope == DoctorScope.BASIC:
+        typer.echo("Basic doctor checks passed. Native readiness was not checked.")
+        return
     typer.echo(
         "Doctor checks passed. Native execution requires --allow-native and "
         "--subscription-billing-verified and must pass preflight. Doctor does not launch a worker."

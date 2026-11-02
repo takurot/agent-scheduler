@@ -368,6 +368,29 @@ def probe_command_capabilities(
         )
 
 
+def validate_basic_preflight() -> PreflightReport:
+    """Inspect discovery tools only; never inspect providers or native isolation."""
+    checks = []
+    for name in ("git", "gh"):
+        executable = _default_resolver(name)
+        if executable is None:
+            checks.append(
+                PreflightCheckResult(
+                    name=name,
+                    found=False,
+                    error=f"required command '{name}' is not installed or not in PATH",
+                )
+            )
+        else:
+            checks.append(probe_command_capabilities(name, executable, run_cmd=subprocess.run))
+    failures = tuple(
+        f"{check.name} compatibility check failed: {check.error}"
+        for check in checks
+        if not check.compatible
+    )
+    return PreflightReport(checks=tuple(checks), passed=not failures, failure_reasons=failures)
+
+
 def validate_native_preflight(
     *,
     enabled_agents: Iterable[str],

@@ -577,6 +577,16 @@ isolation:
 ```
 
 #### Step 5: Verify Setup with `subsched doctor`
+For configuration, read-only discovery, or monitoring setup, use
+`subsched doctor --scope basic` (add `--config /absolute/path/to/subsched.yaml` when needed).
+This validates configuration, git/gh capabilities, and GitHub discovery authentication,
+without requiring agent CLIs, Docker, provider auth, or the worker toolchain. Missing tools,
+incompatible tools, invalid configuration, or unavailable discovery authentication fail
+with a nonzero exit. Broad GitHub token scopes still produce a warning.
+`--scope native` is the default and retains the full native readiness checks.
+A basic PASS does not establish native readiness or bypass `run --allow-native` preflight.
+
+
 Run diagnostic preflight to verify all container isolation boundaries:
 ```bash
 subsched doctor
