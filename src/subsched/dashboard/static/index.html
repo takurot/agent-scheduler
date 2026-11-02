@@ -265,6 +265,52 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
     ]);
   }
 
+  function renderDiagnostics(body, data) {
+    function value(item, fallback) {
+      return (typeof item === "string" && item.length > 0) || typeof item === "number"
+        ? String(item) : (fallback || "—");
+    }
+    var summary = document.createElement("div");
+    setLines(summary, [
+      "Status: " + value(data.status),
+      "Agent: " + value(data.current_agent),
+      "Stage: " + value(data.dispatch_stage),
+      "Model: " + value(data.dispatch_model, "provider-default"),
+      "Effort: " + value(data.dispatch_effort, "provider-default"),
+      "PR: " + (Number.isSafeInteger(data.pr) ? "#" + data.pr : "—"),
+      "CI: " + value(data.ci_result),
+      "Completion: " + value(data.completion_kind),
+      "Reason code: " + value(data.needs_human_reason_code),
+      "Reason: " + value(data.needs_human_reason),
+      "Resolution note: " + value(data.resolution_note),
+      "Attempts: " + value(data.attempt),
+      "Verification failures: " + value(data.verification_failures),
+      "Review cycles: " + value(data.review_cycles),
+      "Plan revisions: " + value(data.plan_revisions),
+      "Capacity events: " + value(data.capacity_events),
+      "Agent switches: " + value(data.actual_agent_switches),
+    ]);
+    body.appendChild(summary);
+    var failures = document.createElement("p");
+    var perAgent = data.per_agent_failures;
+    failures.textContent = "Agent failures: " + (perAgent && typeof perAgent === "object" &&
+      !Array.isArray(perAgent) ? Object.keys(perAgent).map(function (agent) {
+        return agent + ": " + value(perAgent[agent]);
+      }).join(", ") || "—" : "—");
+    body.appendChild(failures);
+    var commitsHeading = document.createElement("h4");
+    commitsHeading.textContent = "Recent commits";
+    body.appendChild(commitsHeading);
+    var commits = document.createElement("pre");
+    commits.textContent = Array.isArray(data.commit_log) && data.commit_log.length > 0 &&
+      data.commit_log.every(function (line) { return typeof line === "string"; })
+      ? data.commit_log.join("\n") : "(no recent commits)";
+    body.appendChild(commits);
+    var handoffHeading = document.createElement("h4");
+    handoffHeading.textContent = "Handoff";
+    body.appendChild(handoffHeading);
+  }
+
   function loadDetail(issue) {
     var card = document.getElementById("detail-card");
     var body = document.getElementById("detail-body");
@@ -291,6 +337,7 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
         var pre = document.createElement("pre");
         pre.textContent = data.handoff || "(no handoff)";
         body.appendChild(heading);
+        renderDiagnostics(body, data);
         body.appendChild(pre);
         return true;
       }).catch(function (error) {
