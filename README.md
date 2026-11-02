@@ -1029,3 +1029,13 @@ resolution note, attempt/failure/review/capacity counters, recent commits, and h
 Missing information is displayed as a dash or an explicit empty state; unset model and
 effort use `provider-default`. Values use text-only DOM rendering and existing API
 redaction. The dashboard remains read-only and does not expose raw provider output.
+
+### Explicit required verification policy (#494)
+
+Optionally set `verification.required_commands` to a nonempty list of exact entries
+that must also appear in `verification.commands` (for example, `bash scripts/quality_gate.sh`).
+Missing requirements fail configuration validation before discovery/dispatch. Omit the
+field to keep arbitrary scoped commands. `config validate --dry-run` shows policy status
+and command SHA-256 values; PR results use the same values to identify executed gates.
+Policy satisfaction checks inclusion, not script contents, and is not a verification PASS.
+See [the policy contract](docs/SPEC.md#explicit-required-verification-policy-494).

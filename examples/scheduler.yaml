@@ -94,6 +94,10 @@ queue:
 # `pytest`/`ruff` are only installed inside .venv and won't resolve unless it's
 # activated -- prefix commands with `uv run` instead:
 #   verification:
+  # Optional owner-declared policy: exact entries must also appear in commands.
+  # required_commands:
+  #   - bash scripts/quality_gate.sh
+
 #     commands:
 #       - uv run pytest
 #       - uv run ruff check .

@@ -65,6 +65,7 @@ from subsched.storage import (
 )
 from subsched.structured_logger import StructuredLogger
 from subsched.tasks.worktree import GitWorktreeAdapter, WorktreeAdapter, WorktreeError
+from subsched.verification import command_fingerprint
 
 app = typer.Typer(no_args_is_help=True, help="Subscription-aware coding agent scheduler")
 config_app = typer.Typer(no_args_is_help=True, help="Config inspection and validation")
@@ -162,6 +163,15 @@ def _format_effective_config_summary(
             f"close_issue={completion.close_issue}"
         ),
         f"  verification commands: {commands}",
+        "  verification required policy: " + (
+            "satisfied" if intent.cfg.verification.required_commands
+            else "disabled (configured commands only)"
+        ),
+        *(
+            f"  gate {index}: sha256={command_fingerprint(command)} "
+            + ("required" if command in intent.cfg.verification.required_commands else "configured")
+            for index, command in enumerate(intent.cfg.verification.commands, 1)
+        ),
     ]
 
 

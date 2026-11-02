@@ -3749,3 +3749,33 @@ resolution note, attempt/failure/review/capacity counters, recent commits, and h
 Missing information is displayed as a dash or an explicit empty state; unset model and
 effort use `provider-default`. Values use text-only DOM rendering and existing API
 redaction. The dashboard remains read-only and does not expose raw provider output.
+
+### Explicit required verification policy (#494)
+
+Verification PASS means the configured commands ran successfully. To check that the
+configuration includes the repository owner's required scope, opt in explicitly:
+
+```yaml
+verification:
+  commands:
+    - bash scripts/quality_gate.sh
+  required_commands:
+    - bash scripts/quality_gate.sh
+```
+
+`required_commands` is a nonempty list when present; omit it to preserve arbitrary
+scoped commands for any language/repository. Each requirement must exactly match an
+entry in `commands`, including whitespace and quoting. Missing, blank, malformed, or
+unknown policy data fails configuration validation before discovery/dispatch.
+`config validate --dry-run` and `run` show whether policy is enabled, each gate's
+SHA-256 and required/configured classification. PR verification results include the
+same command SHA-256 and the actual gate result; a failed, unexecuted, or unknown gate
+cannot become PASS through scoped worker tests. Earlier failure stops execution, so
+later absent fingerprints do not prove execution. Compare against the reviewed plan.
+
+This checks explicit command inclusion, not script contents or test coverage semantics.
+Review wrapper scripts and their scope separately. Free-form AGENTS/Issue text is never
+parsed into commands. A policy-satisfied configuration is not a verification PASS.
+The owner must explicitly select a complete gate; using a scoped command as the required
+command deliberately declares that scope. Existing network-none isolation, independent
+online-audit trust/freshness requirements, and fail-closed gate behavior remain in force.
