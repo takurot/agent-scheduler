@@ -1011,3 +1011,12 @@ This is expected, fail-closed behavior, not a failure: `github.completion.close_
 - [`docs/WORKFLOW.md`](docs/WORKFLOW.md): Contributor and development workflow.
 
 For native container isolation configuration and setup, see the [Container Isolation Sandbox Architecture](#container-isolation-sandbox-architecture) section above and the full schema in [`examples/scheduler.yaml`](examples/scheduler.yaml).
+
+### Dashboard task history (#461)
+
+The read-only Task History uses `/api/tasks` to include COMPLETE, FAILED, and CANCELLED
+tasks alongside active work. Choose all, active, terminal, or a specific status to filter;
+the count reflects visible tasks. Each row shows issue/title, status, update time, agent,
+PR, CI result, and merge completion separately. CI PASS alone is not merge completion.
+History refreshes when the state revision changes; the active Kanban and server-side
+redaction remain in effect. History buttons open the existing task detail.
