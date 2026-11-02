@@ -518,3 +518,12 @@ Issueは次をすべて満たした場合だけ完了とする。
 
 ファイル構成は変化するため、この文書に静的tree snapshotは置かない。確認時は
 `git ls-files`とGitHub Issueを正とする。
+
+### Explicit required verification policy (#494)
+
+Operators may declare `verification.required_commands` as exact required entries in
+`verification.commands`. Run `config validate --dry-run` before dispatch and compare its
+gate SHA-256 values with the PR verification results. Policy satisfaction proves command
+inclusion only; review wrapper contents and require the complete gate for the repository.
+A missing result is unexecuted, not PASS. Omit the policy for intentional scoped operation.
+See [SPEC](SPEC.md#explicit-required-verification-policy-494) for validation and safety rules.

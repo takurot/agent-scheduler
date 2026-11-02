@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -249,6 +250,7 @@ class VerificationConfig:
     commands: tuple[str, ...] = ("pytest", "ruff check .")
     timeout_seconds: int = 120
     independent_audit: IndependentAuditConfig | None = None
+    required_commands: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,7 +380,9 @@ SECTION_KEYS: dict[str, frozenset[str]] = {
     ),
     "queue": frozenset({"priority"}),
     "handoff": frozenset({"continuous"}),
-    "verification": frozenset({"commands", "timeout_seconds", "independent_audit"}),
+    "verification": frozenset({
+        "commands", "timeout_seconds", "independent_audit", "required_commands",
+    }),
     "workflow": frozenset({"mode", "stages", "limits"}),
     "notifications": frozenset({"enabled", "max_delivery_attempts"}),
 }
@@ -721,6 +725,28 @@ def _parse_verification_config(raw: Mapping[str, Any]) -> VerificationConfig:
         raise ConfigError(
             "verification.commands must contain at least one non-blank command"
         )
+    required_commands = raw.get("required_commands", ())
+    if "required_commands" in raw:
+        if (not isinstance(required_commands, list) or not required_commands or any(
+            not isinstance(command, str) or not command.strip() for command in required_commands
+        )):
+            raise ConfigError("verification.required_commands must be a nonempty list of commands")
+        try:
+            if any(not shlex.split(command) for command in required_commands):
+                raise ValueError()
+        except ValueError:
+            raise ConfigError(
+                "verification.required_commands contains a malformed command"
+            ) from None
+        missing = [
+            index for index, command in enumerate(required_commands, 1)
+            if command not in commands_raw
+        ]
+        if missing:
+            raise ConfigError(
+                "verification.required_commands missing from commands at requirement index(es): "
+                + ", ".join(str(index) for index in missing)
+            )
     timeout_seconds = _strict_pos_int(
         raw.get("timeout_seconds", 120), "verification.timeout_seconds"
     )
@@ -774,6 +800,7 @@ def _parse_verification_config(raw: Mapping[str, Any]) -> VerificationConfig:
         commands=tuple(commands_raw),
         timeout_seconds=timeout_seconds,
         independent_audit=audit,
+        required_commands=tuple(required_commands),
     )
 
 

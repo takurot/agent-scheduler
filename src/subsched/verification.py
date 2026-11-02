@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shlex
 import shutil
@@ -51,6 +52,11 @@ class VerificationReport:
     # an ordinary gate failure that consumes the verification retry budget.
     cleanup_confirmed: bool = True
     audit_unavailable: bool = False
+
+
+def command_fingerprint(command: str) -> str:
+    """Bind reported gate results to the configured plan without exposing command arguments."""
+    return hashlib.sha256(command.encode("utf-8")).hexdigest()
 
 
 def _gate_summary(gate: GateResult) -> str:
@@ -323,7 +329,10 @@ def run_verification(
             summary="FAIL (no executable verification commands configured)",
         )
 
-    summary_lines = [f"gate {index}: {_gate_summary(g)}" for index, g in enumerate(gate_results, 1)]
+    summary_lines = [
+        f"gate {index}: {_gate_summary(g)} (command sha256: {command_fingerprint(g.command)})"
+        for index, g in enumerate(gate_results, 1)
+    ]
     return VerificationReport(
         passed=all_passed,
         gates=tuple(gate_results),
