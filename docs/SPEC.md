@@ -3721,3 +3721,13 @@ handoffファイルだけの更新はstate revisionを進めないため、次�
 Kanbanのtaskは表示名をaccessible nameとするnative buttonとし、Tabでの移動と
 Enter/Spaceでの詳細表示を提供する。対象taskが残る場合、ポーリング時の再描画でも
 キーボードfocusを維持する。
+
+### Doctor diagnostic scopes (#460)
+
+`doctor --scope basic|native` defaults to `native`, preserving native preflight.
+The opt-in `basic` scope validates effective configuration, git/gh version probes,
+and GitHub discovery authentication, retaining broad-scope warnings without displaying
+credentials. Missing/incompatible tools, invalid configuration, and unavailable/unknown
+GitHub authentication fail closed with nonzero exit. Basic diagnostics do not inspect
+agent CLIs, Docker, provider auth, or verification toolchains and do not establish native
+readiness. `run --allow-native` always retains its full native safety preflight.
