@@ -3731,3 +3731,12 @@ credentials. Missing/incompatible tools, invalid configuration, and unavailable/
 GitHub authentication fail closed with nonzero exit. Basic diagnostics do not inspect
 agent CLIs, Docker, provider auth, or verification toolchains and do not establish native
 readiness. `run --allow-native` always retains its full native safety preflight.
+
+### Dashboard task history (#461)
+
+The read-only Task History uses `/api/tasks` to include COMPLETE, FAILED, and CANCELLED
+tasks alongside active work. Choose all, active, terminal, or a specific status to filter;
+the count reflects visible tasks. Each row shows issue/title, status, update time, agent,
+PR, CI result, and merge completion separately. CI PASS alone is not merge completion.
+History refreshes when the state revision changes; the active Kanban and server-side
+redaction remain in effect. History buttons open the existing task detail.

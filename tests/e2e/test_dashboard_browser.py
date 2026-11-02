@@ -431,3 +431,77 @@ def test_keyboard_focus_survives_polling_and_task_update(
         expect(updated_button).to_be_focused()
     finally:
         page.close()
+
+
+def test_history_filters_terminal_tasks_and_refreshes(
+    browser: Browser, dashboard_url: str, tmp_path: Path
+) -> None:
+    from dataclasses import replace
+    from datetime import UTC, datetime
+
+    store = JsonStateStore(tmp_path)
+    tasks = tuple(Task(
+        task_id=f"github-{issue}", issue_number=issue, title=f"History {issue}", labels=(),
+        status=status, current_agent="codex", updated_at=datetime(2026, 11, 2, tzinfo=UTC),
+        pr=100 + issue, ci_result="PASS", completion_kind="merged" if issue == 2 else None,
+    ) for issue, status in [
+        (2, TaskState.COMPLETE), (3, TaskState.FAILED), (4, TaskState.CANCELLED)
+    ])
+    store.save_tasks((*store.load_tasks(), *tasks))
+    page = browser.new_page()
+    try:
+        page.goto(dashboard_url)
+        history = page.locator("#history")
+        expect(history).to_contain_text("History 2", timeout=5000)
+        expect(history).to_contain_text("COMPLETE")
+        expect(history).to_contain_text("FAILED")
+        expect(history).to_contain_text("CANCELLED")
+        expect(history).to_contain_text("2026-11-02")
+        expect(history).to_contain_text("codex")
+        expect(history).to_contain_text("PR #102")
+        expect(history).to_contain_text("CI: PASS")
+        expect(history).to_contain_text("Completion: merged")
+        expect(page.locator("#kanban")).not_to_contain_text("History 2")
+        page.get_by_label("Task history filter").select_option("terminal")
+        expect(page.locator("#history-count")).to_have_text("3 tasks")
+        expect(history).not_to_contain_text("Task 1")
+        page.get_by_label("Task history filter").select_option("FAILED")
+        expect(page.locator("#history-count")).to_have_text("1 tasks")
+        expect(history).to_contain_text("#3 History 3")
+        expect(history).not_to_contain_text("History 2")
+        page.get_by_label("Task history filter").select_option("active")
+        expect(page.locator("#history-count")).to_have_text("1 tasks")
+        expect(history).to_contain_text("Task 1")
+        store.save_tasks((replace(store.load_tasks()[0], title="Updated active"), *tasks))
+        expect(history).to_contain_text("Updated active", timeout=5000)
+        page.get_by_label("Task history filter").select_option("all")
+        expect(page.locator("#history-count")).to_have_text("4 tasks")
+        expect(history).not_to_contain_text("undefined")
+    finally:
+        page.close()
+
+
+def test_history_preserves_empty_status_filter_and_redacts(
+    browser: Browser, dashboard_url: str, tmp_path: Path
+) -> None:
+    store = JsonStateStore(tmp_path)
+    task = Task(task_id="github-2", issue_number=2,
+                title=('<img src=x onerror="window.historyXss=true"> '
+                       'ghp_123456789012345678901234567890'),
+                labels=(), status=TaskState.FAILED)
+    store.save_tasks((*store.load_tasks(), task))
+    page = browser.new_page()
+    try:
+        page.goto(dashboard_url)
+        history = page.locator("#history")
+        expect(history).to_contain_text("<img", timeout=5000)
+        expect(history).not_to_contain_text("ghp_")
+        assert history.locator("img").count() == 0
+        assert page.evaluate("window.historyXss") is None
+        page.get_by_label("Task history filter").select_option("FAILED")
+        expect(page.locator("#history-count")).to_have_text("1 tasks")
+        store.save_tasks((store.load_tasks()[0],))
+        expect(page.locator("#history-count")).to_have_text("0 tasks", timeout=5000)
+        expect(page.get_by_label("Task history filter")).to_have_value("FAILED")
+    finally:
+        page.close()

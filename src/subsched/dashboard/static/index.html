@@ -34,6 +34,17 @@
   <h2>Kanban</h2>
   <div id="kanban" class="kanban"></div>
 </div>
+<div class="card" style="margin-top: 1rem;">
+  <h2>Task History</h2>
+  <label for="history-filter">Task history filter</label>
+  <select id="history-filter">
+    <option value="all">All</option>
+    <option value="active">Active</option>
+    <option value="terminal">Terminal</option>
+  </select>
+  <p id="history-count"></p>
+  <div id="history"></div>
+</div>
 <div class="card" id="detail-card" style="display:none; margin-top: 1rem;">
   <h2>Task Detail</h2>
   <div id="detail-body"></div>
@@ -51,6 +62,64 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
   var detailRequest = 0;
   var detailAbort = null;
   var lastKanban = null;
+  var historyTasks = [];
+  var historyFilter = document.getElementById("history-filter");
+  historyFilter.onchange = renderHistory;
+
+  function isTerminal(task) {
+    return ["COMPLETE", "FAILED", "CANCELLED"].indexOf(task.status) !== -1;
+  }
+
+  function renderHistory() {
+    var filter = historyFilter.value;
+    var tasks = historyTasks.filter(function (task) {
+      return filter === "all" || (filter === "active" && !isTerminal(task)) ||
+        (filter === "terminal" && isTerminal(task)) || task.status === filter;
+    });
+    document.getElementById("history-count").textContent = tasks.length + " tasks";
+    var container = document.getElementById("history");
+    container.textContent = "";
+    tasks.forEach(function (task) {
+      var row = document.createElement("div");
+      var button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "View #" + task.issue_number + " " + task.title;
+      button.onclick = function () { loadDetail(task.issue_number); };
+      row.appendChild(button);
+      var summary = document.createElement("p");
+      summary.textContent = task.status + " | Updated: " + (task.updated_at || "—") +
+        " | Agent: " + (task.current_agent || "—") +
+        " | PR " + (task.pr != null ? "#" + task.pr : "—") +
+        " | CI: " + (task.ci_result || "—") +
+        " | Completion: " + (task.completion_kind || "—");
+      row.appendChild(summary);
+      container.appendChild(row);
+    });
+  }
+
+  function updateHistory(data) {
+    if (!data || !Array.isArray(data.tasks) || !data.tasks.every(function (task) {
+      return task && Number.isSafeInteger(task.issue_number) && task.issue_number > 0 &&
+        typeof task.title === "string" && typeof task.status === "string";
+    })) { throw { kind: "payload" }; }
+    historyTasks = data.tasks;
+    var selected = historyFilter.value;
+    var statuses = historyTasks.map(function (task) { return task.status; });
+    if (["all", "active", "terminal"].indexOf(selected) === -1) { statuses.push(selected); }
+    historyFilter.textContent = "";
+    ["all", "active", "terminal"].concat(statuses.filter(function (status, index) {
+      return statuses.indexOf(status) === index;
+    }).sort()).forEach(function (value) {
+      var option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      historyFilter.appendChild(option);
+    });
+    if (Array.from(historyFilter.options).some(function (option) { return option.value === selected; })) {
+      historyFilter.value = selected;
+    }
+    renderHistory();
+  }
 
   function withToken(path) {
     var sep = path.indexOf("?") === -1 ? "?" : "&";
@@ -241,7 +310,7 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
     fetchJson("/api/status").then(function (data) {
       var revision = renderStatus(data);
       if (revision !== null && revision !== lastRevision) {
-        return Promise.all([fetchJson("/api/capacity"), fetchJson("/api/metrics")])
+        return Promise.all([fetchJson("/api/capacity"), fetchJson("/api/metrics"), fetchJson("/api/tasks")])
           .then(function (results) {
             var capacity = results[0];
             var metrics = results[1] && results[1].metrics;
@@ -256,6 +325,7 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
                 productivity.issues_implemented < 0) {
               throw { kind: "payload" };
             }
+            updateHistory(results[2]);
             renderCapacity(results[0]);
             renderMetrics(results[1]);
             if (selectedIssue !== null) {
