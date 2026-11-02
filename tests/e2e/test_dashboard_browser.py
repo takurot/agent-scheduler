@@ -505,3 +505,62 @@ def test_history_preserves_empty_status_filter_and_redacts(
         expect(page.get_by_label("Task history filter")).to_have_value("FAILED")
     finally:
         page.close()
+
+
+@pytest.mark.parametrize("status", [TaskState.NEEDS_HUMAN, TaskState.READY_FOR_REVIEW])
+def test_detail_displays_diagnostics_safely(
+    browser: Browser, dashboard_url: str, tmp_path: Path, status: TaskState
+) -> None:
+    from dataclasses import replace
+
+    store = JsonStateStore(tmp_path)
+    store.save_tasks((replace(
+        store.load_tasks()[0], status=status, current_agent="codex", dispatch_stage="revision",
+        dispatch_model="example-model", dispatch_effort="high", pr=42, ci_result="PASS",
+        needs_human_reason_code="operator_decision_required",
+        needs_human_reason=('<img src=x onerror="window.detailXss=true"> '
+                            'ghp_123456789012345678901234567890'),
+        resolution_note="Check the required gate", attempt=3, verification_failures=2,
+        review_cycles=1, capacity_events=4, per_agent_failures=(("claude", 1),),
+    ),))
+    (store.handoffs_dir / "1.md").write_text("Triage handoff", encoding="utf-8")
+    page = browser.new_page()
+    try:
+        def detail(route: Route) -> None:
+            response = route.fetch()
+            data = response.json()
+            data["commit_log"] = ['abc1234 <img src=x onerror="window.detailXss=true">']
+            route.fulfill(response=response, json=data)
+
+        page.route("**/api/tasks/1?*", detail)
+        page.goto(dashboard_url)
+        page.get_by_text("#1 Task 1", exact=True).click(timeout=5000)
+        body = page.locator("#detail-body")
+        for text in [status.value, "codex", "revision", "example-model", "high", "PR: #42",
+                     "CI: PASS", "Completion: —", "operator_decision_required",
+                     "Check the required gate",
+                     "Attempts: 3", "Verification failures: 2", "Review cycles: 1",
+                     "Capacity events: 4", "claude: 1", "abc1234", "Triage handoff"]:
+            expect(body).to_contain_text(text)
+        expect(body).not_to_contain_text("ghp_")
+        assert body.locator("img").count() == 0
+        assert page.evaluate("window.detailXss") is None
+    finally:
+        page.close()
+
+
+def test_detail_handles_missing_diagnostics(
+    browser: Browser, dashboard_url: str
+) -> None:
+    page = browser.new_page()
+    try:
+        page.goto(dashboard_url)
+        page.get_by_text("#1 Task 1", exact=True).click(timeout=5000)
+        body = page.locator("#detail-body")
+        expect(body).to_contain_text("Model: provider-default")
+        expect(body).to_contain_text("(no recent commits)")
+        expect(body).to_contain_text("(no handoff)")
+        expect(body).not_to_contain_text("undefined")
+        expect(body).not_to_contain_text("null")
+    finally:
+        page.close()

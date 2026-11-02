@@ -3740,3 +3740,12 @@ the count reflects visible tasks. Each row shows issue/title, status, update tim
 PR, CI result, and merge completion separately. CI PASS alone is not merge completion.
 History refreshes when the state revision changes; the active Kanban and server-side
 redaction remain in effect. History buttons open the existing task detail.
+
+### Dashboard triage details (#462)
+
+Select a task to read its status, agent, dispatch stage/model/effort, PR, CI result,
+and merge completion independently. The same detail shows reason code/reason,
+resolution note, attempt/failure/review/capacity counters, recent commits, and handoff.
+Missing information is displayed as a dash or an explicit empty state; unset model and
+effort use `provider-default`. Values use text-only DOM rendering and existing API
+redaction. The dashboard remains read-only and does not expose raw provider output.
