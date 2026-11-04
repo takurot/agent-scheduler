@@ -3221,8 +3221,12 @@ Native Codex execution writes its default result and plan-review schemas to
 Repositories using clean-snapshot auditing must ignore `.ai/runtime/` in their committed
 `.gitignore` (as this repository does); host `.git/info/exclude` is not inherited.
 Explicit `codex_output_schema` overrides keep their configured location. Existing files
-at the legacy `.ai/` schema paths are preserved and remain subject to the committed
-ignore rules; relocation does not exempt legacy or unknown files from clean checks.
+at the two legacy `.ai/` schema paths are preserved. The audit clean check tolerates
+only untracked regular files at those exact paths with byte-for-byte canonical Scheduler
+schema contents, read through no-follow directory/file descriptors. Unknown contents,
+symlinks (including parent directories), and tracked schema changes are rejected; no
+legacy file is moved, overwritten or deleted. This permits stopped tasks to recover
+without manual evacuation or importing host ignore rules.
 Uncommitted candidate changes, unknown untracked files, unsafe symlink inputs and HEAD
 mismatches still fail closed. No host configuration or credentials are copied (issue #550).
 
