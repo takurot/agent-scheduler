@@ -673,3 +673,66 @@ def test_native_worker_rejects_schema_symlink_before_adapter(
     assert outside.read_text() == "canary"
     assert handoff.read_bytes() == original
     assert schema.is_symlink()
+
+
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("review", [False, True])
+@pytest.mark.parametrize("kind", ["symlink", "regular", "inplace"])
+def test_native_worker_rejects_temporary_schema_swap_before_adapter(
+    tmp_path: Path,
+    configured: bool,
+    review: bool,
+    kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    worktree = tmp_path / "task"
+    worktree.mkdir()
+    task = Task.from_issue(Issue(number=555, title="Schema source swap")).with_worktree(
+        str(worktree)
+    )
+    if review:
+        task = replace(task, status=TaskState.PLAN_REVIEW)
+    bootstrap_task_files(worktree, task)
+    handoff = worktree / ".ai/handoffs/555.md"
+    original_handoff = handoff.read_bytes()
+    outside = tmp_path / "outside"
+    outside.write_text("canary")
+    schema = (
+        tmp_path / "configured.json"
+        if configured
+        else worktree / ".ai" / (
+            "plan-review-output.schema.json" if review else "codex-output.schema.json"
+        )
+    )
+    original_replace = os.replace
+    swapped = False
+
+    def racing_replace(src: str, dst: str, **kwargs: object) -> None:
+        nonlocal swapped
+        if dst == schema.name:
+            source = schema.parent / src
+            if kind != "inplace":
+                source.unlink()
+            if kind == "symlink":
+                source.symlink_to(outside)
+            else:
+                source.write_text('{"attacker": true}')
+            swapped = True
+        original_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "replace", racing_replace)
+    adapter = MagicMock()
+    adapter.execute.return_value = AgentResult(AgentResultKind.PASS)
+    worker = NativeWorker(
+        codex_agent=adapter,
+        codex_output_schema=schema if configured else None,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+    )
+    result = worker.run(task, "codex")
+    assert swapped
+    assert result.kind is AgentResultKind.FAILURE
+    adapter.execute.assert_not_called()
+    assert outside.read_text() == "canary"
+    assert handoff.read_bytes() == original_handoff

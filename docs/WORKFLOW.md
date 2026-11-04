@@ -327,6 +327,13 @@ canary and tracked task file, and confirmed container cleanup. Run with the exis
 uv run pytest tests/integration/test_native_isolation_container.py -k schema_symlink -v
 ```
 
+Temporary-source substitution regressions also replace the source immediately before
+and after rename, including symlink, regular-file, FIFO, and in-place content changes.
+Require rejection before adapter execution for default and configured schema paths.
+Failed publication deliberately retains temporary entries; pathname-based cleanup cannot
+atomically prove that an entry still belongs to the writer. Inspect these artifacts only
+under the same no-follow boundary; do not blindly unlink them from a worker-writable path.
+
 A skip or mocked dispatch test is not live evidence. Independent bypass/compatibility
 review and the exact commit's CI/E2E results must also be checked before merge.
 

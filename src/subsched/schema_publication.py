@@ -11,7 +11,7 @@ from pathlib import Path
 _DIR_FD_SUPPORTED = (
     all(
         operation in os.supports_dir_fd
-        for operation in (os.open, os.mkdir, os.stat, os.rename, os.unlink)
+        for operation in (os.open, os.mkdir, os.stat, os.rename)
     )
     and os.stat in os.supports_follow_symlinks
 )
@@ -25,6 +25,9 @@ def publish_schema(path: Path, data: bytes) -> None:
     through a symlink. Recheck ancestor identities and the leaf before publication;
     rename replaces (never follows) a leaf swapped after that final check. Existing
     regular files are replaced rather than truncated, also protecting hardlink targets.
+    Retain the new file descriptor to verify source and published identity and bytes.
+    Failed temporary entries are preserved: unlinking an untrusted name cannot be
+    made conditional on inode identity, even with a preceding stat check.
     """
     if not _DIR_FD_SUPPORTED or any(
         not getattr(os, flag, 0) for flag in ("O_DIRECTORY", "O_NOFOLLOW")
@@ -68,20 +71,39 @@ def publish_schema(path: Path, data: bytes) -> None:
             temporary = f".schema-{secrets.token_hex(16)}.tmp"
             descriptor = os.open(
                 temporary,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                 0o600,
                 dir_fd=directory,
             )
-            try:
-                with os.fdopen(descriptor, "wb") as stream:
-                    stream.write(data)
-                    stream.flush()
-                    os.fsync(stream.fileno())
+            with os.fdopen(descriptor, "w+b", buffering=0) as stream:
+                pinned = os.fstat(descriptor)
+
+                def validate_identity(name: str) -> None:
+                    current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                    if not stat.S_ISREG(current.st_mode) or (
+                        current.st_dev, current.st_ino
+                    ) != (pinned.st_dev, pinned.st_ino):
+                        raise OSError("schema file changed during publication")
+
+                def validate_file(name: str) -> None:
+                    validate_identity(name)
+                    # Read only the retained inode, never a potentially substituted
+                    # pathname. Unbuffered reads detect in-place changes on recheck.
+                    stream.seek(0)
+                    if stream.read(len(data) + 1) != data:
+                        raise OSError("schema content changed during publication")
+                    validate_identity(name)
+
+                if stream.write(data) != len(data):
+                    raise OSError("incomplete schema write")
+                os.fsync(descriptor)
                 validate_destination()
+                validate_file(temporary)
                 os.replace(temporary, absolute.name, src_dir_fd=directory, dst_dir_fd=directory)
                 os.fsync(directory)
-            finally:
-                with suppress(FileNotFoundError):
-                    os.unlink(temporary, dir_fd=directory)
+                # Prechecks alone cannot close the rename source race. Detect a
+                # substitution inside rename before admitting provider execution.
+                validate_destination()
+                validate_file(absolute.name)
     except NotImplementedError as error:
         raise OSError("safe schema publication is unsupported on this platform") from error

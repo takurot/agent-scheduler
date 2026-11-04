@@ -185,7 +185,10 @@ def test_runtime_unsupported_operations_fail_closed(
             writer(leaf)
     assert not leaf.exists()
     if leaf.parent.exists():
-        assert list(leaf.parent.iterdir()) == []
+        remaining = list(leaf.parent.iterdir())
+        # No pathname-based error cleanup: a peer may replace any temporary name.
+        assert len(remaining) == (1 if operation == "replace" else 0)
+        assert all(entry.name.startswith(".schema-") for entry in remaining)
 
 
 @pytest.mark.parametrize("writer", WRITERS)
@@ -221,4 +224,92 @@ def test_leaf_swap_during_publication_does_not_follow_target(
         assert not leaf.is_symlink()
     assert swapped
     assert outside.read_text() == "canary"
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["outside", "schema.json"]
+    remaining = list(tmp_path.glob(".schema-*.tmp"))
+    assert len(remaining) == (1 if swap_at == "fsync" else 0)
+    assert sorted(p.name for p in tmp_path.iterdir() if p not in remaining) == [
+        "outside", "schema.json"
+    ]
+
+
+@pytest.mark.parametrize("writer", WRITERS)
+@pytest.mark.parametrize("kind", ["symlink", "regular", "fifo", "inplace"])
+@pytest.mark.parametrize("when", ["fsync", "replace", "after_replace"])
+def test_temporary_source_substitution_fails_closed(
+    tmp_path: Path,
+    writer: Any,
+    kind: str,
+    when: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.write_text("canary")
+    leaf = tmp_path / "schema.json"
+    leaf.write_text("old schema")
+    original_fsync = os.fsync
+    original_replace = os.replace
+    swapped = False
+    temporary: Path | None = None
+
+    def swap(source: Path) -> None:
+        nonlocal swapped, temporary
+        temporary = source
+        if kind == "inplace":
+            source.write_bytes(b'{"attacker": true}')
+        else:
+            source.unlink()
+            if kind == "symlink":
+                source.symlink_to(outside)
+            elif kind == "fifo":
+                os.mkfifo(source)
+            else:
+                source.write_bytes(b'{"attacker": true}')
+        swapped = True
+
+    def racing_fsync(fd: int) -> None:
+        original_fsync(fd)
+        if when == "fsync" and not swapped:
+            swap(next(tmp_path.glob(".schema-*.tmp")))
+
+    def racing_replace(src: str, dst: str, **kwargs: Any) -> None:
+        if when == "replace":
+            swap(tmp_path / src)
+        original_replace(src, dst, **kwargs)
+        if when == "after_replace":
+            swap(leaf)
+
+    monkeypatch.setattr(os, "fsync", racing_fsync)
+    monkeypatch.setattr(os, "replace", racing_replace)
+    with pytest.raises(OSError):
+        writer(leaf)
+    assert swapped
+    assert outside.read_text() == "canary"
+    if when == "fsync":
+        assert leaf.read_text() == "old schema"
+    # Failure must preserve a substituted source; do not unlink an untrusted name.
+    assert temporary is not None
+    replacement = temporary if when == "fsync" else leaf
+    assert replacement.lstat()
+    if kind == "symlink":
+        assert replacement.is_symlink()
+    elif kind != "fifo":
+        assert replacement.read_bytes() == b'{"attacker": true}'
+
+
+@pytest.mark.parametrize("writer", WRITERS)
+def test_failed_replace_preserves_replacement_temporary_entry(
+    tmp_path: Path, writer: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replacement: Path | None = None
+
+    def failing_replace(src: str, dst: str, **kwargs: Any) -> None:
+        nonlocal replacement
+        replacement = tmp_path / src
+        replacement.unlink()
+        replacement.write_text("peer entry")
+        raise OSError("synthetic publication failure")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(OSError):
+        writer(tmp_path / "schema.json")
+    assert replacement is not None
+    assert replacement.read_text() == "peer entry"

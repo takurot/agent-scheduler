@@ -3141,10 +3141,18 @@ those pinned descriptors. Parent identities and the regular-file-or-missing leaf
 checked before writing and again before atomic replacement. Symlinks (including
 dangling links), nonregular leaves, parent traversal, and unavailable primitives fail
 closed before provider execution. No existing target content is read or truncated;
-replacement also preserves external hardlink contents. All temporary-file creation,
-replacement, and cleanup use the pinned parent. A leaf swapped after the last check
-is replaced by rename rather than followed. Canonical JSON bytes, helper return values,
-configured paths, and schema argv remain unchanged.
+replacement also preserves external hardlink contents. Temporary-file creation and
+replacement use the pinned parent. The temporary descriptor stays open through rename;
+source and published identities must match that inode, and bounded, unbuffered readback
+from the descriptor must match canonical bytes before and after rename. This detects
+source substitution during rename and in-place content changes before provider admission,
+without opening a substituted pathname (including a symlink or FIFO) for reading.
+A leaf swapped after the last precheck is replaced by rename rather than followed.
+Failure closes descriptors but retains temporary entries: a stat-then-unlink cleanup
+could delete a peer's replacement. Successful publication consumes the temporary entry.
+These checks do not make a worker-writable schema immutable after the helper returns.
+Canonical JSON bytes, helper return values, configured paths, and schema argv remain
+unchanged.
 
 ### Network and process enforcement
 
