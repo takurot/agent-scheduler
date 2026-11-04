@@ -330,12 +330,12 @@ class NativeWorker:
                 )
             if is_plan_review:
                 schema_path = self.codex_output_schema or (
-                    worktree_path / ".ai" / "plan-review-output.schema.json"
+                    worktree_path / ".ai" / "runtime" / "plan-review-output.schema.json"
                 )
                 ensure_plan_review_output_schema(schema_path)
             else:
                 schema_path = self.codex_output_schema or (
-                    worktree_path / ".ai" / "codex-output.schema.json"
+                    worktree_path / ".ai" / "runtime" / "codex-output.schema.json"
                 )
                 ensure_codex_output_schema(schema_path)
             # #314: Codex's own OS-level sandbox conflicts with the outer container

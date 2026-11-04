@@ -148,6 +148,8 @@ def worktree_touched_unexpected_paths(
     scaffold_paths = {
         ".ai/codex-output.schema.json",
         ".ai/plan-review-output.schema.json",
+        ".ai/runtime/codex-output.schema.json",
+        ".ai/runtime/plan-review-output.schema.json",
         f".ai/tasks/{issue_number}.md",
         f".ai/handoffs/{issue_number}.md",
         f".ai/checkpoints/{issue_number}.json",
