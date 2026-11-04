@@ -631,3 +631,45 @@ def test_native_worker_plan_review_claude_passes_flag(tmp_path: Path) -> None:
 
     req = mock_claude.execute.call_args[0][0]
     assert req.plan_review is True
+
+
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("review", [False, True])
+def test_native_worker_rejects_schema_symlink_before_adapter(
+    tmp_path: Path,
+    configured: bool,
+    review: bool,
+) -> None:
+    from dataclasses import replace
+
+    worktree = tmp_path / "task"
+    worktree.mkdir()
+    task = Task.from_issue(Issue(number=555, title="Schema boundary")).with_worktree(str(worktree))
+    if review:
+        task = replace(task, status=TaskState.PLAN_REVIEW)
+    bootstrap_task_files(worktree, task)
+    handoff = worktree / ".ai/handoffs/555.md"
+    original = handoff.read_bytes()
+    outside = tmp_path / "outside"
+    outside.write_text("canary")
+    schema = (
+        (tmp_path / "configured.json")
+        if configured
+        else worktree
+        / ".ai"
+        / ("plan-review-output.schema.json" if review else "codex-output.schema.json")
+    )
+    schema.symlink_to(outside)
+    adapter = MagicMock()
+    adapter.execute.return_value = AgentResult(AgentResultKind.PASS)
+    worker = NativeWorker(
+        codex_agent=adapter,
+        codex_output_schema=schema if configured else None,
+        codex_approval_mode=CodexApprovalMode.APPROVE_FOR_ME,
+    )
+    result = worker.run(task, "codex")
+    assert result.kind is AgentResultKind.FAILURE
+    adapter.execute.assert_not_called()
+    assert outside.read_text() == "canary"
+    assert handoff.read_bytes() == original
+    assert schema.is_symlink()

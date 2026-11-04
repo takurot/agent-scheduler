@@ -3131,6 +3131,21 @@ stores outside all worker mounts. The write tier excludes merge, Actions, releas
 and deployment authority. Do not include authentication values in argv, diagnostics,
 logs, checkpoints, handoffs, or test fixtures.
 
+### Host schema publication (issue #555)
+
+Codex result and plan-review schemas share a no-follow publication boundary, including
+operator-configured `NativeWorker(codex_output_schema=...)` paths outside the task.
+Every parent component is opened from the filesystem root with directory/no-follow
+flags and retained through publication; missing directories are created relative to
+those pinned descriptors. Parent identities and the regular-file-or-missing leaf are
+checked before writing and again before atomic replacement. Symlinks (including
+dangling links), nonregular leaves, parent traversal, and unavailable primitives fail
+closed before provider execution. No existing target content is read or truncated;
+replacement also preserves external hardlink contents. All temporary-file creation,
+replacement, and cleanup use the pinned parent. A leaf swapped after the last check
+is replaced by rename rather than followed. Canonical JSON bytes, helper return values,
+configured paths, and schema argv remain unchanged.
+
 ### Network and process enforcement
 
 Enforce default-deny egress with a Docker internal network. Before every dispatch the

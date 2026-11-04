@@ -31,7 +31,7 @@ def test_missing_images_fail_before_docker_is_called(tmp_path: Path) -> None:
     assert not (tmp_path / "report.json").exists()
 
 
-def test_warning_summary_with_four_passing_junit_cases_succeeds(tmp_path: Path) -> None:
+def test_warning_summary_with_six_passing_junit_cases_succeeds(tmp_path: Path) -> None:
     from test_live_isolation_results import TESTS
 
     image = "test/image@sha256:" + "a" * 64
@@ -41,7 +41,7 @@ def test_warning_summary_with_four_passing_junit_cases_succeeds(tmp_path: Path) 
         for name in TESTS
     )
     xml.write_text(
-        f'<testsuite tests="4" failures="0" errors="0" skipped="0">{cases}</testsuite>',
+        f'<testsuite tests="6" failures="0" errors="0" skipped="0">{cases}</testsuite>',
         encoding="utf-8",
     )
     docker = tmp_path / "docker"
@@ -65,7 +65,7 @@ def test_warning_summary_with_four_passing_junit_cases_succeeds(tmp_path: Path) 
         'for arg in "$@"; do\n'
         '  case "$arg" in --junitxml=*) cp "$TEST_XML" "${arg#--junitxml=}" ;; esac\n'
         "done\n"
-        'echo "4 passed, 1 warning in 0.10s"\n',
+        'echo "6 passed, 1 warning in 0.10s"\n',
         encoding="utf-8",
     )
     uv.chmod(0o755)
@@ -82,5 +82,5 @@ def test_warning_summary_with_four_passing_junit_cases_succeeds(tmp_path: Path) 
         ["bash", str(SCRIPT)], capture_output=True, text=True, env=env, timeout=10
     )
     assert result.returncode == 0, result.stderr
-    assert "4 passed, 1 warning" in result.stdout
+    assert "6 passed, 1 warning" in result.stdout
     assert json.loads(report.read_text(encoding="utf-8"))["result"] == "passed"

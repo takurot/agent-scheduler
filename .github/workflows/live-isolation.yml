@@ -19,7 +19,7 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.12"
-      - name: Run all four real Docker isolation tests
+      - name: Run all six real Docker isolation tests
         env:
           SUBSCHED_ISOLATION_WORKER_IMAGE: ${{ vars.SUBSCHED_ISOLATION_WORKER_IMAGE }}
           SUBSCHED_ISOLATION_PROXY_IMAGE: ${{ vars.SUBSCHED_ISOLATION_PROXY_IMAGE }}

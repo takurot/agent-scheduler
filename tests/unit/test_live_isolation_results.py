@@ -14,6 +14,8 @@ TESTS = (
     "test_real_container_timeout_cleanup_kills_descendants",
     "test_real_container_cannot_rewrite_linked_worktree_git_pointer",
     "test_real_container_reproduces_and_resolves_codex_bwrap_sandbox_conflict",
+    "test_real_container_schema_symlink_is_rejected_on_next_host_generation[False]",
+    "test_real_container_schema_symlink_is_rejected_on_next_host_generation[True]",
 )
 
 
@@ -26,6 +28,8 @@ TESTS = (
         ("failure", 1),
         ("error", 1),
         ("missing", 1),
+        ("old_four", 1),
+        ("schema_skipped", 1),
         ("duplicate", 1),
         ("wrong_class", 1),
         ("bad_xml", 1),
@@ -34,7 +38,7 @@ TESTS = (
 )
 def test_classifies_required_junit_results(tmp_path: Path, problem: str, expected: int) -> None:
     result_file = tmp_path / "results.xml"
-    suite = ET.Element("testsuite", tests="4", failures="0", errors="0", skipped="0")
+    suite = ET.Element("testsuite", tests=str(len(TESTS)), failures="0", errors="0", skipped="0")
     for name in TESTS:
         ET.SubElement(
             suite,
@@ -47,6 +51,12 @@ def test_classifies_required_junit_results(tmp_path: Path, problem: str, expecte
         ET.SubElement(cases[0], problem)
     elif problem == "warning":
         ET.SubElement(cases[0], "system-err").text = "1 warning"
+    elif problem == "schema_skipped":
+        ET.SubElement(cases[-1], "skipped")
+    elif problem == "old_four":
+        for case in cases[-2:]:
+            suite.remove(case)
+        suite.set("tests", "4")
     elif problem == "missing":
         suite.remove(cases[0])
     elif problem == "duplicate":

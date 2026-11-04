@@ -18,6 +18,7 @@ from typing import Any
 from subsched.agents.base import ProcessExecutionRequest
 from subsched.agents.process import COMMON_ENV_ALLOWLIST, filter_environment, run_process_group
 from subsched.models import NEEDS_HUMAN_REASON_CODES, AgentResult, AgentResultKind
+from subsched.schema_publication import publish_schema
 from subsched.structured_logger import is_valid_agent_summary, sanitize_agent_summary
 
 
@@ -281,9 +282,7 @@ SUPPORTED_CODEX_ITEM_TYPES = frozenset(
 def ensure_codex_output_schema(path: Path) -> Path:
     """Ensure the standard Codex output schema file exists at path."""
     content = json.dumps(CODEX_OUTPUT_SCHEMA, indent=2) + "\n"
-    if not path.is_file() or path.read_text(encoding="utf-8") != content:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+    publish_schema(path, content.encode("utf-8"))
     return path
 
 
