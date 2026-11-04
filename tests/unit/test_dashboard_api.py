@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 from subsched.dashboard import api
 from subsched.models import Capacity, CapacityState, Task, TaskState
@@ -103,6 +106,70 @@ def test_read_handoff_safely_returns_none_when_missing(tmp_path: Path) -> None:
     store.init_directories()
 
     assert api._read_handoff_safely(tmp_path, 42) is None
+
+
+@pytest.mark.parametrize("component", [".ai", "handoffs", "1.md"])
+@pytest.mark.parametrize("swap_after_open", [False, True])
+def test_read_handoff_pins_components(tmp_path: Path, monkeypatch, component, swap_after_open):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    store = JsonStateStore(repository)
+    store.init_directories()
+    (store.handoffs_dir / "1.md").write_text("safe handoff", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "handoffs").mkdir()
+    for directory in (outside, outside / "handoffs"):
+        (directory / "1.md").write_text("OUTSIDE_HANDOFF_CANARY", encoding="utf-8")
+    target = {
+        ".ai": repository / ".ai",
+        "handoffs": store.handoffs_dir,
+        "1.md": store.handoffs_dir / "1.md",
+    }[component]
+    original_open = os.open
+    swapped = False
+
+    def swap():
+        nonlocal swapped
+        target.rename(target.with_name(target.name + ".saved"))
+        target.symlink_to(outside / "1.md" if component == "1.md" else outside)
+        swapped = True
+
+    def racing_open(path, flags, *args, **kwargs):
+        matches = path == component and not swapped
+        if matches and not swap_after_open:
+            swap()
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if matches and swap_after_open:
+            swap()
+        return descriptor
+
+    monkeypatch.setattr(api.os, "open", racing_open)
+    result = api._read_handoff_safely(repository, 1)
+    assert swapped
+    assert result == ("safe handoff" if swap_after_open else None)
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo", "invalid_utf8"])
+def test_read_handoff_rejects_non_documents(tmp_path: Path, kind: str):
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    path = store.handoffs_dir / "1.md"
+    if kind == "directory":
+        path.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        path.write_bytes(b"\xff")
+    assert api._read_handoff_safely(tmp_path, 1) is None
+
+
+def test_read_handoff_fails_closed_without_nofollow(tmp_path: Path, monkeypatch):
+    store = JsonStateStore(tmp_path)
+    store.init_directories()
+    (store.handoffs_dir / "1.md").write_text("safe handoff", encoding="utf-8")
+    monkeypatch.delattr(api.os, "O_NOFOLLOW")
+    assert api._read_handoff_safely(tmp_path, 1) is None
 
 
 def test_read_commit_log_returns_none_without_worktree() -> None:

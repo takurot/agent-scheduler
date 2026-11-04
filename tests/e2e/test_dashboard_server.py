@@ -132,6 +132,40 @@ def test_task_detail_valid_issue_returns_handoff(dashboard) -> None:
     assert "handoff body" in payload["handoff"]
 
 
+@pytest.mark.parametrize("component", [".ai", "handoffs", "1.md", "regular"])
+def test_task_detail_handoff_boundaries(dashboard, tmp_path: Path, capsys, caplog, component: str):
+    server, token = dashboard
+    repository = server.dashboard_repository
+    handoff = repository / ".ai" / "handoffs" / "1.md"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    canary = "OUTSIDE_HANDOFF_CANARY"
+    (outside / "1.md").write_text(canary, encoding="utf-8")
+    if component == "regular":
+        handoff.write_text("handoff body github_pat_secretsecretsecret", encoding="utf-8")
+    else:
+        target = {".ai": repository / ".ai", "handoffs": handoff.parent, "1.md": handoff}[component]
+        target.rename(target.with_name(target.name + ".saved"))
+        target.symlink_to(outside / "1.md" if component == "1.md" else outside)
+
+    status, unauthorized, _ = _get(server, "/api/tasks/1", None)
+    assert status == 403
+    status, payload, headers = _get(server, "/api/tasks/1", token)
+    assert status == 200
+    assert "Content-Security-Policy" in headers
+    if component == ".ai":
+        assert payload == {"error": "state_corrupted"}
+    elif component == "regular":
+        assert "handoff body" in payload["handoff"]
+        assert "[REDACTED]" in payload["handoff"]
+        assert "github_pat_secretsecretsecret" not in payload["handoff"]
+    else:
+        assert payload["handoff"] is None
+    assert canary not in json.dumps([payload, unauthorized])
+    captured = capsys.readouterr()
+    assert canary not in captured.out + captured.err + caplog.text
+
+
 def test_task_detail_unknown_issue_returns_404(dashboard) -> None:
     server, token = dashboard
     status, _, _ = _get(server, "/api/tasks/999", token)
