@@ -3692,8 +3692,10 @@ SPA（`src/subsched/dashboard/static/index.html`、Vanilla JS + インラインC
   上方向探索は65535までとし、候補がなければ起動失敗として診断する。
 - **パストラバーサル対策**: `GET /api/tasks/{issue}`の`{issue}`は正規表現
   `^[1-9]\d*$`のみを受理する。ハンドオフファイル読み込み（`api._read_handoff_safely`）
-  はシンボリックリンクを拒否し、`os.path.commonpath`で解決後のパスが
-  `.ai/handoffs`配下であることを検証する。
+  はrepositoryまでの親要素、`.ai`、`handoffs`、文書のsymlinkを拒否する。
+  no-followのdirectory/file descriptorを固定し、読取までのpath差し替えで
+  境界外を参照しない。通常ファイルだけをUTF-8で読み、安全な読取を提供できない
+  platformや不正・欠落文書では`handoff: null`を返す（`.ai`不正は下記のstate error）。
 - **セキュリティヘッダー**: 全レスポンス（エラー含む）に`Content-Security-Policy`、
   `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、
   `Referrer-Policy: no-referrer`、`Cache-Control: no-store`を付与する。

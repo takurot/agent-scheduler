@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,7 @@ from subsched.structured_logger import redact_sensitive_text
 # Tasks in any state other than these are considered "active" for the dashboard's
 # at-a-glance summary -- everything still in flight or blocked on an operator.
 _TERMINAL_STATES = frozenset({TaskState.COMPLETE, TaskState.FAILED, TaskState.CANCELLED})
+_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
 
 
 def _redact(value: Any) -> Any:
@@ -53,20 +56,33 @@ def build_tasks(snapshot: SchedulerStateSnapshot) -> dict[str, Any]:
 
 
 def _read_handoff_safely(repository: Path, issue: int) -> str | None:
-    """Read `.ai/handoffs/{issue}.md`, refusing a symlinked handoff file or one whose
-    resolved path escapes the handoffs directory (fail-closed against path traversal,
-    mirroring `storage.py`'s symlink/commonpath checks).
-    """
-    handoffs_dir = (repository / ".ai" / "handoffs").resolve()
-    handoff_path = handoffs_dir / f"{issue}.md"
-    if handoff_path.is_symlink() or not handoff_path.is_file():
+    """Pin every directory and read only a regular, non-symlinked handoff."""
+    if not _OPEN_SUPPORTS_DIR_FD or any(
+        not hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")
+    ):
         return None
-    resolved = handoff_path.resolve()
-    if os.path.commonpath([str(resolved), str(handoffs_dir)]) != str(handoffs_dir):
+    repository = repository.absolute()
+    if ".." in repository.parts:
         return None
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
-        return handoff_path.read_text(encoding="utf-8")
-    except OSError:
+        with ExitStack() as handles:
+            directory = os.open(repository.anchor, flags)
+            handles.callback(os.close, directory)
+            for component in (*repository.parts[1:], ".ai", "handoffs"):
+                directory = os.open(component, flags, dir_fd=directory)
+                handles.callback(os.close, directory)
+            descriptor = os.open(
+                f"{issue}.md",
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=directory,
+            )
+            handles.callback(os.close, descriptor)
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return None
+            with os.fdopen(descriptor, encoding="utf-8", closefd=False) as handoff:
+                return handoff.read()
+    except (OSError, UnicodeError, NotImplementedError):
         return None
 
 
