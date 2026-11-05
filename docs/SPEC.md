@@ -3598,6 +3598,16 @@ existing recovery rules; dry-run does not mutate them.
 
 ## 4. 排他ロックとデータ完全性
 
+Known MCP input refusals use the SDK's public tool-error type with `is_error=true`
+and fixed text diagnostics (issue #541). Native dispatch without billing confirmation
+returns `subscription_billing_unverified`; invalid queue configuration or selection,
+including missing `verification.required_commands`, returns `invalid_queue_configuration`.
+Only these classified validation errors are translated; arbitrary `McpToolError` and
+unexpected exceptions retain SDK masking. Public diagnostics contain no raw exception
+text, configuration values, provider output, credentials, or host paths. Validation
+still fails before GitHub discovery, worker launch, or scheduler state mutation;
+subscription/native opt-in and stdio protocol isolation are unchanged.
+
 状態を変更するすべてのMCPツール操作は、既存の `JsonStateStore.lock()` 排他ロックを取得して実行され、
 CLIとの並行実行時にも競合やデータ破損を完全に防止する。
 

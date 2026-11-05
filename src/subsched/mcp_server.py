@@ -20,6 +20,7 @@ import os
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import cache
@@ -115,6 +116,18 @@ REPOSITORY_PATH_DESCRIPTION = (
 
 class McpToolError(RuntimeError):
     """Raised by an MCP tool when a request cannot be safely fulfilled."""
+
+
+class _McpValidationError(McpToolError):
+    """Known input refusal with a fixed, safe public diagnostic."""
+
+    def __init__(
+        self,
+        message: str,
+        reason_code: Literal["subscription_billing_unverified", "invalid_queue_configuration"],
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 def resolve_repository(repository_path: str | None) -> Path:
@@ -327,7 +340,9 @@ def queue_issues(
         cfg = load_config(config_path)
         intent = resolve_intent(cfg=cfg, query=None, repo=None, label=label, issues=issues)
     except (ConfigError, typer.BadParameter) as error:
-        raise McpToolError(f"invalid queue configuration or selection: {error}") from error
+        raise _McpValidationError(
+            f"invalid queue configuration or selection: {error}", "invalid_queue_configuration"
+        ) from error
     try:
         discovered = discover_selected_issues(intent, GitHubIssueSource())
     except GitHubCliError as error:
@@ -426,9 +441,10 @@ def trigger_dispatch(
     """
     repository = resolve_repository(repository_path)
     if allow_native and not subscription_billing_verified:
-        raise McpToolError(
+        raise _McpValidationError(
             "native execution requires subscription_billing_verified=True; refusing "
-            "to dispatch unverified billing"
+            "to dispatch unverified billing",
+            "subscription_billing_unverified",
         )
     _github_repo(repository)
 
@@ -741,8 +757,10 @@ def build_server(options: ServerOptions) -> Any:
     """
     try:
         from mcp.server.mcpserver import MCPServer as FastMCP  # mcp>=2
+        from mcp.server.mcpserver.exceptions import ToolError
     except ModuleNotFoundError:  # pragma: no cover -- mcp<2 fallback
         from mcp.server.fastmcp import FastMCP  # type: ignore[attr-defined,no-redef]
+        from mcp.server.fastmcp.exceptions import ToolError  # type: ignore[import-not-found,no-redef]
     from pydantic import Field
 
     default_repository = str(options.default_repository)
@@ -750,6 +768,23 @@ def build_server(options: ServerOptions) -> Any:
 
     def _default(repository_path: str | None) -> str | None:
         return repository_path if repository_path is not None else default_repository
+
+    def _validated_call(function: Callable[..., dict[str, Any]], *args: Any) -> dict[str, Any]:
+        try:
+            return function(*args)
+        except _McpValidationError as error:
+            # Never expose exception text: config errors can contain arbitrary values.
+            messages = {
+                "subscription_billing_unverified": (
+                    "Native execution requires subscription_billing_verified=True; "
+                    "refusing to dispatch unverified billing."
+                ),
+                "invalid_queue_configuration": (
+                    "Check subsched.yaml (including verification.required_commands) "
+                    "and the issue selection; queue configuration or selection is invalid."
+                ),
+            }
+            raise ToolError(f"{error.reason_code}: {messages[error.reason_code]}") from None
 
     @server.tool(
         name="subsched_get_status",
@@ -829,7 +864,7 @@ def build_server(options: ServerOptions) -> Any:
         ),
         repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
     ) -> dict[str, Any]:
-        return queue_issues(_default(repository_path), issues, label, dry_run)
+        return _validated_call(queue_issues, _default(repository_path), issues, label, dry_run)
 
     @server.tool(
         name="subsched_trigger_dispatch",
@@ -864,8 +899,9 @@ def build_server(options: ServerOptions) -> Any:
         ),
         repository_path: str | None = Field(default=None, description=REPOSITORY_PATH_DESCRIPTION),
     ) -> dict[str, Any]:
-        return trigger_dispatch(
-            _default(repository_path), issues, allow_native, subscription_billing_verified
+        return _validated_call(
+            trigger_dispatch, _default(repository_path), issues, allow_native,
+            subscription_billing_verified,
         )
 
     @server.tool(

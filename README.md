@@ -375,6 +375,13 @@ for `starting`, `running`, `succeeded`, `failed`, or `stale`. Failure reasons ar
 fixed codes and include no raw provider output. Each run has a private 0600
 lifecycle log under `.ai/runtime/dispatch-runs/`.
 
+MCP validation refusals return `is_error=true` with fixed reason codes in text content:
+`subscription_billing_unverified` requires explicit subscription billing confirmation
+before native dispatch; `invalid_queue_configuration` requires checking `subsched.yaml`
+(including `verification.required_commands`) and issue selection. Raw configuration
+values and unexpected exception details remain private. These refusals do not launch
+workers or change scheduler state.
+
 `subsched_queue_issues` requires a valid, regular repository-root `subsched.yaml`.
 Selection precedence is explicit `issues` > explicit `label` > configured
 `github.mode`: `label` requires every `include_labels` entry (AND), `list` uses
