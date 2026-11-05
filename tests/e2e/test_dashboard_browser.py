@@ -564,3 +564,55 @@ def test_detail_handles_missing_diagnostics(
         expect(body).not_to_contain_text("null")
     finally:
         page.close()
+
+
+@pytest.mark.parametrize("viewport", [(1440, 1000), (390, 844)])
+@pytest.mark.parametrize("activation", ["mouse", "Enter", "Space"])
+@pytest.mark.parametrize("source", ["kanban", "history"])
+def test_explicit_selection_reveals_detail_without_background_navigation(
+    browser: Browser, dashboard_url: str, tmp_path: Path,
+    viewport: tuple[int, int], activation: str, source: str,
+) -> None:
+    store = JsonStateStore(tmp_path)
+    tasks = tuple(Task(
+        task_id=f"github-{issue}", issue_number=issue, title=f"Task {issue}",
+        labels=(), status=status,
+    ) for issue, status in enumerate(TaskState, start=1))
+    assert len(tasks) >= 21
+    store.save_tasks(tasks)
+    selected = next(task for task in tasks if task.status == (
+        TaskState.COMPLETE if source == "history" else TaskState.IN_PROGRESS
+    ))
+    handoff = store.handoffs_dir / f"{selected.issue_number}.md"
+    handoff.write_text("first handoff", encoding="utf-8")
+    page = browser.new_page(viewport={"width": viewport[0], "height": viewport[1]})
+    try:
+        page.goto(dashboard_url)
+        expect(page.locator("#history-count")).to_have_text(f"{len(tasks)} tasks")
+        button = page.locator(f"#{source}").get_by_role(
+            "button", name=("View " if source == "history" else "") +
+            f"#{selected.issue_number} {selected.title}", exact=True,
+        )
+        heading = page.locator("#detail-card h2")
+        # Reselecting the same task must also reveal its detail.
+        for _ in range(2):
+            if activation == "mouse":
+                button.click()
+            else:
+                button.focus()
+                button.press(activation)
+            expect(page.locator("#detail-body")).to_contain_text("first handoff")
+            expect(heading).to_be_in_viewport()
+            expect(heading).to_be_focused()
+
+        # A revision refreshes detail content without navigating away from history.
+        page.locator("#history-filter").focus()
+        page.evaluate("window.scrollTo(0, 0)")
+        position = page.evaluate("window.scrollY")
+        handoff.write_text("updated handoff", encoding="utf-8")
+        store.set_paused(True)
+        expect(page.locator("#detail-body")).to_contain_text("updated handoff")
+        expect(page.locator("#history-filter")).to_be_focused()
+        assert page.evaluate("window.scrollY") == position
+    finally:
+        page.close()
