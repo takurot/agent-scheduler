@@ -657,8 +657,10 @@ def test_native_worker_rejects_schema_symlink_before_adapter(
         if configured
         else worktree
         / ".ai"
+        / "runtime"
         / ("plan-review-output.schema.json" if review else "codex-output.schema.json")
     )
+    schema.parent.mkdir(parents=True, exist_ok=True)
     schema.symlink_to(outside)
     adapter = MagicMock()
     adapter.execute.return_value = AgentResult(AgentResultKind.PASS)
@@ -702,7 +704,7 @@ def test_native_worker_rejects_temporary_schema_swap_before_adapter(
     schema = (
         tmp_path / "configured.json"
         if configured
-        else worktree / ".ai" / (
+        else worktree / ".ai" / "runtime" / (
             "plan-review-output.schema.json" if review else "codex-output.schema.json"
         )
     )

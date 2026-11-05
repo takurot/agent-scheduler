@@ -382,6 +382,7 @@ def test_real_container_schema_symlink_is_rejected_on_next_host_generation(
     leaf = (
         worktree
         / ".ai"
+        / "runtime"
         / ("plan-review-output.schema.json" if review else "codex-output.schema.json")
     )
     git_context = prepare_isolated_git(worktree, tmp_path / "schema-state", "github-555")
@@ -390,7 +391,7 @@ def test_real_container_schema_symlink_is_rejected_on_next_host_generation(
         argv=(
             "/bin/sh",
             "-ceu",
-            'mkdir -p .ai; ln -s "$1" "$2"; test -L "$2"; test ! -e "$1"',
+            'mkdir -p .ai/runtime; ln -s "$1" "$2"; test -L "$2"; test ! -e "$1"',
             "schema-boundary-test",
             str(canary),
             str(leaf),
