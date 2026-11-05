@@ -3756,6 +3756,11 @@ the count reflects visible tasks. Each row shows issue/title, status, update tim
 PR, CI result, and merge completion separately. CI PASS alone is not merge completion.
 History refreshes when the state revision changes; the active Kanban and server-side
 redaction remain in effect. History buttons open the existing task detail.
+Tab focuses history buttons; Enter/Space opens their detail. On revision updates,
+focus follows the same issue while it remains in the current filter, including after
+title, status, order, or count changes. If the focused issue disappears or leaves the
+filter, focus returns to the history filter, including when no rows remain. Background
+updates do not move focus into history from elsewhere on the page.
 
 ### Dashboard triage details (#462)
 
