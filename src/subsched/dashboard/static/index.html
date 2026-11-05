@@ -46,7 +46,7 @@
   <div id="history"></div>
 </div>
 <div class="card" id="detail-card" style="display:none; margin-top: 1rem;">
-  <h2>Task Detail</h2>
+  <h2 id="detail-heading" tabindex="-1">Task Detail</h2>
   <div id="detail-body"></div>
 </div>
 
@@ -84,7 +84,7 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
       var button = document.createElement("button");
       button.type = "button";
       button.textContent = "View #" + task.issue_number + " " + task.title;
-      button.onclick = function () { loadDetail(task.issue_number); };
+      button.onclick = function () { loadDetail(task.issue_number, true); };
       row.appendChild(button);
       var summary = document.createElement("p");
       summary.textContent = task.status + " | Updated: " + (task.updated_at || "—") +
@@ -234,7 +234,7 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
         chip.className = "task-chip";
         chip.dataset.issue = String(task.issue_number);
         chip.textContent = "#" + task.issue_number + " " + task.title;
-        chip.onclick = function () { loadDetail(task.issue_number); };
+        chip.onclick = function () { loadDetail(task.issue_number, true); };
         if (chip.dataset.issue === focusedIssue) { focusTarget = chip; }
         column.appendChild(chip);
       });
@@ -311,13 +311,17 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
     body.appendChild(handoffHeading);
   }
 
-  function loadDetail(issue) {
+  function loadDetail(issue, reveal) {
     var card = document.getElementById("detail-card");
     var body = document.getElementById("detail-body");
     if (selectedIssue !== issue) {
       selectedIssue = issue;
       card.style.display = "block";
       body.textContent = "Loading task #" + issue + "…";
+    }
+    if (reveal) {
+      document.getElementById("detail-heading").focus({ preventScroll: true });
+      card.scrollIntoView({ block: "start" });
     }
     var request = ++detailRequest;
     if (detailAbort !== null) { detailAbort.abort(); }

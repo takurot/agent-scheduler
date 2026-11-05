@@ -3732,6 +3732,9 @@ SPA（`src/subsched/dashboard/static/index.html`、Vanilla JS + インラインC
 
 選択中のtask detailはrevision変化時に再取得する。taskが消失した場合や取得に失敗した
 場合は古い詳細を消して利用不可と表示し、遅い旧responseで別taskの選択を上書きしない。
+Kanbanまたは履歴から明示選択した場合（同じtaskの再選択を含む）は、Task Detailへ
+scrollし、その見出しへfocusを移して、長い履歴の下でも詳細に到達できるようにする。
+revisionによる背景の詳細更新ではscroll位置とfocusを移動しない。
 handoffファイルだけの更新はstate revisionを進めないため、次のstate更新またはtaskの
 再選択時に反映する。
 Kanbanのtaskは表示名をaccessible nameとするnative buttonとし、Tabでの移動と
