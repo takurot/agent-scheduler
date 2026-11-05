@@ -78,13 +78,19 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
     });
     document.getElementById("history-count").textContent = tasks.length + " tasks";
     var container = document.getElementById("history");
+    var active = document.activeElement;
+    var focusedIssue = active && container.contains(active) && active.tagName === "BUTTON"
+      ? active.dataset.issue : null;
+    var focusTarget = null;
     container.textContent = "";
     tasks.forEach(function (task) {
       var row = document.createElement("div");
       var button = document.createElement("button");
       button.type = "button";
+      button.dataset.issue = String(task.issue_number);
       button.textContent = "View #" + task.issue_number + " " + task.title;
       button.onclick = function () { loadDetail(task.issue_number); };
+      if (button.dataset.issue === focusedIssue) { focusTarget = button; }
       row.appendChild(button);
       var summary = document.createElement("p");
       summary.textContent = task.status + " | Updated: " + (task.updated_at || "—") +
@@ -95,6 +101,7 @@ window.__DASHBOARD_INTERVAL__ = __DASHBOARD_INTERVAL_PLACEHOLDER__;
       row.appendChild(summary);
       container.appendChild(row);
     });
+    if (focusedIssue) { (focusTarget || historyFilter).focus(); }
   }
 
   function updateHistory(data) {

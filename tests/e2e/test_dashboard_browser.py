@@ -433,6 +433,130 @@ def test_keyboard_focus_survives_polling_and_task_update(
         page.close()
 
 
+@pytest.mark.parametrize("key", ["Enter", "Space"])
+def test_history_focus_survives_revisions_by_issue(
+    browser: Browser, dashboard_url: str, tmp_path: Path, key: str
+) -> None:
+    from dataclasses import replace
+
+    store = JsonStateStore(tmp_path)
+    task = Task(task_id="github-3", issue_number=3, title="Evaluation READY",
+                labels=(), status=TaskState.READY)
+    store.save_tasks((*store.load_tasks(), task))
+    page = browser.new_page()
+    try:
+        page.goto(dashboard_url)
+        history = page.locator("#history")
+        button = history.get_by_role("button", name="View #3 Evaluation READY", exact=True)
+        expect(button).to_be_visible(timeout=5000)
+        history_filter = page.get_by_label("Task history filter")
+        history_filter.select_option("READY")
+        history_filter.focus()
+        page.keyboard.press("Tab")
+        expect(button).to_be_focused()
+        page.keyboard.press(key)
+        expect(page.locator("#detail-body")).to_contain_text("#3 Evaluation READY")
+
+        # Selected detail is requested only after the revised history has rendered.
+        with page.expect_request("**/api/tasks/3?*"):
+            store.set_paused(True)
+        expect(page.locator("#status-summary")).to_contain_text("Paused: true")
+        expect(button).to_be_focused()
+
+        earlier = Task(task_id="github-2", issue_number=2, title="Earlier task",
+                       labels=(), status=TaskState.READY)
+        updated = replace(task, title="Renamed evaluation", status=TaskState.IN_PROGRESS)
+        history_filter.select_option("active")
+        history_filter.focus()
+        page.keyboard.press("Tab")
+        page.keyboard.press("Tab")
+        expect(button).to_be_focused()
+        store.save_tasks((updated, earlier, store.load_tasks()[0]), paused=True)
+        renamed = history.get_by_role("button", name="View #3 Renamed evaluation", exact=True)
+        expect(renamed).to_be_visible(timeout=5000)
+        expect(page.locator("#history-count")).to_have_text("3 tasks")
+        expect(renamed).to_be_focused()
+        expect(history_filter).to_have_value("active")
+        page.keyboard.press(key)
+        expect(page.locator("#detail-body")).to_contain_text("#3 Renamed evaluation")
+    finally:
+        page.close()
+
+
+@pytest.mark.parametrize("change", ["deleted", "filtered", "empty"])
+def test_history_missing_focused_task_returns_to_filter(
+    browser: Browser, dashboard_url: str, tmp_path: Path, change: str
+) -> None:
+    from dataclasses import replace
+
+    store = JsonStateStore(tmp_path)
+    task = Task(task_id="github-2", issue_number=2, title="Ready task",
+                labels=(), status=TaskState.READY)
+    other = replace(task, task_id="github-3", issue_number=3, title="Other task")
+    store.save_tasks((task, other))
+    page = browser.new_page()
+    try:
+        page.goto(dashboard_url)
+        history_filter = page.get_by_label("Task history filter")
+        expect(page.locator("#history-count")).to_have_text("2 tasks", timeout=5000)
+        history_filter.select_option("READY")
+        history_filter.focus()
+        page.keyboard.press("Tab")
+        expect(page.get_by_role("button", name="View #2 Ready task", exact=True)).to_be_focused()
+        remaining = (other,) if change == "deleted" else (
+            replace(task, status=TaskState.COMPLETE), other
+        ) if change == "filtered" else ()
+        store.save_tasks(remaining)
+        expect(page.locator("#history-count")).to_have_text(
+            "0 tasks" if change == "empty" else "1 tasks", timeout=5000
+        )
+        expect(history_filter).to_have_value("READY")
+        expect(history_filter).to_be_focused()
+        if change == "empty":
+            history_filter.select_option("all")
+            store.save_tasks((other,))
+            expect(page.locator("#history-count")).to_have_text("1 tasks", timeout=5000)
+            expect(history_filter).to_be_focused()
+        page.keyboard.press("Tab")
+        expect(page.get_by_role("button", name="View #3 Other task", exact=True)).to_be_focused()
+        page.keyboard.press("Enter")
+        expect(page.locator("#detail-body")).to_contain_text("#3 Other task")
+    finally:
+        page.close()
+
+
+@pytest.mark.parametrize("target", ["filter", "kanban", "detail"])
+def test_history_poll_does_not_take_focus_outside_history(
+    browser: Browser, dashboard_url: str, tmp_path: Path, target: str
+) -> None:
+    from dataclasses import replace
+
+    store = JsonStateStore(tmp_path)
+    page = browser.new_page()
+    try:
+        page.goto(dashboard_url)
+        history_button = page.get_by_role("button", name="View #1 Task 1", exact=True)
+        expect(history_button).to_be_visible(timeout=5000)
+        history_button.click()
+        expect(page.locator("#detail-body")).to_contain_text("#1 Task 1")
+        if target == "filter":
+            outside = page.get_by_label("Task history filter")
+        elif target == "kanban":
+            outside = page.get_by_role("button", name="#1 Task 1", exact=True)
+        else:
+            outside = page.locator("#detail-card")
+            outside.evaluate("el => el.tabIndex = 0")
+        outside.focus()
+        store.save_tasks((*store.load_tasks(), replace(
+            store.load_tasks()[0], task_id="github-2", issue_number=2, title="New task"
+        )))
+        expect(page.locator("#history-count")).to_have_text("2 tasks", timeout=5000)
+        expect(outside).to_be_focused()
+        expect(page.locator("#detail-body")).to_contain_text("#1 Task 1")
+    finally:
+        page.close()
+
+
 def test_history_filters_terminal_tasks_and_refreshes(
     browser: Browser, dashboard_url: str, tmp_path: Path
 ) -> None:
