@@ -3216,6 +3216,20 @@ networkless image without mounting task code, checks a clean committed worktree 
 authenticates the exact CI workflow, run attempt, artifact digest, target, inventory
 and acquisition time. Only a clean result with every expected PyPI cache entry can
 be mounted read-only at `/run/pip-audit`; the normal `pip-audit` gate still runs.
+Native Codex execution writes its default result and plan-review schemas to
+`.ai/runtime/codex-output.schema.json` and `.ai/runtime/plan-review-output.schema.json`.
+Repositories using clean-snapshot auditing must ignore `.ai/runtime/` in their committed
+`.gitignore` (as this repository does); host `.git/info/exclude` is not inherited.
+Explicit `codex_output_schema` overrides keep their configured location. Existing files
+at the two legacy `.ai/` schema paths are preserved. The audit clean check tolerates
+only untracked regular files at those exact paths with byte-for-byte canonical Scheduler
+schema contents, read through no-follow directory/file descriptors. Unknown contents,
+symlinks (including parent directories), and tracked schema changes are rejected; no
+legacy file is moved, overwritten or deleted. This permits stopped tasks to recover
+without manual evacuation or importing host ignore rules.
+Uncommitted candidate changes, unknown untracked files, unsafe symlink inputs and HEAD
+mismatches still fail closed. No host configuration or credentials are copied (issue #550).
+
 Checks are repeated after the gate, and missing, stale, incomplete or untrusted
 evidence goes to `NEEDS_HUMAN` without consuming verification retries. The operator
 must separately approve the trusted workflow commit and protect the dispatch ref.

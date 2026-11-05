@@ -274,6 +274,8 @@ def test_modified_scaffold_files_are_flagged(tmp_path: Path) -> None:
     (
         ".ai/codex-output.schema.json",
         ".ai/plan-review-output.schema.json",
+        ".ai/runtime/codex-output.schema.json",
+        ".ai/runtime/plan-review-output.schema.json",
         ".ai/plans/1.md",
     ),
 )
@@ -294,6 +296,8 @@ def test_untracked_generated_agent_files_are_not_flagged(
     (
         ".ai/codex-output.schema.json",
         ".ai/plan-review-output.schema.json",
+        ".ai/runtime/codex-output.schema.json",
+        ".ai/runtime/plan-review-output.schema.json",
         ".ai/plans/1.md",
     ),
 )

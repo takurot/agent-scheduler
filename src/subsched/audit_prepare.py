@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
 import shutil
+import stat
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from subsched.agents.base import ProcessExecutionRequest, ProcessExecutionResult
+from subsched.agents.codex import CODEX_OUTPUT_SCHEMA
 from subsched.agents.isolation import IsolationGitContext
 from subsched.agents.process import run_process_group
 from subsched.audit_cache import materialize_audit_cache
@@ -19,6 +24,7 @@ from subsched.audit_inventory import canonical_inventory
 from subsched.audit_locked_inventory import AuditIsolationError, _read, derive_locked_inventory
 from subsched.audit_provenance import AuditPolicy, AuthenticatedCache
 from subsched.config import IndependentAuditConfig
+from subsched.plan_review import PLAN_REVIEW_OUTPUT_SCHEMA
 
 
 class AuditUnavailable(ValueError):
@@ -36,6 +42,42 @@ class PreparedAudit:
 
     def is_fresh(self, now: datetime) -> bool:
         return self.evidence.is_fresh(now)
+
+
+def _is_canonical_legacy_schema(worktree: Path, entry: str) -> bool:
+    """Recognize only exact untracked Scheduler artifacts, without following links."""
+    schemas = {
+        "?? .ai/codex-output.schema.json": json.dumps(CODEX_OUTPUT_SCHEMA, indent=2) + "\n",
+        "?? .ai/plan-review-output.schema.json": json.dumps(PLAN_REVIEW_OUTPUT_SCHEMA, indent=2),
+    }
+    expected = schemas.get(entry)
+    if expected is None:
+        return False
+    if os.open not in os.supports_dir_fd or any(
+        not hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")
+    ):
+        return False
+    content = expected.encode("utf-8")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        with ExitStack() as handles:
+            directory = os.open(worktree.anchor, flags)
+            handles.callback(os.close, directory)
+            for component in (*worktree.parts[1:], ".ai"):
+                directory = os.open(component, flags, dir_fd=directory)
+                handles.callback(os.close, directory)
+            descriptor = os.open(
+                entry.removeprefix("?? .ai/"),
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=directory,
+            )
+            handles.callback(os.close, descriptor)
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return False
+            with os.fdopen(descriptor, "rb", closefd=False) as schema:
+                return schema.read(len(content) + 1) == content
+    except (OSError, NotImplementedError):
+        return False
 
 
 def _checked_lock(
@@ -86,7 +128,19 @@ def _checked_lock(
     source_head = execute((*git_prefix, "-C", str(cwd), "rev-parse", "--verify", "HEAD"), 4096)
     if source_head.strip() != git_context.base_commit:
         raise ValueError("source Git HEAD changed")
-    if execute((*snapshot_prefix, "status", "--porcelain=v1", "--untracked-files=all")):
+    # Git omits special files (for example FIFOs) from untracked status.
+    for name in ("codex-output.schema.json", "plan-review-output.schema.json"):
+        try:
+            mode = (cwd / ".ai" / name).lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(mode):
+            raise ValueError("worktree must be clean before auditing")
+    status = execute((*snapshot_prefix, "status", "--porcelain=v1", "--untracked-files=all", "-z"))
+    if status and (
+        not status.endswith("\0")
+        or not all(_is_canonical_legacy_schema(cwd, entry) for entry in status.split("\0")[:-1])
+    ):
         raise ValueError("worktree must be clean before auditing")
     lock_bytes = b""
     for name in ("uv.lock", "pyproject.toml", "scripts/offline-build-requirements.txt"):
