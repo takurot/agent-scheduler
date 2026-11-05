@@ -1,0 +1,63 @@
+{
+  "note": "Normalized safe metadata from run 41853570329 attempt 1; Ubuntu runner/step details and IDs are placeholders. needs_verify_result is a conservative hypothetical context, not an observed API field.",
+  "workflow_conclusion": "failure",
+  "needs_verify_result": "success",
+  "jobs": [
+    {
+      "id": 126656019689,
+      "run_id": 41853570329,
+      "run_url": "https://api.github.com/repos/takurot/agent-scheduler/actions/runs/41853570329",
+      "head_sha": "cd5bda1e9ee75c5e9e1f557ffb4f7d66eb3acd1a",
+      "name": "verify (ubuntu-latest, python 3.12)",
+      "status": "completed",
+      "conclusion": "success",
+      "runner_name": "hosted-runner",
+      "steps": [
+        {
+          "name": "Run tests",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 126656019690,
+      "run_id": 41853570329,
+      "run_url": "https://api.github.com/repos/takurot/agent-scheduler/actions/runs/41853570329",
+      "head_sha": "cd5bda1e9ee75c5e9e1f557ffb4f7d66eb3acd1a",
+      "name": "verify (ubuntu-latest, python 3.13)",
+      "status": "completed",
+      "conclusion": "success",
+      "runner_name": "hosted-runner",
+      "steps": [
+        {
+          "name": "Run tests",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 126656019691,
+      "run_id": 41853570329,
+      "run_url": "https://api.github.com/repos/takurot/agent-scheduler/actions/runs/41853570329",
+      "head_sha": "cd5bda1e9ee75c5e9e1f557ffb4f7d66eb3acd1a",
+      "name": "verify (macos-latest, python 3.12)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "runner_name": "",
+      "steps": []
+    },
+    {
+      "id": 126656019809,
+      "run_id": 41853570329,
+      "run_url": "https://api.github.com/repos/takurot/agent-scheduler/actions/runs/41853570329",
+      "head_sha": "cd5bda1e9ee75c5e9e1f557ffb4f7d66eb3acd1a",
+      "name": "verify (macos-latest, python 3.13)",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "runner_name": "",
+      "steps": []
+    }
+  ]
+}
