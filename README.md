@@ -133,6 +133,13 @@ uv sync
 uv run subsched doctor
 ```
 
+`pyproject.toml`'s `project.version` is the version source. After installation,
+`subsched.__version__` reads the installed `agent-scheduler` distribution metadata,
+including in editable environments. After changing `project.version`, run `uv sync`
+again (or reinstall with `pip install -e .`) and start a new Python process to refresh
+the metadata and imported version. Importing an uninstalled source checkout without
+distribution metadata raises `importlib.metadata.PackageNotFoundError`.
+
 ---
 
 ## Usage

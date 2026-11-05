@@ -8,9 +8,21 @@ import tomllib
 from pathlib import Path
 from unittest.mock import patch
 
+import subsched
 from subsched.cli import app
 
 _PYPROJECT_PATH = Path(__file__).resolve().parents[2] / "pyproject.toml"
+
+
+def test_public_version_matches_distribution_metadata() -> None:
+    assert subsched.__version__ == importlib.metadata.version("agent-scheduler")
+
+
+def test_public_version_uses_installed_metadata_after_version_bump() -> None:
+    with patch("importlib.metadata.version", return_value="1.2.3") as version:
+        namespace = runpy.run_path(str(_PYPROJECT_PATH.parent / "src/subsched/__init__.py"))
+    assert namespace["__version__"] == "1.2.3"
+    version.assert_called_once_with("agent-scheduler")
 
 
 def test_pyproject_declares_both_console_scripts() -> None:
