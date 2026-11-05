@@ -481,6 +481,58 @@ def test_history_filters_terminal_tasks_and_refreshes(
         page.close()
 
 
+@pytest.mark.parametrize("width", [320, 375, 1280])
+@pytest.mark.parametrize("is_mobile", [False, True])
+@pytest.mark.parametrize("title", [
+    "A" * 240,
+    "長い日本語のタイトル" * 30,
+    "A long title with spaces " * 30,
+    '<img src=x onerror="window.historyXss=true">' + "B" * 240,
+])
+def test_history_long_titles_stay_within_viewport(
+    browser: Browser, dashboard_url: str, tmp_path: Path, width: int, is_mobile: bool, title: str
+) -> None:
+    store = JsonStateStore(tmp_path)
+    task = Task(task_id="github-2", issue_number=2, title=title, labels=(), status=TaskState.READY)
+    store.save_tasks((*store.load_tasks(), task))
+    page = browser.new_page(viewport={"width": width, "height": 812}, is_mobile=is_mobile)
+    try:
+        page.goto(dashboard_url)
+        history_filter = page.get_by_label("Task history filter")
+        expect(page.locator("#history-count")).to_have_text("2 tasks")
+        history_filter.select_option("READY")
+        expect(page.locator("#history-count")).to_have_text("1 tasks")
+        button = page.get_by_role("button", name=("View #2 " + title).strip(), exact=True)
+        expect(button).to_be_visible()
+        expect(button).to_have_text("View #2 " + title)
+        assert page.evaluate("window.innerWidth") == width
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert button.evaluate("""el => {
+            const button = el.getBoundingClientRect();
+            const card = el.closest('.card').getBoundingClientRect();
+            return button.left >= card.left && button.right <= card.right;
+        }""")
+        # Tab from the filter to the native history button and activate using both keys.
+        history_filter.focus()
+        page.keyboard.press("Tab")
+        expect(button).to_be_focused()
+        page.keyboard.press("Enter")
+        expect(page.locator("#detail-body h3")).to_have_text("#2 " + title)
+        page.keyboard.press("Space")
+        expect(page.locator("#detail-body h3")).to_have_text("#2 " + title)
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert page.locator("#history img, #detail-body img").count() == 0
+        assert page.evaluate("window.historyXss") is None
+        kanban = page.locator("#kanban")
+        assert kanban.evaluate("el => getComputedStyle(el).overflowX") == "auto"
+        if width < 400:
+            assert kanban.evaluate("el => el.scrollWidth > el.clientWidth")
+            assert kanban.evaluate("el => { el.scrollLeft = 100; return el.scrollLeft > 0; }")
+        assert store.load_tasks()[1].title == title
+    finally:
+        page.close()
+
+
 def test_history_preserves_empty_status_filter_and_redacts(
     browser: Browser, dashboard_url: str, tmp_path: Path
 ) -> None:
