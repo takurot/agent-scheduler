@@ -8,6 +8,8 @@ import tomllib
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 import subsched
 from subsched.cli import app
 
@@ -20,9 +22,44 @@ def test_public_version_matches_distribution_metadata() -> None:
 
 def test_public_version_uses_installed_metadata_after_version_bump() -> None:
     with patch("importlib.metadata.version", return_value="1.2.3") as version:
-        namespace = runpy.run_path(str(_PYPROJECT_PATH.parent / "src/subsched/__init__.py"))
-    assert namespace["__version__"] == "1.2.3"
+        assert subsched.__version__ == "1.2.3"
     version.assert_called_once_with("agent-scheduler")
+
+
+def test_source_only_audit_producer_import(tmp_path: Path) -> None:
+    probe = """
+import importlib.metadata
+import sys
+sys.path.insert(0, sys.argv[1])
+try:
+    importlib.metadata.version("agent-scheduler")
+except importlib.metadata.PackageNotFoundError:
+    pass
+else:
+    raise AssertionError("probe must run without project metadata")
+import subsched.audit_producer
+assert callable(subsched.audit_producer.main)
+try:
+    subsched.__version__
+except importlib.metadata.PackageNotFoundError:
+    pass
+else:
+    raise AssertionError("version lookup must require installed metadata")
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", probe, str(_PYPROJECT_PATH.parent / "src")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_unknown_package_attribute_raises_attribute_error() -> None:
+    with pytest.raises(AttributeError, match="no attribute 'unknown_attribute'"):
+        _ = subsched.unknown_attribute
 
 
 def test_pyproject_declares_both_console_scripts() -> None:

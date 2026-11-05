@@ -137,8 +137,9 @@ uv run subsched doctor
 `subsched.__version__` reads the installed `agent-scheduler` distribution metadata,
 including in editable environments. After changing `project.version`, run `uv sync`
 again (or reinstall with `pip install -e .`) and start a new Python process to refresh
-the metadata and imported version. Importing an uninstalled source checkout without
-distribution metadata raises `importlib.metadata.PackageNotFoundError`.
+the metadata and imported version. Source-only imports (including the independent audit
+producer) work without installing or building the project. Accessing `subsched.__version__`
+without distribution metadata raises `importlib.metadata.PackageNotFoundError`.
 
 ---
 
