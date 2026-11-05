@@ -3756,6 +3756,8 @@ the count reflects visible tasks. Each row shows issue/title, status, update tim
 PR, CI result, and merge completion separately. CI PASS alone is not merge completion.
 History refreshes when the state revision changes; the active Kanban and server-side
 redaction remain in effect. History buttons open the existing task detail.
+Long titles wrap within history buttons and selected task details on narrow screens,
+preserving the full text and keyboard access. Kanban keeps its internal horizontal scroll.
 
 ### Dashboard triage details (#462)
 
