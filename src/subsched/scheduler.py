@@ -491,6 +491,61 @@ class Scheduler:
             and not task.plan_approved
         )
 
+    @staticmethod
+    def _failure_classification(result: AgentResult) -> str:
+        # Only recognize exact adapter-owned diagnostics. Arbitrary provider text is
+        # never persisted, nor used to infer auth/billing or change retry policy.
+        if result.kind is AgentResultKind.FAILURE:
+            if result.output == "codex event stream malformed":
+                return "malformed_event_stream"
+            if result.output == "codex execution timed out":
+                return "TIMEOUT"
+        return result.kind.value
+
+    def _worker_result_summary(self, task: Task, agent: str, result: AgentResult) -> str:
+        return (
+            f"{resolve_stage(task)} agent {agent}: {self._failure_classification(result)} "
+            f"(result={result.kind.value}, attempt={task.attempt})"
+        )
+
+    def _record_worker_result(
+        self, task: Task, agent: str, result: AgentResult, started: float
+    ) -> None:
+        data: dict[str, Any] = {
+            "stage": resolve_stage(task),
+            "result_kind": result.kind.value,
+            "failure_classification": self._failure_classification(result),
+            "duration_seconds": round(time.monotonic() - started, 1),
+            "attempt": task.attempt,
+            "plan_revisions": task.plan_revisions,
+        }
+        if result.reason_code is not None:
+            data["reason_code"] = result.reason_code
+        self._log(
+            "agent_finish", issue_number=task.issue_number, agent=agent,
+            task_id=task.task_id, data=data,
+        )
+
+    def _save_worker_checkpoint(self, task: Task, agent: str, result: AgentResult) -> None:
+        if task.worktree is not None and (
+            task.status in {TaskState.PLANNING, TaskState.PLAN_REVIEW}
+            or result.kind is not AgentResultKind.PASS
+        ):
+            from subsched.checkpoint import capture_mechanical_checkpoint, save_checkpoint
+
+            # Keep the existing checkpoint schema and filesystem protections. Its
+            # output contains only fixed metadata, never raw stdout/stderr or exceptions.
+            safe_result = replace(result, output=self._worker_result_summary(task, agent, result))
+            checkpoint = capture_mechanical_checkpoint(
+                Path(task.worktree), task.issue_number, safe_result,
+                exit_code=0 if result.kind is AgentResultKind.PASS else 1,
+            )
+            save_checkpoint(Path(task.worktree), checkpoint)
+            self._log(
+                "checkpoint", issue_number=task.issue_number, agent=agent,
+                task_id=task.task_id, data={"stage": resolve_stage(task), "attempt": task.attempt},
+            )
+
     def _run_stage_worker(self, task: Task, agent: str, lease_nonce: str) -> AgentResult:
         """Run `self.worker` for a single PLANNING/PLAN_REVIEW stage.
 
@@ -510,8 +565,9 @@ class Scheduler:
                     attempt_nonce=lease_nonce,
                 ),
             )
+        started = time.monotonic()
         try:
-            return self.worker.run(task, agent)
+            result = self.worker.run(task, agent)
         except Exception as error:
             self._log(
                 "worker_exception",
@@ -519,13 +575,16 @@ class Scheduler:
                 issue_number=task.issue_number,
                 agent=agent,
                 task_id=task.task_id,
-                message=str(error),
+                message="stage worker raised an exception",
                 data={"exception_type": type(error).__name__, "attempt": task.attempt},
             )
-            return AgentResult(AgentResultKind.FAILURE, output=type(error).__name__)
+            result = AgentResult(AgentResultKind.FAILURE)
         finally:
             if task.worktree is not None:
                 clear_process_record(Path(task.worktree), task.issue_number)
+        self._record_worker_result(task, agent, result, started)
+        self._save_worker_checkpoint(task, agent, result)
+        return result
 
     def _escalate_stage(self, task: Task, agent: str, now: datetime, reason: str) -> None:
         """Fail-closed escalation to NEEDS_HUMAN for a PLANNING/PLAN_REVIEW stage."""
@@ -1194,20 +1253,7 @@ class Scheduler:
                 if running.worktree is not None:
                     clear_process_record(Path(running.worktree), running.issue_number)
 
-            finish_data: dict[str, Any] = {
-                "result_kind": result.kind.value,
-                "duration_seconds": round(time.monotonic() - dispatch_started, 1),
-                "attempt": running.attempt,
-            }
-            if result.reason_code is not None:
-                finish_data["reason_code"] = result.reason_code
-            self._log(
-                "agent_finish",
-                issue_number=running.issue_number,
-                agent=agent,
-                task_id=running.task_id,
-                data=finish_data,
-            )
+            self._record_worker_result(running, agent, result, dispatch_started)
 
             # #281: PR_REVIEW is strictly read-only and explicitly instructed not to
             # touch the handoff file (see build_review_prompt) -- enforcing handoff
@@ -1236,6 +1282,10 @@ class Scheduler:
                     self._backoff_step = 0
                     return True
 
+            # A new checkpoint must not serve as evidence for the freshness gate
+            # of the same invocation. Preserve that gate's pre-existing evidence.
+            if result.kind is not AgentResultKind.PASS:
+                self._save_worker_checkpoint(running, agent, result)
             self._handle_result(
                 running,
                 agent,
@@ -1939,18 +1989,25 @@ class Scheduler:
                 kind_label = "review"
             else:
                 kind_label = "revision"
-            reason = (
-                f"{kind_label} dispatch did not complete successfully "
-                f"({result.kind.value}); failing closed"
-                if not result.output
-                or result.output
-                in (
-                    f"{agent} execution failed",
-                    "claude result unknown",
-                    "claude execution failed",
+            if task.status is TaskState.PLAN_REVIEW:
+                reason = (
+                    "plan review dispatch did not complete successfully: "
+                    + self._worker_result_summary(task, agent, result)
+                    + "; failing closed"
                 )
-                else f"{kind_label} dispatch did not complete successfully: {result.output}"
-            )
+            else:
+                reason = (
+                    f"{kind_label} dispatch did not complete successfully "
+                    f"({result.kind.value}); failing closed"
+                    if not result.output
+                    or result.output
+                    in (
+                        f"{agent} execution failed",
+                        "claude result unknown",
+                        "claude execution failed",
+                    )
+                    else f"{kind_label} dispatch did not complete successfully: {result.output}"
+                )
             final = task.transition(
                 TaskState.NEEDS_HUMAN,
                 current_agent=agent,
@@ -2346,7 +2403,10 @@ class Scheduler:
                 if agent_failure_count >= self.max_agent_failures
                 else TaskState.READY
             )
-            final = retry.transition(next_state, now=now)
+            reason = self._worker_result_summary(task, agent, result)
+            if next_state is TaskState.NEEDS_HUMAN:
+                reason += f"; agent failure limit reached ({agent_failure_count})"
+            final = retry.transition(next_state, now=now, reason=reason)
             self.queue = self.queue.replace(final)
             self._log(
                 "task_transition",
@@ -2357,6 +2417,9 @@ class Scheduler:
                     "from_state": task.status.value,
                     "to_state": final.status.value,
                     "attempt": final.attempt,
+                    "stage": resolve_stage(task),
+                    "result_kind": result.kind.value,
+                    "failure_classification": self._failure_classification(result),
                 },
             )
         self._persist()
