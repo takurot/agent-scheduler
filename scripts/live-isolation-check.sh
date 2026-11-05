@@ -76,7 +76,7 @@ report = {
     "proxy_image": os.environ["REPORT_PROXY"],
     "network": os.environ["REPORT_NETWORK"],
     "proxy_url": "http://<ephemeral-proxy>:3128",
-    "tests": "tests/integration/test_native_isolation_container.py (4 required)",
+    "tests": "tests/integration/test_native_isolation_container.py (6 required)",
     "result": os.environ["REPORT_RESULT"],
     "cleanup": os.environ["REPORT_CLEANUP"],
 }

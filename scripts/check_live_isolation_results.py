@@ -11,6 +11,8 @@ REQUIRED = {
     "test_real_container_timeout_cleanup_kills_descendants",
     "test_real_container_cannot_rewrite_linked_worktree_git_pointer",
     "test_real_container_reproduces_and_resolves_codex_bwrap_sandbox_conflict",
+    "test_real_container_schema_symlink_is_rejected_on_next_host_generation[False]",
+    "test_real_container_schema_symlink_is_rejected_on_next_host_generation[True]",
 }
 CLASSNAME = "tests.integration.test_native_isolation_container"
 
@@ -26,7 +28,12 @@ def passed(path: Path) -> bool:
     suite = suites[0]
     if any(
         suite.get(key) != value
-        for key, value in {"tests": "4", "failures": "0", "errors": "0", "skipped": "0"}.items()
+        for key, value in {
+            "tests": str(len(REQUIRED)),
+            "failures": "0",
+            "errors": "0",
+            "skipped": "0",
+        }.items()
     ):
         return False
     cases = suite.findall("testcase")
@@ -41,6 +48,6 @@ def passed(path: Path) -> bool:
 if __name__ == "__main__":
     if len(sys.argv) != 2 or not passed(Path(sys.argv[1])):
         print(
-            "error: all four required live isolation tests must pass without skips", file=sys.stderr
+            "error: all six required live isolation tests must pass without skips", file=sys.stderr
         )
         sys.exit(1)

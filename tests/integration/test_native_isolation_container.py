@@ -360,3 +360,64 @@ def test_real_container_reproduces_and_resolves_codex_bwrap_sandbox_conflict(
     finally:
         subprocess.run(["docker", "network", "rm", network_id], check=True, timeout=30)
         subprocess.run(["docker", "image", "rm", image], check=True, timeout=30)
+
+
+@pytest.mark.parametrize("review", [False, True])
+def test_real_container_schema_symlink_is_rejected_on_next_host_generation(
+    tmp_path: Path,
+    review: bool,
+) -> None:
+    """No inference: create the hostile link through the actual writable task mount."""
+    from subsched.agents.codex import ensure_codex_output_schema
+    from subsched.plan_review import ensure_plan_review_output_schema
+
+    worktree, _auth, config, runtime = _fixture(tmp_path)
+    assert (
+        verify_native_isolation(config, enabled_agents=("codex",), resolver=lambda _: runtime)
+        is None
+    )
+    canary = tmp_path / "schema-host-canary"
+    canary.write_text("synthetic schema canary\n")
+    original = (worktree / "tracked.txt").read_bytes()
+    leaf = (
+        worktree
+        / ".ai"
+        / "runtime"
+        / ("plan-review-output.schema.json" if review else "codex-output.schema.json")
+    )
+    git_context = prepare_isolated_git(worktree, tmp_path / "schema-state", "github-555")
+    name = native_container_name("github-555")
+    request = ProcessExecutionRequest(
+        argv=(
+            "/bin/sh",
+            "-ceu",
+            'mkdir -p .ai/runtime; ln -s "$1" "$2"; test -L "$2"; test ! -e "$1"',
+            "schema-boundary-test",
+            str(canary),
+            str(leaf),
+        ),
+        cwd=worktree,
+        env={"HOME": os.environ["HOME"], "PATH": os.environ["PATH"]},
+        timeout_seconds=30,
+    )
+    wrapped = wrap_native_request(
+        request,
+        agent="codex",
+        config=config,
+        runtime_executable=runtime,
+        git_dir=git_context.git_dir,
+        worktree_git_mount=git_context.worktree_git_mount,
+        container_name=name,
+    )
+    try:
+        result = run_process_group(wrapped)
+    finally:
+        cleanup_failure = cleanup_native_container(runtime, name, env=wrapped.env)
+    assert cleanup_failure is None
+    assert result.exit_code == 0, result.stderr
+    assert leaf.is_symlink()
+    writer = ensure_plan_review_output_schema if review else ensure_codex_output_schema
+    with pytest.raises(OSError):
+        writer(leaf)
+    assert canary.read_text() == "synthetic schema canary\n"
+    assert (worktree / "tracked.txt").read_bytes() == original

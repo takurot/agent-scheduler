@@ -314,8 +314,28 @@ GitHub write、長時間soak testは通常CIへ混ぜず、明示承認された
 記録する。実行できないgateをPASSと表現しない。
 
 実Docker隔離の検証はoperator管理のhostで`Live Docker isolation`を明示起動し、
-4件のテストがskipなしでPASSしたreportのcommit SHA、Docker version、worker/proxy
+6件のテストがskipなしでPASSしたreportのcommit SHA、Docker version、worker/proxy
 digestとcleanup結果を確認する。通常CI/releaseのskipを実Docker検証の成功と数えない。
+
+For issue #555, the opt-in Docker suite also creates result/plan-review schema
+symlinks from the actual writable task mount, then invokes the host schema writer
+without model inference. Record both parametrized cases, unchanged synthetic host
+canary and tracked task file, and confirmed container cleanup. Run with the existing
+`SUBSCHED_DOCKER_ISOLATION_TEST=1` and operator-provisioned isolation settings:
+
+```bash
+uv run pytest tests/integration/test_native_isolation_container.py -k schema_symlink -v
+```
+
+Temporary-source substitution regressions also replace the source immediately before
+and after rename, including symlink, regular-file, FIFO, and in-place content changes.
+Require rejection before adapter execution for default and configured schema paths.
+Failed publication deliberately retains temporary entries; pathname-based cleanup cannot
+atomically prove that an entry still belongs to the writer. Inspect these artifacts only
+under the same no-follow boundary; do not blindly unlink them from a worker-writable path.
+
+A skip or mocked dispatch test is not live evidence. Independent bypass/compatibility
+review and the exact commit's CI/E2E results must also be checked before merge.
 
 ### 7.1 コンテナ隔離環境下のワーカー責務とScheduler検証の分離 (#337, #416)
 

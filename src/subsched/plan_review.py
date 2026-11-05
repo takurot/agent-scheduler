@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from subsched.schema_publication import publish_schema
+
 #: Directory (relative to a task's worktree root) that holds the multi-stage workflow's
 #: plan artifacts. Never committed -- see .gitignore (`.ai/plans/`, alongside the other
 #: Scheduler-owned `.ai/` subdirectories it already excludes).
@@ -54,8 +56,7 @@ PLAN_REVIEW_OUTPUT_SCHEMA: dict[str, Any] = {
 
 
 def ensure_plan_review_output_schema(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(PLAN_REVIEW_OUTPUT_SCHEMA, indent=2), encoding="utf-8")
+    publish_schema(path, json.dumps(PLAN_REVIEW_OUTPUT_SCHEMA, indent=2).encode("utf-8"))
 
 
 def plan_path(issue_number: int) -> Path:

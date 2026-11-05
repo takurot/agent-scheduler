@@ -3131,6 +3131,29 @@ stores outside all worker mounts. The write tier excludes merge, Actions, releas
 and deployment authority. Do not include authentication values in argv, diagnostics,
 logs, checkpoints, handoffs, or test fixtures.
 
+### Host schema publication (issue #555)
+
+Codex result and plan-review schemas share a no-follow publication boundary, including
+operator-configured `NativeWorker(codex_output_schema=...)` paths outside the task.
+Every parent component is opened from the filesystem root with directory/no-follow
+flags and retained through publication; missing directories are created relative to
+those pinned descriptors. Parent identities and the regular-file-or-missing leaf are
+checked before writing and again before atomic replacement. Symlinks (including
+dangling links), nonregular leaves, parent traversal, and unavailable primitives fail
+closed before provider execution. No existing target content is read or truncated;
+replacement also preserves external hardlink contents. Temporary-file creation and
+replacement use the pinned parent. The temporary descriptor stays open through rename;
+source and published identities must match that inode, and bounded, unbuffered readback
+from the descriptor must match canonical bytes before and after rename. This detects
+source substitution during rename and in-place content changes before provider admission,
+without opening a substituted pathname (including a symlink or FIFO) for reading.
+A leaf swapped after the last precheck is replaced by rename rather than followed.
+Failure closes descriptors but retains temporary entries: a stat-then-unlink cleanup
+could delete a peer's replacement. Successful publication consumes the temporary entry.
+These checks do not make a worker-writable schema immutable after the helper returns.
+Canonical JSON bytes, helper return values, configured paths, and schema argv remain
+unchanged.
+
 ### Network and process enforcement
 
 Enforce default-deny egress with a Docker internal network. Before every dispatch the
