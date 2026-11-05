@@ -21,20 +21,20 @@ def _mock_gh(
 
 
 def test_fetch_pr_checks_classifications(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Canonical gh outputs paired with their documented exit codes (fixture-ized per #376).
+    # Synthetic JSON-mode fixtures: v2.100.0 exports JSON before CI exit handling (#552).
     pass_data = (_FIXTURES / "pass-exit0.json").read_text(encoding="utf-8")
     _mock_gh(monkeypatch, stdout=pass_data, returncode=0)
     status_pass = fetch_pr_checks(68)
     assert status_pass.overall_state is CICheckState.PASS
     assert len(status_pass.checks) == 2
 
-    pending_data = (_FIXTURES / "pending-exit8.json").read_text(encoding="utf-8")
-    _mock_gh(monkeypatch, stdout=pending_data, returncode=8)
+    pending_data = (_FIXTURES / "pending-exit0.json").read_text(encoding="utf-8")
+    _mock_gh(monkeypatch, stdout=pending_data, returncode=0)
     status_pending = fetch_pr_checks(68)
     assert status_pending.overall_state is CICheckState.PENDING
 
-    fail_data = (_FIXTURES / "fail-exit1.json").read_text(encoding="utf-8")
-    _mock_gh(monkeypatch, stdout=fail_data, returncode=1)
+    fail_data = (_FIXTURES / "fail-exit0.json").read_text(encoding="utf-8")
+    _mock_gh(monkeypatch, stdout=fail_data, returncode=0)
     status_fail = fetch_pr_checks(68)
     assert status_fail.overall_state is CICheckState.FAIL
 
@@ -95,7 +95,7 @@ def test_no_checks_exit_code_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_empty_array_with_pass_exit_code_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
-    """#376: exit 0 with an empty payload contradicts 'all checks passed'."""
+    """Successful JSON export with no checks cannot establish CI success."""
     _mock_gh(monkeypatch, stdout="[]", returncode=0)
 
     status = fetch_pr_checks(68)
@@ -197,7 +197,6 @@ def test_failed_check_alongside_malformed_element_is_still_fail(
     ("returncode", "elements"),
     [
         (8, [_element("a", "pass", "SUCCESS")]),  # exit says pending, payload all pass
-        (0, [_element("a", "pending", "QUEUED")]),  # exit says pass, payload pending
         (1, [_element("a", "pending", "QUEUED")]),  # exit says failed, payload pending
     ],
 )
@@ -217,3 +216,88 @@ def test_detail_redacts_secrets_from_stderr(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert secret not in status.detail
     assert "[REDACTED]" in status.detail
+
+
+@pytest.mark.parametrize("state", ["IN_PROGRESS", "QUEUED"])
+@pytest.mark.parametrize("include_pass", [False, True])
+def test_json_export_success_with_pending_checks(
+    monkeypatch: pytest.MonkeyPatch, state: str, include_pass: bool
+) -> None:
+    elements = [_element("running", "pending", state)]
+    if include_pass:
+        elements.insert(0, _element("done", "pass", "SUCCESS"))
+    _mock_gh(monkeypatch, stdout=json.dumps(elements), returncode=0)
+
+    status = fetch_pr_checks(68)
+
+    assert status.overall_state is CICheckState.PENDING
+    assert status.detail == ""
+    assert len(status.checks) == len(elements)
+
+
+@pytest.mark.parametrize("returncode", [0, 8])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        42,
+        {},
+        {"name": "unknown", "state": "FUTURE_STATE", "bucket": "pass"},
+        {"name": "unknown", "state": "SUCCESS", "bucket": "future_bucket"},
+        {"name": "unknown", "state": None, "bucket": "pass"},
+        {"name": "unknown", "state": "SUCCESS", "bucket": 42},
+        {"name": "unknown"},
+        {"name": "unknown", "state": "FUTURE_STATE"},
+        {"name": "contradiction", "state": "FAILURE", "bucket": "pass"},
+    ],
+)
+def test_pending_does_not_hide_invalid_check(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, invalid: object
+) -> None:
+    payload = json.dumps([_element("running", "pending", "QUEUED"), invalid])
+    _mock_gh(monkeypatch, stdout=payload, returncode=returncode)
+
+    assert fetch_pr_checks(68).overall_state is CICheckState.UNKNOWN
+
+
+@pytest.mark.parametrize("returncode", [0, 1, 2, 4, 7, 8, 127])
+@pytest.mark.parametrize("payload", ["not json", "{}", "null", "[]"])
+def test_invalid_or_empty_response_never_passes(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, payload: str
+) -> None:
+    _mock_gh(monkeypatch, stdout=payload, returncode=returncode)
+
+    assert fetch_pr_checks(68).overall_state is CICheckState.UNKNOWN
+
+
+@pytest.mark.parametrize("returncode", [2, 4, 7, 127])
+@pytest.mark.parametrize("bucket,state", [("pass", "SUCCESS"), ("fail", "FAILURE")])
+def test_command_error_cannot_be_overridden_by_payload(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, bucket: str, state: str
+) -> None:
+    _mock_gh(
+        monkeypatch,
+        stdout=json.dumps([_element("check", bucket, state)]),
+        returncode=returncode,
+    )
+
+    assert fetch_pr_checks(68).overall_state is CICheckState.UNKNOWN
+
+
+@pytest.mark.parametrize("error", [OSError("gh unavailable"), subprocess.TimeoutExpired("gh", 30)])
+def test_subprocess_error_is_unknown(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    def fail(*args: object, **kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(subprocess, "run", fail)
+
+    assert fetch_pr_checks(68).overall_state is CICheckState.UNKNOWN
+
+
+def test_legacy_pending_exit_with_pending_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_gh(
+        monkeypatch,
+        stdout=json.dumps([_element("running", "pending", "QUEUED")]),
+        returncode=8,
+    )
+
+    assert fetch_pr_checks(68).overall_state is CICheckState.PENDING

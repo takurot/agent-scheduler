@@ -32,11 +32,13 @@ class PRChecksStatus:
     detail: str = ""
 
 
-# #376: gh pr checks documents these exit codes: 0 = all checks passed, 1 = some
-# checks failed, 7 = no checks found, 8 = some checks pending. Anything else is a
-# command anomaly and can never confirm PASS.
-_GH_EXIT_OVERALL: dict[int, CICheckState] = {
-    0: CICheckState.PASS,
+# #552: v2.100.0 checks.go returns Exporter.Write before failed/pending exit handling:
+# https://github.com/cli/cli/blob/v2.100.0/pkg/cmd/pr/checks/checks.go#L177-L179
+# JSON exit 0 confirms export only; CI status must come from the validated payload.
+# Retain #376's conservative exit 1/8 compatibility checks, not evidence that JSON
+# mode in that version emits those CI exit codes. Other command errors stay UNKNOWN.
+_GH_EXIT_OVERALL: dict[int, CICheckState | None] = {
+    0: None,
     1: CICheckState.FAIL,
     8: CICheckState.PENDING,
 }
@@ -74,14 +76,16 @@ def _classify_element(item: object) -> CICheckResult | None:
     name_raw = item.get("name")
     if not isinstance(name_raw, str) or not name_raw.strip():
         return None
-    bucket = str(item.get("bucket", "")).casefold()
-    state_raw = str(item.get("state", "")).casefold()
+    bucket = item.get("bucket", "")
+    state_raw = item.get("state", "")
     desc = str(item.get("description", ""))
     link = str(item.get("link", ""))
 
-    bucket_state = _classify_bucket(bucket)
-    state_state = _classify_state(state_raw)
-    if bucket_state is not None and state_state is not None:
+    bucket_state = _classify_bucket(bucket.casefold()) if isinstance(bucket, str) else None
+    state_state = _classify_state(state_raw.casefold()) if isinstance(state_raw, str) else None
+    if ("bucket" in item and bucket_state is None) or ("state" in item and state_state is None):
+        st = CICheckState.UNKNOWN
+    elif bucket_state is not None and state_state is not None:
         st = bucket_state if bucket_state is state_state else CICheckState.UNKNOWN
     elif bucket_state is not None:
         st = bucket_state
@@ -100,10 +104,10 @@ def _derive_overall(checks: Sequence[CICheckResult], malformed: int) -> CICheckS
         return CICheckState.FAIL
     if not checks or malformed:
         return CICheckState.UNKNOWN
-    if CICheckState.PENDING in states:
-        return CICheckState.PENDING
     if CICheckState.UNKNOWN in states:
         return CICheckState.UNKNOWN
+    if CICheckState.PENDING in states:
+        return CICheckState.PENDING
     return CICheckState.PASS
 
 
@@ -124,7 +128,7 @@ def _assess_payload(
     expected = _GH_EXIT_OVERALL[returncode]
     detail = _redact(stderr.strip())
     overall = derived
-    if derived is not expected:
+    if expected is not None and derived is not expected:
         # #376: a proven failure in the payload escalates whatever the exit code says
         # (FAIL can never be a false PASS, and a cancelled run must reach a human).
         # Any other disagreement (e.g. exit 1 but every element claims PASS) is
@@ -135,6 +139,12 @@ def _assess_payload(
             f"gh exit code {returncode} implies {expected.value}, "
             f"payload implies {derived.value}"
             + (f"; {malformed} malformed element(s)" if malformed else "")
+        )
+    elif derived is CICheckState.UNKNOWN:
+        detail = (
+            "empty or invalid gh checks payload"
+            + (f"; {malformed} malformed element(s)" if malformed else "")
+            + (f"; {detail}" if detail else "")
         )
     return PRChecksStatus(
         pr_number=pr_number, overall_state=overall, checks=tuple(checks), detail=detail
@@ -153,10 +163,10 @@ def fetch_pr_checks(
 ) -> PRChecksStatus:
     """Fetch structured PR checks using gh pr checks and classify into PASS, FAIL, PENDING.
 
-    #376: the exit code and the JSON payload are validated as a pair. Malformed
-    elements, missing required values, state/bucket contradictions, undocumented
-    exit codes, and exit-code/payload contradictions all classify as UNKNOWN --
-    never PASS (fail-closed)."""
+    #552: exit 0 confirms JSON export, not CI success. #376 validation remains:
+    malformed/unknown elements, missing required values, state/bucket conflicts,
+    command anomalies and non-failure exit 1/8 contradictions cannot confirm PASS.
+    Proven payload failures take priority within accepted exit codes (0/1/8)."""
     argv = [
         "gh",
         "pr",
