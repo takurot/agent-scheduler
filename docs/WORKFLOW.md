@@ -317,6 +317,33 @@ GitHub write、長時間soak testは通常CIへ混ぜず、明示承認された
 4件のテストがskipなしでPASSしたreportのcommit SHA、Docker version、worker/proxy
 digestとcleanup結果を確認する。通常CI/releaseのskipを実Docker検証の成功と数えない。
 
+### Aggregate CI evidence (issue #556)
+
+`all-checks` runs with `always()` after the unchanged Ubuntu/macOS × Python 3.12/3.13
+matrix. `scripts/check_ci_matrix.py` queries the [Actions jobs API](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt)
+for this repository and run, explicitly listing attempts 1 through `GITHUB_RUN_ATTEMPT`.
+Each attempt is paginated with `per_page=100` and checked against `total_count`;
+API errors, malformed/truncated/changing responses, duplicate job identities and
+repository/run/head-commit mismatches fail closed. For pull requests, `CI_HEAD_SHA`
+is the PR head SHA used by Actions job metadata; for pushes it is `github.sha`.
+The checkout continues to test the workflow's normal ref (including PR merge refs).
+
+The four exact `verify (<os>, python <version>)` names are required. For each name,
+the newest attempt containing that job takes precedence, regardless of conclusion.
+An earlier successful job is reused only when later attempts omit that job, as in
+failed-only reruns. A newer failure, cancellation or pending job cannot be hidden by
+an older success. All four selected jobs must be completed/success, with a nonempty
+runner and executed successful steps; missing, skipped, unknown and unstarted jobs
+never count as success. The matrix summary alone is not sufficient evidence.
+
+Only the aggregate job adds `actions: read` alongside `contents: read`; its ephemeral
+`github.token` is scoped to the guard step, checkout does not persist credentials,
+and the API subprocess receives an explicit environment allowlist. No write permission,
+runner capacity workaround, audit exemption or coverage reduction is introduced.
+Offline fixtures verify the observed cancellation pattern and valid reruns; they do
+not establish live runner availability or remote CI success. Verify all four jobs
+on the final commit in normal CI before merge; do not deliberately break live CI.
+
 ### 7.1 コンテナ隔離環境下のワーカー責務とScheduler検証の分離 (#337, #416)
 
 Schedulerが管理するコンテナ隔離ワークツリー（`subsched/issue-N`）で自律エージェントが実行される場合、ワーカーは自身が担当する変更のスコープ付きテスト（例: `uv run pytest <targeted_tests>`, `uv run mypy <path>`）を実行してTDDを完遂する。
