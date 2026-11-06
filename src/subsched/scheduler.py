@@ -539,6 +539,7 @@ class Scheduler:
             checkpoint = capture_mechanical_checkpoint(
                 Path(task.worktree), task.issue_number, safe_result,
                 exit_code=0 if result.kind is AgentResultKind.PASS else 1,
+                stage=resolve_stage(task),
             )
             save_checkpoint(Path(task.worktree), checkpoint)
             self._log(
