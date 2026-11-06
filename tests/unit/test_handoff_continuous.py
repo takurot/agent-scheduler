@@ -379,3 +379,58 @@ def test_scheduler_does_not_bypass_invalid_contract_with_fresh_checkpoint(
 
     assert scheduler.tasks[0].status is TaskState.NEEDS_HUMAN
     assert expected in (scheduler.tasks[0].needs_human_reason or "")
+
+
+class _PlanningThenSilentWorker:
+    """Multi-stage worker: PASSes PLANNING (writing the plan file), then returns a
+    scripted implementation result while leaving the handoff and HEAD untouched."""
+
+    def __init__(self, final_kind: AgentResultKind) -> None:
+        self.final_kind = final_kind
+
+    def run(self, task, agent):  # type: ignore[no-untyped-def]
+        from subsched.plan_review import plan_path
+
+        if task.status is TaskState.PLANNING:
+            assert task.worktree is not None
+            path = Path(task.worktree) / plan_path(task.issue_number)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# Plan\nproposal\n", encoding="utf-8")
+            return AgentResult(AgentResultKind.PASS)
+        return AgentResult(self.final_kind)
+
+
+@pytest.mark.parametrize("final_kind", [AgentResultKind.PASS, AgentResultKind.FAILURE])
+def test_planning_checkpoint_does_not_satisfy_implementation_freshness(
+    tmp_path: Path, final_kind: AgentResultKind
+) -> None:
+    """Regression: the diagnostic checkpoint a successful PLANNING stage saves must
+    not satisfy the same dispatch's implementation handoff-freshness check, or a
+    silent implementation worker (no handoff update, no commit) reaches verification
+    or generic retry handling instead of the pre-existing NEEDS_HUMAN escalation."""
+    from subsched.config import WorkflowConfig, WorkflowStagesConfig
+
+    now = datetime.now(UTC)
+    scheduler = Scheduler(
+        store=JsonStateStore(tmp_path / "state.json"),
+        router=Router([AgentConfig("claude", priority=100)]),
+        worker=_PlanningThenSilentWorker(final_kind),  # type: ignore[arg-type]
+        worktree_root=tmp_path / "worktrees",
+        workflow=WorkflowConfig(
+            mode="multi-stage", stages=WorkflowStagesConfig(plan_review=False)
+        ),
+        handoff_continuous=True,
+        max_agent_failures=100,
+    )
+    scheduler.discover([Issue(number=101, title="Task 101")])
+
+    scheduler.tick([_available("claude", observed_at=now)], now=now)
+
+    task = scheduler.tasks[0]
+    # The planning-stage diagnostic checkpoint exists and is newer than dispatch...
+    assert task.worktree is not None
+    assert (Path(task.worktree) / ".ai" / "checkpoints" / "101.json").is_file()
+    # ...yet the silent implementation invocation must still escalate for a stale
+    # handoff, exactly as it did before stage checkpoints existed.
+    assert task.status is TaskState.NEEDS_HUMAN
+    assert "did not advance" in (task.needs_human_reason or "")

@@ -250,6 +250,12 @@ def can_recover_from_checkpoint(
     checkpoint = load_checkpoint(worktree_dir, task.issue_number)
     if checkpoint is None or checkpoint.issue_number != task.issue_number:
         return False
+    # #553 review finding: checkpoints captured by evaluation-gate stages (PLANNING,
+    # PLAN_REVIEW) are diagnostic records, not evidence that the subsequent
+    # implementation invocation made progress -- they share one dispatch timestamp and
+    # would otherwise satisfy the implementation freshness check for a silent worker.
+    if checkpoint.stage in {"planning", "plan_review"}:
+        return False
     checkpoint_ts = _parse_handoff_timestamp(checkpoint.timestamp)
     return checkpoint_ts is not None and checkpoint_ts > dispatched_at
 

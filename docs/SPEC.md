@@ -567,6 +567,24 @@ PLAN_REVIEW stage では、レビュー担当エージェントは厳密な JSON
 `WAITING_CAPACITY`を経由してqueue先頭の`READY`へ戻し、同じworktreeを保ったまま利用可能な
 別Agentへ再dispatchする。capacity eventはplan review failureとして`NEEDS_HUMAN`へ昇格させない。
 
+Planning diagnostics (issue #553): every PLANNING / PLAN_REVIEW worker return emits
+`agent_finish` with stage, agent, result kind, fixed failure classification, attempt,
+plan revision count, and duration. A mechanical checkpoint records the latest result;
+configured lifecycle logs retain the preceding attempts within their existing rotation
+limit. Generic PLANNING failures still consume the existing per-agent retry budget;
+at its limit, the durable `needs_human_reason` includes stage, agent, classification,
+and attempt. PLAN_REVIEW failures retain immediate fail-closed escalation. These
+reasons survive state readback/restart and are available through status/explain/task
+detail without another worker invocation. No new operator-only reason code is inferred.
+Checkpoint output and failure reasons use bounded metadata rather than provider output
+or exception messages. Exact known malformed-stream diagnostics are labeled without
+inferring authentication from stderr or changing protocol validation. Normal worker
+failures also retain checkpoints and a reason at the retry limit; successful
+implementation verification retains its existing checkpoint behavior.
+Worker checkpoints identify their producing stage. Planning and plan-review checkpoints
+are diagnostic records and cannot satisfy implementation handoff freshness recovery;
+legacy and verification checkpoints retain their existing recovery behavior.
+
 `execution.pr_review_enabled: true`（デフォルトは `false`）を有効化した場合、`VERIFYING` が成功して `PR_READY` に達した後に自動コードレビューおよびリビジョンループを実行する：
 
 ```text

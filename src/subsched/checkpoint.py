@@ -26,6 +26,10 @@ class MechanicalCheckpoint:
     exit_code: int
     failure_classification: str
     timestamp: str
+    # Stage that produced this checkpoint ("planning", "plan_review", "implementation",
+    # ...). Empty for legacy/verification checkpoints. Used to keep gate-stage
+    # diagnostics from proving implementation progress (#553 review finding).
+    stage: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -47,6 +51,7 @@ class MechanicalCheckpoint:
             exit_code=int(str(data.get("exit_code", 0))),
             failure_classification=str(data.get("failure_classification", "")),
             timestamp=str(data.get("timestamp", "")),
+            stage=str(data.get("stage", "")),
         )
 
 
@@ -56,6 +61,8 @@ def capture_mechanical_checkpoint(
     agent_result: AgentResult,
     exit_code: int = 0,
     test_results: str = "",
+    *,
+    stage: str = "",
 ) -> MechanicalCheckpoint:
     """Capture mechanical state of the worktree after an agent invocation or termination."""
     status = _run_git(worktree_dir, ["status", "--short"])
@@ -82,6 +89,7 @@ def capture_mechanical_checkpoint(
         exit_code=exit_code,
         failure_classification=agent_result.kind.value,
         timestamp=now_ts,
+        stage=stage,
     )
 
 
