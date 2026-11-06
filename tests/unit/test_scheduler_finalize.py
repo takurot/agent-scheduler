@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -439,6 +442,87 @@ def test_ci_monitoring_leaves_pending_unchanged(tmp_path: Path) -> None:
     scheduler.tick([])
 
     assert scheduler.tasks[0].status is TaskState.READY_FOR_REVIEW
+
+
+@pytest.mark.parametrize("final_returncode", [0, 1, 8])
+@pytest.mark.parametrize(
+    "final_state", ["SUCCESS", "FAILURE", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]
+)
+def test_ci_json_pending_is_repolled_until_success_or_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, final_state: str, final_returncode: int
+) -> None:
+    from subsched.cli import _watch_needed
+    from subsched.github.checks import fetch_pr_checks
+
+    responses = iter(
+        [
+            (0, "IN_PROGRESS", "pending"),
+            (0, "QUEUED", "pending"),
+            (0, "WAITING", "pending"),
+            (0, "REQUESTED", "pending"),
+            (
+                final_returncode,
+                final_state,
+                {
+                    "SUCCESS": "pass",
+                    "FAILURE": "fail",
+                    "CANCELLED": "cancel",
+                    "ACTION_REQUIRED": "fail",
+                    "STARTUP_FAILURE": "fail",
+                }[final_state],
+            ),
+        ]
+    )
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        returncode, state, bucket = next(responses)
+        return subprocess.CompletedProcess(
+            argv,
+            returncode,
+            stderr="",
+            stdout=json.dumps(
+                [
+                    {"name": "ubuntu", "state": "SUCCESS", "bucket": "pass"},
+                    {"name": "macos", "state": state, "bucket": bucket},
+                ]
+            ),
+        )
+
+    monkeypatch.setattr(
+        "subsched.github.checks.subprocess",
+        SimpleNamespace(
+            run=run, DEVNULL=subprocess.DEVNULL, TimeoutExpired=subprocess.TimeoutExpired
+        ),
+    )
+    scheduler = _scheduler(tmp_path, push_enabled=True, ci_checker=fetch_pr_checks)
+    scheduler.queue = scheduler.queue.append([_ready_for_review_task(101, pr=7)])
+
+    for _ in range(4):
+        scheduler.tick([])
+        assert scheduler.tasks[0].ci_result == "PENDING"
+        assert scheduler.tasks[0].status is TaskState.READY_FOR_REVIEW
+        assert scheduler.store.load_tasks()[0].ci_result == "PENDING"
+        assert _watch_needed(scheduler, ci_monitoring=True)
+
+    scheduler.tick([])
+    task = scheduler.tasks[0]
+    expected_result = (
+        ("PASS" if final_returncode == 0 else "UNKNOWN") if final_state == "SUCCESS" else "FAIL"
+    )
+    assert task.ci_result == expected_result
+    assert task.status is (
+        TaskState.READY_FOR_REVIEW if final_state == "SUCCESS" else TaskState.NEEDS_HUMAN
+    )
+    assert task.completion_kind is None
+    assert scheduler.store.load_tasks()[0] == task
+    if final_state != "SUCCESS":
+        assert task.needs_human_reason is not None
+        assert "macos" in task.needs_human_reason
+    assert _watch_needed(scheduler, ci_monitoring=True) is (expected_result == "UNKNOWN")
+    assert len(calls) == 5
+    assert all("--json" in argv for argv in calls)
 
 
 def test_ci_monitoring_leaves_unknown_unchanged(tmp_path: Path) -> None:

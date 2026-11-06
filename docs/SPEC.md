@@ -1597,19 +1597,36 @@ PRを持つタスクはCI監視の設定に関係なく、GitHubでmergeを確�
 再判定する。PRなしの既存`COMPLETE`はlocal-only完了として維持する。判定不能な親は
 依存先を解放しない。`TASK_COMPLETED`イベントもPRのmerge証拠にはしない。
 
-### `gh pr checks`応答の検証 (#376)
+### `gh pr checks`応答の検証 (#376, #552)
 
-`gh pr checks`の終了コードとJSON payloadは組として検証する。終了コードは
-`0` = all pass、`1` = some failed、`7` = no checks、`8` = some pendingを正とし、
-それ以外の終了コードはコマンド異常として全体を`UNKNOWN`にする。payload側は
+Schedulerは常に`gh pr checks --json name,state,bucket,description,link`を使う。
+[gh v2.100.0の実装](https://github.com/cli/cli/blob/v2.100.0/pkg/cmd/pr/checks/checks.go#L177-L179)
+はJSON exporterの結果を直ちに返し、通常表示のfailed/pending件数による
+[終了コード判定](https://github.com/cli/cli/blob/v2.100.0/pkg/cmd/pr/checks/checks.go#L233-L239)
+を通らない。従ってJSONの終了コード`0`は取得・出力の成功であり、CI成功の証明ではない。
+[マニュアル](https://cli.github.com/manual/gh_pr_checks)のpending終了コード`8`だけから
+JSONモードの契約を推定しない。この挙動の導入バージョンは特定していない。
+
+終了コード`0`では検証済みpayloadからCI状態を集約する。`IN_PROGRESS`/`QUEUED`などの
+pendingだけ、または成功とpendingの混在は`PENDING`となる。
+[gh v2.100.0のstate定義](https://github.com/cli/cli/blob/v2.100.0/api/queries_pr.go)
+にある`WAITING`/`REQUESTED`も明示的なpendingとして扱う。失敗conclusionの
+`ACTION_REQUIRED`/`STARTUP_FAILURE`は`FAIL`に分類し、許容する終了コード`0`/`1`/`8`で
+human escalationへ届ける。これらもstate/bucket矛盾の検証を省略しない。
+従来の保守的な互換処理として
+`1` = some failed、`8` = some pendingとの整合性検証を維持するが、これは上記バージョンの
+JSONモードがそれらを返すという主張ではない。`7`（no checks）およびその他の終了コードは
+コマンド異常として、payloadが成功・失敗を示しても全体を`UNKNOWN`にする。payload側は
 「全要素が必須キー（非空の`name`）を持つdictであること」「`bucket`と`state`が
 両方存在する場合は同じ分類を指すこと」を検証し、不正要素・必須値欠落・
 state/bucket矛盾が1つでもあれば全体を`UNKNOWN`にする（要素の間引き・黙殺はしない）。
+`bucket`/`state`は少なくとも一方が既知の値であることを必要とし、指定された値が未知・不正な
+場合は、もう一方が既知でも`UNKNOWN`とする。pendingの別要素で不正を隠さない。
 `bucket`が`skipping`（`state`が`SKIPPED`/`NEUTRAL`）のcheckは`PASS`相当として扱い、
 skipされたcheckを含むだけのPRが`UNKNOWN`のまま停滞しないようにする。
-payloadが失敗（`FAIL`）を示す要素を1つでも含む場合は、終了コードや不正な別要素と
+許容する終了コード（`0`/`1`/`8`）でpayloadが失敗（`FAIL`）を示す要素を1つでも含む場合は、終了コードや不正な別要素と
 矛盾していても全体を`FAIL`とする（キャンセルされたCIをhuman escalationへ届けるため。
-`FAIL`が誤って`PASS`になることはない）。それ以外の、要素から導いた全体状態と終了コードの
+`FAIL`が誤って`PASS`になることはない）。それ以外の、要素から導いた全体状態と終了コード`1`/`8`の
 意味との矛盾（例: 終了コード1なのに全要素PASS）は`UNKNOWN`とする。`PASS`への確定は「終了コード0・全要素PASS・
 矛盾なし」が全て成立した場合のみであり、空配列は`PASS`にならない。
 
