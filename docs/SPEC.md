@@ -581,6 +581,9 @@ or exception messages. Exact known malformed-stream diagnostics are labeled with
 inferring authentication from stderr or changing protocol validation. Normal worker
 failures also retain checkpoints and a reason at the retry limit; successful
 implementation verification retains its existing checkpoint behavior.
+Worker checkpoints identify their producing stage. Planning and plan-review checkpoints
+are diagnostic records and cannot satisfy implementation handoff freshness recovery;
+legacy and verification checkpoints retain their existing recovery behavior.
 
 `execution.pr_review_enabled: true`（デフォルトは `false`）を有効化した場合、`VERIFYING` が成功して `PR_READY` に達した後に自動コードレビューおよびリビジョンループを実行する：
 
