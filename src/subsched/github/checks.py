@@ -58,9 +58,18 @@ def _classify_bucket(bucket: str) -> CICheckState | None:
 def _classify_state(state_raw: str) -> CICheckState | None:
     if state_raw in {"success", "pass", "skipped", "neutral"}:
         return CICheckState.PASS
-    if state_raw in {"failure", "fail", "error", "timed_out", "cancelled"}:
+    # Known GitHub failure conclusions must retain failure priority (#552).
+    if state_raw in {
+        "failure",
+        "fail",
+        "error",
+        "timed_out",
+        "cancelled",
+        "action_required",
+        "startup_failure",
+    }:
         return CICheckState.FAIL
-    if state_raw in {"pending", "queued", "in_progress"}:
+    if state_raw in {"pending", "queued", "in_progress", "waiting", "requested"}:
         return CICheckState.PENDING
     return None
 

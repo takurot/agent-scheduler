@@ -444,20 +444,32 @@ def test_ci_monitoring_leaves_pending_unchanged(tmp_path: Path) -> None:
     assert scheduler.tasks[0].status is TaskState.READY_FOR_REVIEW
 
 
-@pytest.mark.parametrize("final_state", ["SUCCESS", "FAILURE", "CANCELLED"])
+@pytest.mark.parametrize("final_returncode", [0, 1, 8])
+@pytest.mark.parametrize(
+    "final_state", ["SUCCESS", "FAILURE", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"]
+)
 def test_ci_json_pending_is_repolled_until_success_or_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, final_state: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, final_state: str, final_returncode: int
 ) -> None:
     from subsched.cli import _watch_needed
     from subsched.github.checks import fetch_pr_checks
 
     responses = iter(
         [
-            ("IN_PROGRESS", "pending"),
-            ("QUEUED", "pending"),
+            (0, "IN_PROGRESS", "pending"),
+            (0, "QUEUED", "pending"),
+            (0, "WAITING", "pending"),
+            (0, "REQUESTED", "pending"),
             (
+                final_returncode,
                 final_state,
-                {"SUCCESS": "pass", "FAILURE": "fail", "CANCELLED": "cancel"}[final_state],
+                {
+                    "SUCCESS": "pass",
+                    "FAILURE": "fail",
+                    "CANCELLED": "cancel",
+                    "ACTION_REQUIRED": "fail",
+                    "STARTUP_FAILURE": "fail",
+                }[final_state],
             ),
         ]
     )
@@ -465,10 +477,10 @@ def test_ci_json_pending_is_repolled_until_success_or_failure(
 
     def run(argv, **kwargs):
         calls.append(argv)
-        state, bucket = next(responses)
+        returncode, state, bucket = next(responses)
         return subprocess.CompletedProcess(
             argv,
-            0,
+            returncode,
             stderr="",
             stdout=json.dumps(
                 [
@@ -487,7 +499,7 @@ def test_ci_json_pending_is_repolled_until_success_or_failure(
     scheduler = _scheduler(tmp_path, push_enabled=True, ci_checker=fetch_pr_checks)
     scheduler.queue = scheduler.queue.append([_ready_for_review_task(101, pr=7)])
 
-    for _ in range(2):
+    for _ in range(4):
         scheduler.tick([])
         assert scheduler.tasks[0].ci_result == "PENDING"
         assert scheduler.tasks[0].status is TaskState.READY_FOR_REVIEW
@@ -496,14 +508,20 @@ def test_ci_json_pending_is_repolled_until_success_or_failure(
 
     scheduler.tick([])
     task = scheduler.tasks[0]
-    assert task.ci_result == ("PASS" if final_state == "SUCCESS" else "FAIL")
+    expected_result = (
+        ("PASS" if final_returncode == 0 else "UNKNOWN") if final_state == "SUCCESS" else "FAIL"
+    )
+    assert task.ci_result == expected_result
     assert task.status is (
         TaskState.READY_FOR_REVIEW if final_state == "SUCCESS" else TaskState.NEEDS_HUMAN
     )
     assert task.completion_kind is None
     assert scheduler.store.load_tasks()[0] == task
-    assert not _watch_needed(scheduler, ci_monitoring=True)
-    assert len(calls) == 3
+    if final_state != "SUCCESS":
+        assert task.needs_human_reason is not None
+        assert "macos" in task.needs_human_reason
+    assert _watch_needed(scheduler, ci_monitoring=True) is (expected_result == "UNKNOWN")
+    assert len(calls) == 5
     assert all("--json" in argv for argv in calls)
 
 

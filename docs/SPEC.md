@@ -1608,7 +1608,12 @@ Schedulerは常に`gh pr checks --json name,state,bucket,description,link`を使
 JSONモードの契約を推定しない。この挙動の導入バージョンは特定していない。
 
 終了コード`0`では検証済みpayloadからCI状態を集約する。`IN_PROGRESS`/`QUEUED`などの
-pendingだけ、または成功とpendingの混在は`PENDING`となる。従来の保守的な互換処理として
+pendingだけ、または成功とpendingの混在は`PENDING`となる。
+[gh v2.100.0のstate定義](https://github.com/cli/cli/blob/v2.100.0/api/queries_pr.go)
+にある`WAITING`/`REQUESTED`も明示的なpendingとして扱う。失敗conclusionの
+`ACTION_REQUIRED`/`STARTUP_FAILURE`は`FAIL`に分類し、許容する終了コード`0`/`1`/`8`で
+human escalationへ届ける。これらもstate/bucket矛盾の検証を省略しない。
+従来の保守的な互換処理として
 `1` = some failed、`8` = some pendingとの整合性検証を維持するが、これは上記バージョンの
 JSONモードがそれらを返すという主張ではない。`7`（no checks）およびその他の終了コードは
 コマンド異常として、payloadが成功・失敗を示しても全体を`UNKNOWN`にする。payload側は

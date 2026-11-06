@@ -301,3 +301,46 @@ def test_legacy_pending_exit_with_pending_payload(monkeypatch: pytest.MonkeyPatc
     )
 
     assert fetch_pr_checks(68).overall_state is CICheckState.PENDING
+
+
+@pytest.mark.parametrize("returncode", [0, 1, 8])
+@pytest.mark.parametrize("include_bucket", [False, True])
+@pytest.mark.parametrize(
+    "state,bucket,expected",
+    [
+        ("ACTION_REQUIRED", "fail", CICheckState.FAIL),
+        ("STARTUP_FAILURE", "fail", CICheckState.FAIL),
+        ("WAITING", "pending", CICheckState.PENDING),
+        ("REQUESTED", "pending", CICheckState.PENDING),
+    ],
+)
+def test_supported_check_states(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    include_bucket: bool,
+    state: str,
+    bucket: str,
+    expected: CICheckState,
+) -> None:
+    element = {"name": "verify", "state": state}
+    if include_bucket:
+        element["bucket"] = bucket
+    _mock_gh(monkeypatch, stdout=json.dumps([element]), returncode=returncode)
+
+    status = fetch_pr_checks(68)
+
+    assert status.checks[0].state is expected
+    if returncode == 1 and expected is CICheckState.PENDING:
+        expected = CICheckState.UNKNOWN
+    assert status.overall_state is expected
+
+
+@pytest.mark.parametrize("returncode", [0, 1, 8])
+@pytest.mark.parametrize("state", ["ACTION_REQUIRED", "STARTUP_FAILURE", "WAITING", "REQUESTED"])
+def test_supported_check_states_with_contradictory_bucket_stay_unknown(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, state: str
+) -> None:
+    payload = json.dumps([_element("verify", "pass", state)])
+    _mock_gh(monkeypatch, stdout=payload, returncode=returncode)
+
+    assert fetch_pr_checks(68).overall_state is CICheckState.UNKNOWN
